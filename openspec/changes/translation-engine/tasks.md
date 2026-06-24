@@ -415,7 +415,7 @@ Deliverable: `pytest tests/unit/test_orchestrator.py` → all pass.
 
 ---
 
-### M1-9 [T] — SrtReader + SrtWriter adapters (par after M1-5)
+### M1-9 [x] — SrtReader + SrtWriter adapters (par after M1-5)
 
 **Depends on**: M1-1, M1-3, M1-4  
 **Spec**: subtitle-translation (all 5 requirements)  
@@ -452,7 +452,7 @@ Deliverable: `pytest tests/integration/test_srt_adapters.py` → all pass.
 
 ---
 
-### M1-10 [T] — SQLiteCheckpointStore adapter (par after M1-5)
+### M1-10 [x] — SQLiteCheckpointStore adapter (par after M1-5)
 
 **Depends on**: M1-1, M1-2  
 **Spec**: job-lifecycle/idempotent-chunk-save; job-lifecycle/status  
@@ -478,7 +478,7 @@ Deliverable: `pytest tests/integration/test_sqlite_checkpoint.py` → all pass.
 
 ---
 
-### M1-11 [T] — AnthropicProvider adapter (par after M1-5)
+### M1-11 [x] — AnthropicProvider adapter (par after M1-5)
 
 **Depends on**: M1-1, M1-2  
 **Spec**: model-provider/Anthropic-adapter; model-provider/graceful-degradation; model-provider/retry-backoff  
