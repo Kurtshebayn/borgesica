@@ -265,7 +265,7 @@ Deliverable: `pytest tests/unit/test_chunking.py` → all pass.
 
 ---
 
-### M1-5 [T] — ContextManager (system prompt assembly)
+### M1-5 [x] — ContextManager (system prompt assembly)
 
 **Depends on**: M1-1, M1-2  
 **Spec**: context-continuity/glossary-injected; context-continuity/rolling-summary; context-continuity/neutral-Spanish; cost-control/prompt-caching; translation-quality/philosophy-prompt  
@@ -305,7 +305,7 @@ After M1-5 is green, M1-6 through M1-9 may be developed in parallel (they share 
 
 ---
 
-### M1-6 [T] — CostEstimator (par after M1-5)
+### M1-6 [x] — CostEstimator (par after M1-5)
 
 **Depends on**: M1-5  
 **Spec**: cost-control/estimate_cost; cost-control/quality_mode; cost-control/cost-tracked-per-chunk  
@@ -335,7 +335,7 @@ Deliverable: `pytest tests/unit/test_cost.py` → all pass.
 
 ---
 
-### M1-7 [T] — GlossaryExtractor (LLM default) (par after M1-5)
+### M1-7 [x] — GlossaryExtractor (LLM default) (par after M1-5)
 
 **Depends on**: M1-1, M1-2  
 **Spec**: context-continuity/glossary-seeded; context-continuity/mid-run-additions  
