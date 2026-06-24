@@ -1,0 +1,175 @@
+"""Tests for borgesica.domain.markup — M1-3 (strict TDD).
+
+All test scenarios driven from spec: subtitle-translation/inline-tags.
+"""
+from __future__ import annotations
+
+import pytest
+
+from borgesica.domain.markup import reinsert, strip, validate_tags
+
+
+# ---------------------------------------------------------------------------
+# strip()
+# ---------------------------------------------------------------------------
+
+
+def test_strip_single_italic_returns_plain_and_two_tags() -> None:
+    """Spec scenario: single italic tag round-trips correctly (strip half)."""
+    plain, tags = strip("The <i>quick</i> fox.")
+    assert plain == "The quick fox."
+    assert len(tags) == 2
+    tag_strs = [t for t, _pos in tags]
+    assert "<i>" in tag_strs
+    assert "</i>" in tag_strs
+
+
+def test_strip_records_positions_for_italic() -> None:
+    """Tags positions represent character offsets in the stripped plain text."""
+    plain, tags = strip("The <i>quick</i> fox.")
+    # "<i>" opens at position 4 in plain "The quick fox."
+    # "</i>" closes at position 9 in plain "The quick fox."
+    tag_dict = {t: pos for t, pos in tags}
+    assert tag_dict["<i>"] == 4
+    assert tag_dict["</i>"] == 9
+
+
+def test_strip_no_tags_returns_unchanged_text_and_empty_list() -> None:
+    """Text with no tags round-trips unchanged."""
+    plain, tags = strip("Hello world.")
+    assert plain == "Hello world."
+    assert tags == []
+
+
+def test_strip_bold_tag() -> None:
+    plain, tags = strip("<b>Bold</b> text.")
+    assert plain == "Bold text."
+    assert len(tags) == 2
+    tag_strs = [t for t, _pos in tags]
+    assert "<b>" in tag_strs
+    assert "</b>" in tag_strs
+
+
+def test_strip_underline_tag() -> None:
+    plain, tags = strip("Some <u>underlined</u> word.")
+    assert plain == "Some underlined word."
+    assert len(tags) == 2
+
+
+def test_strip_em_tag() -> None:
+    plain, tags = strip("Say <em>hello</em> now.")
+    assert plain == "Say hello now."
+    assert len(tags) == 2
+
+
+def test_strip_strong_tag() -> None:
+    plain, tags = strip("A <strong>very</strong> strong word.")
+    assert plain == "A very strong word."
+    assert len(tags) == 2
+
+
+def test_strip_nested_tags_preserve_order() -> None:
+    """Nested tags preserve order (outer open, inner open, inner close, outer close)."""
+    plain, tags = strip("<b><i>text</i></b>")
+    assert plain == "text"
+    assert len(tags) == 4
+    tag_strs = [t for t, _pos in tags]
+    assert tag_strs[0] == "<b>"
+    assert tag_strs[1] == "<i>"
+    assert tag_strs[2] == "</i>"
+    assert tag_strs[3] == "</b>"
+
+
+def test_strip_multiple_tags_counted_correctly() -> None:
+    """Source with 2 opening + 2 closing tags (4 total) for validate_tags spec."""
+    source = "<b>Bold</b> and <i>italic</i>."
+    plain, tags = strip(source)
+    assert plain == "Bold and italic."
+    assert len(tags) == 4
+
+
+def test_strip_span_tag() -> None:
+    """Spec: <span ...> and </span> supported."""
+    plain, tags = strip('<span class="x">Hello</span> world.')
+    assert plain == "Hello world."
+    assert len(tags) == 2
+    tag_strs = [t for t, _pos in tags]
+    assert any(t.startswith("<span") for t in tag_strs)
+    assert "</span>" in tag_strs
+
+
+def test_strip_anchor_tag() -> None:
+    """Spec: <a ...> and </a> supported."""
+    plain, tags = strip('<a href="x">link</a> text.')
+    assert plain == "link text."
+    assert len(tags) == 2
+
+
+# ---------------------------------------------------------------------------
+# reinsert()
+# ---------------------------------------------------------------------------
+
+
+def test_reinsert_single_italic_produces_valid_tags() -> None:
+    """Spec scenario: single italic tag round-trips correctly (reinsert half)."""
+    source = "The <i>quick</i> fox."
+    _plain_src, tags = strip(source)
+    # Simulate translation with plain text (no tags in model output)
+    result = reinsert("El veloz zorro.", tags, "The quick fox.")
+    assert "<i>" in result
+    assert "</i>" in result
+
+
+def test_reinsert_no_tags_returns_translation_unchanged() -> None:
+    """Text with no tags round-trips unchanged."""
+    result = reinsert("El mundo.", [], "The world.")
+    assert result == "El mundo."
+
+
+def test_reinsert_preserves_tag_count() -> None:
+    """After reinsert, tag count should match original."""
+    source = "<b>Bold</b> and <i>italic</i>."
+    plain_src, tags = strip(source)
+    translated = "Negritas y cursiva."
+    result = reinsert(translated, tags, plain_src)
+    # 4 tags total: <b> </b> <i> </i>
+    import re
+
+    found = re.findall(r"</?(?:b|i|u|em|strong|span[^>]*|a[^>]*)>", result)
+    assert len(found) == 4
+
+
+# ---------------------------------------------------------------------------
+# validate_tags()
+# ---------------------------------------------------------------------------
+
+
+def test_validate_tags_true_when_counts_match() -> None:
+    """Spec: validate_tags returns True when tag counts match."""
+    original = "The <i>quick</i> fox."
+    result = "El <i>veloz</i> zorro."
+    assert validate_tags(original, result) is True
+
+
+def test_validate_tags_false_when_counts_differ() -> None:
+    """Spec: validate_tags returns False when they differ."""
+    original = "The <i>quick</i> fox."
+    result = "El veloz zorro."  # missing tags
+    assert validate_tags(original, result) is False
+
+
+def test_validate_tags_no_tags_both_sides() -> None:
+    """No tags on either side → True."""
+    assert validate_tags("Hello.", "Hola.") is True
+
+
+def test_validate_tags_multiple_tag_types() -> None:
+    original = "<b>Bold</b> and <i>italic</i>."
+    result = "<b>Negrita</b> e <i>cursiva</i>."
+    assert validate_tags(original, result) is True
+
+
+def test_validate_tags_extra_tag_in_result_is_false() -> None:
+    original = "<i>word</i>"
+    result = "<i>word</i><b>extra</b>"
+    assert validate_tags(original, result) is False
