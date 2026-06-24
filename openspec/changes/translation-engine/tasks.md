@@ -357,7 +357,7 @@ Deliverable: `pytest tests/unit/test_glossary.py` → all pass.
 
 ---
 
-### M1-8 [T] — TranslationOrchestrator (core loop) (par after M1-5)
+### M1-8 [x] — TranslationOrchestrator (core loop) (par after M1-5)
 
 **Depends on**: M1-5, M1-6, M1-7  
 **Spec**: job-lifecycle (all scenarios); context-continuity (all); cost-control (all); translation-quality/quality_mode; subtitle-translation/tag-mismatch-retry  
