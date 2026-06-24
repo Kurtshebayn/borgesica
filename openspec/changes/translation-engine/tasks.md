@@ -512,7 +512,7 @@ Deliverable: `pytest tests/unit/test_anthropic_provider.py` → all pass. Integr
 
 ---
 
-### M1-12 [T] — TranslatorEngine public API + DI wiring (seq — requires M1-8 through M1-11)
+### M1-12 [x] — TranslatorEngine public API + DI wiring (seq — requires M1-8 through M1-11)
 
 **Depends on**: M1-8, M1-9, M1-10, M1-11  
 **Spec**: job-lifecycle (all); context-continuity/glossary-seeded; context-continuity/update_glossary; cost-control/estimate_cost; model-provider/model-agnostic-selection  
@@ -547,7 +547,7 @@ Deliverable: `pytest tests/unit/test_engine.py` → all pass.
 
 ---
 
-### M1-13 [I] — Thin CLI (borgesica command)
+### M1-13 [x] — Thin CLI (borgesica command)
 
 **Depends on**: M1-12  
 **Spec**: (implied — user-facing entry point)  
