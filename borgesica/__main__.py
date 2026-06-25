@@ -282,6 +282,12 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Exit code (0 = success, non-zero = error).
     """
+    # Windows consoles default to cp1252, which raises UnicodeEncodeError on
+    # non-ASCII output (arrows, accented Spanish). Force UTF-8 where supported.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8")
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
