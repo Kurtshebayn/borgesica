@@ -17,12 +17,15 @@ by splitting on "\n\n" and aligning positionally with the original cue metadata.
 """
 from __future__ import annotations
 
+import logging
 import textwrap
 from datetime import timedelta
 
 import srt
 
 from borgesica.domain.models import Chunk
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Public reflow function (also used by tests directly)
@@ -63,7 +66,24 @@ def reflow(text: str, line_length: int) -> str:
 
     # 3-line fallback: use textwrap to break into chunks of line_length.
     # textwrap may produce more than 3 lines for very long text; cap at 3.
+    #
+    # If any single word is longer than line_length it CANNOT be split without
+    # hyphenation, so we allow that one line to overflow and log a warning.
+    words = text.split()
+    overlong_tokens = [w for w in words if len(w) > line_length]
+    if overlong_tokens:
+        logger.warning(
+            "reflow: token(s) exceed line_length=%d (overlong: %s); "
+            "line will overflow — hyphenation not supported.",
+            line_length,
+            ", ".join(repr(t) for t in overlong_tokens),
+        )
+
     lines = textwrap.wrap(text, width=line_length)
+    if not lines:
+        # textwrap returned nothing (e.g. all-whitespace input)
+        return text.strip()
+
     if len(lines) <= 3:
         return "\n".join(lines)
 

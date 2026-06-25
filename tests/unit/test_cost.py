@@ -255,3 +255,72 @@ def test_estimate_preserves_model_field():
 
     est = estimator.estimate(job, chunks, config)
     assert est.model == "claude-sonnet-4-5"
+
+
+# ---------------------------------------------------------------------------
+# W-2: CostEstimate.cached reflects static-block caching eligibility
+# ---------------------------------------------------------------------------
+
+
+class BigTokenProvider(FakeTranslationProvider):
+    """Provider whose count_tokens always returns 2000 (≥ 1024 → cached=True)."""
+
+    def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
+        return 2000
+
+
+class SmallTokenProvider(FakeTranslationProvider):
+    """Provider whose count_tokens always returns 100 (< 1024 → cached=False)."""
+
+    def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
+        return 100
+
+
+def test_cached_true_when_static_block_meets_min():
+    """cached=True when static-block token count ≥ 1024 (Anthropic prompt-caching min)."""
+    from borgesica.domain.context import ContextManager
+    from borgesica.domain.cost import CostEstimator
+
+    provider = BigTokenProvider()
+    context_manager = ContextManager(provider=provider)
+    estimator = CostEstimator(provider=provider, context_manager=context_manager)
+
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=2)
+    chunks = [make_chunk(i) for i in range(2)]
+
+    est = estimator.estimate(job, chunks, config)
+    assert est.cached is True, f"Expected cached=True (token count=2000 ≥ 1024), got {est.cached}"
+
+
+def test_cached_false_when_static_block_below_min():
+    """cached=False when static-block token count < 1024."""
+    from borgesica.domain.context import ContextManager
+    from borgesica.domain.cost import CostEstimator
+
+    provider = SmallTokenProvider()
+    context_manager = ContextManager(provider=provider)
+    estimator = CostEstimator(provider=provider, context_manager=context_manager)
+
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=2)
+    chunks = [make_chunk(i) for i in range(2)]
+
+    est = estimator.estimate(job, chunks, config)
+    assert est.cached is False, f"Expected cached=False (token count=100 < 1024), got {est.cached}"
+
+
+def test_cached_false_when_no_context_manager():
+    """cached=False (backward compat) when context_manager is not provided."""
+    from borgesica.domain.cost import CostEstimator
+
+    provider = BigTokenProvider()  # big tokens, but no context_manager injected
+    estimator = CostEstimator(provider=provider)  # no context_manager
+
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=2)
+    chunks = [make_chunk(i) for i in range(2)]
+
+    est = estimator.estimate(job, chunks, config)
+    # Without context_manager, cached MUST stay False (backward compat)
+    assert est.cached is False, f"Expected cached=False (no context_manager), got {est.cached}"

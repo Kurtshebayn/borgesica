@@ -98,16 +98,31 @@ class TestReflow:
         assert " ".join(result.split()) == " ".join(text.split())
 
     def test_three_line_fallback(self):
-        """When 2 lines not possible, fall back to 3 lines."""
-        # 90 chars, word boundaries not clean for 2 lines of ≤42
-        # craft text that forces 3 lines
-        text = "supercalifragilistic expialidocious extraordinarily magnificent spectacular"
-        result = reflow(text, line_length=42)
+        """When 2 lines are not possible, reflow must produce EXACTLY 3 lines.
+
+        Construct text that provably cannot fit into 2 lines of ≤ line_length:
+          - line_length = 20
+          - five words of 7 chars each = "aaaaaaa bbbbbbbb ccccccc ddddddd eeeeeee"
+            total = 5×7 + 4 spaces = 39 chars
+          - No 2-line split works: the shortest first-line is one word (7 chars)
+            leaving 4 words = 7+1+7+1+7+1+7 = 31 chars > 20; the longest
+            first-line is four words = 7+1+7+1+7+1+7 = 31 > 20.
+            → impossible to split into 2 lines of ≤ 20 → MUST fall back to 3.
+        """
+        # Five 7-char words; no 2-line split can satisfy line_length=20
+        text = "aaaaaaa bbbbbbb ccccccc ddddddd eeeeeee"
+        result = reflow(text, line_length=20)
         lines = result.split("\n")
-        # Must be 2 or 3 lines — never 4+
-        assert 1 <= len(lines) <= 3
+
+        # Must be EXACTLY 3 lines (not 1 or 2, which would mean 2-line split worked
+        # when it shouldn't, and not 4+ which would violate the spec)
+        assert len(lines) == 3, (
+            f"Expected exactly 3 lines but got {len(lines)}: {lines!r}"
+        )
+        # Each line must be ≤ line_length (except potentially an over-long single word
+        # which S-3 handles; here all words are exactly 7 chars ≤ 20)
         for line in lines:
-            assert len(line) <= 42
+            assert len(line) <= 20, f"Line {line!r} exceeds line_length=20"
 
     def test_never_four_lines(self):
         """Even for long text, output has ≤ 3 lines."""
@@ -123,6 +138,57 @@ class TestReflow:
         lines = result.split("\n")
         for line in lines:
             assert len(line) <= 30
+
+    def test_overlong_single_word_never_produces_four_lines(self):
+        """A single token longer than line_length must NOT cause 4+ lines.
+
+        Spec S-3: reflow is graceful when a single word exceeds line_length.
+        The over-long word is allowed to overflow on its own line (cannot be
+        split without hyphenation), but the total output must still be ≤ 3 lines.
+        A warning is logged; no exception is raised.
+        """
+        import logging
+
+        # A single word of 50 chars with line_length=20: textwrap produces
+        # ['supercalifragilistic...'] (one over-long line) — must stay ≤ 3 lines.
+        overlong_word = "a" * 50  # 50 chars, line_length=20 → cannot split
+        text = f"{overlong_word} short end"
+
+        # Should not raise even with an overlong token
+        result = reflow(text, line_length=20)
+        lines = result.split("\n")
+
+        assert len(lines) <= 3, (
+            f"reflow produced {len(lines)} lines (> 3) with over-long token: {lines!r}"
+        )
+
+    def test_overlong_single_word_logs_warning(self):
+        """reflow logs a WARNING when a single token exceeds line_length."""
+        import logging
+
+        overlong_word = "b" * 50
+        text = f"{overlong_word} short"
+
+        with self._assert_logs_warning():
+            reflow(text, line_length=20)
+
+    @staticmethod
+    def _assert_logs_warning():
+        """Context manager that asserts at least one WARNING was emitted."""
+        import logging
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            with __import__("unittest.mock", fromlist=["patch"]).patch(
+                "borgesica.adapters.writers.srt_writer.logger"
+            ) as mock_logger:
+                yield mock_logger
+                assert mock_logger.warning.called, (
+                    "Expected a logger.warning() call for over-long token"
+                )
+
+        return _ctx()
 
 
 # ---------------------------------------------------------------------------

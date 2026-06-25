@@ -1,5 +1,5 @@
 change: translation-engine
-phase: tasks
-status: draft
+phase: verify
+status: pass-with-warnings
 artifact_store: openspec
 execution_mode: interactive

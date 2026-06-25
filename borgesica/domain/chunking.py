@@ -68,7 +68,7 @@ class SrtChunker:
                     index=batch_index,
                     source_text=source_text,
                     status=ChunkStatus.PENDING,
-                    meta={"cue_batches": cue_batches},
+                    meta={"cue_batches": cue_batches, "line_length": config.line_length},
                 )
             )
 

@@ -576,6 +576,45 @@ Also create `MODELS.md` in project root (spec: model-provider/documentation):
 
 ---
 
+## M1-FIX — M1 Verify Fix-Up (W-1, W-2, S-1, S-3, W-3)
+
+These tasks address the sdd-verify findings reported after M1 completion.
+S-2 is explicitly deferred to M4/cost-control — DO NOT implement here.
+
+### M1-FIX-1 [x] — W-1: SrtChunker must store line_length in chunk meta
+
+**Fixed**: `borgesica/domain/chunking.py` — `SrtChunker.chunk()` now stores `config.line_length` in each batch chunk's meta dict so `SrtWriter` reads the configured value instead of the hardcoded 42.
+**TDD**: Full-pipeline integration test added to `tests/integration/test_engine_e2e.py` (`test_engine_e2e_line_length_propagates_through_pipeline`). Test confirmed RED (all 6 cues used 42-char lines despite `line_length=30`) before fix, GREEN after.
+
+---
+
+### M1-FIX-2 [x] — W-2: CostEstimate.cached must reflect static-block caching eligibility
+
+**Fixed**: `borgesica/domain/cost.py` — `CostEstimator.__init__` now accepts an optional `context_manager: ContextManager` param. When present, `estimate()` calls `context_manager.get_static_block(config)` → `provider.count_tokens()` and sets `cached=True` iff count ≥ 1024 (Anthropic minimum). Backward compat: omitting `context_manager` keeps `cached=False`.
+`borgesica/api.py` updated to pass `context_manager=self._ctx` to `CostEstimator`.
+**TDD**: 3 new tests in `tests/unit/test_cost.py`: `test_cached_true_when_static_block_meets_min`, `test_cached_false_when_static_block_below_min`, `test_cached_false_when_no_context_manager`. All confirmed RED before fix, GREEN after.
+
+---
+
+### M1-FIX-3 [x] — S-1: Strengthen test_three_line_fallback to assert exactly 3 lines
+
+**Fixed**: `tests/integration/test_srt_adapters.py` — `test_three_line_fallback` now uses text that provably cannot fit in 2 lines (5 seven-char words with line_length=20) and asserts `len(lines) == 3` exactly (not `1 <= len(lines) <= 3`). The old text produced 2 lines, making the 3-line fallback path untested.
+
+---
+
+### M1-FIX-4 [x] — S-3: reflow graceful with over-long single token
+
+**Fixed**: `borgesica/adapters/writers/srt_writer.py` — added module-level `logger = logging.getLogger(__name__)`. When a single token exceeds `line_length`, `reflow()` now logs a WARNING before the 3-line fallback. The 3-line cap (NEVER 4+) was already enforced; this adds observability.
+**TDD**: 2 new tests: `test_overlong_single_word_never_produces_four_lines` (confirms ≤3 lines) and `test_overlong_single_word_logs_warning` (confirms warning is emitted). Both confirmed RED → GREEN.
+
+---
+
+### M1-FIX-5 [x] — W-3: Document Tier-2 intentional deviation in AnthropicProvider
+
+**Fixed**: `borgesica/adapters/providers/anthropic_provider.py` — module docstring updated with explicit TIER-1 / TIER-2 (INTENTIONALLY SKIPPED) / TIER-3 labels and a clear rationale for why Tier-2 (Anthropic JSON mode) is omitted in favour of Tier-1 (tool-use) + Tier-3 (text-JSON-parse fallback). No code change.
+
+---
+
 ## M2 — EPUB Support
 
 M2 tasks may begin as soon as M1-12 is green. M2-1 and M2-2 are parallel; M2-3 requires both.

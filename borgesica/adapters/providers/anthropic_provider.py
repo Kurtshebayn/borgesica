@@ -3,11 +3,26 @@
 Implements the TranslationProvider Protocol using the Anthropic SDK.
 
 Structured-output strategy (adapter-internal, domain never sees it):
-  PRIMARY: Tool-use (function-calling) with TranslationUnit.model_json_schema()
-    — Anthropic returns a tool_use content block, we parse block.input directly.
-  FALLBACK: If the response has no tool_use block (e.g., model returns plain text),
-    attempt to parse the text content as JSON → TranslationUnit.model_validate().
-    This fallback is retried up to MAX_RETRIES times total.
+
+  TIER-1 (PRIMARY): Tool-use (function-calling) with TranslationUnit.model_json_schema().
+    Anthropic returns a tool_use content block; we parse block.input directly.
+    This is the preferred approach: it is reliable, testable, and avoids extra
+    dependencies.
+
+  TIER-2 (INTENTIONALLY SKIPPED): Anthropic JSON mode (constrained decoding /
+    "response_format": {"type": "json_object"}).
+    Spec references a three-tier fallback (Tier-1 tool-calling → Tier-2 JSON mode
+    → Tier-3 text-JSON-parse).  Tier-2 is deliberately NOT implemented here.
+    Reason: Anthropic's native tool-use (Tier-1) is more reliable than JSON mode
+    for structured output — it enforces schema at the API level and is already
+    well-tested.  Adding JSON mode as an intermediate tier would increase complexity
+    with no practical benefit: the only case where Tier-1 fails (model returns plain
+    text) is handled by Tier-3 (text-JSON-parse with retry), which is a sufficient
+    safety net for malformed responses.  Tier-2 can be added in a future milestone
+    if real-world testing shows Tier-1 + Tier-3 is insufficient.
+
+  TIER-3 (FALLBACK): Plain text → strip markdown fences → JSON parse →
+    TranslationUnit.model_validate().  Retried up to MAX_RETRIES times.
 
 Retry policy:
   - 429 (rate limit): honor Retry-After header, then exponential backoff + jitter.

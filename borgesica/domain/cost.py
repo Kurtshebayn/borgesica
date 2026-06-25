@@ -19,6 +19,8 @@ whether to apply it and what discount to apply at runtime.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from borgesica.domain.models import (
     Chunk,
     ChunkStatus,
@@ -27,6 +29,9 @@ from borgesica.domain.models import (
     JobConfig,
 )
 from borgesica.domain.ports import TranslationProvider
+
+if TYPE_CHECKING:
+    from borgesica.domain.context import ContextManager
 
 # Estimated output tokens per chunk call when we don't have a real measurement.
 # This is a conservative default: translations are typically similar length to
@@ -49,8 +54,13 @@ class CostEstimator:
                   No translate() calls are made here.
     """
 
-    def __init__(self, provider: TranslationProvider) -> None:  # type: ignore[type-arg]
+    def __init__(
+        self,
+        provider: TranslationProvider,  # type: ignore[type-arg]
+        context_manager: "ContextManager | None" = None,
+    ) -> None:
         self._provider = provider
+        self._context_manager = context_manager
 
     def estimate(
         self,
@@ -76,6 +86,14 @@ class CostEstimator:
 
         NOTE: Prompt cache-write cost is NOT included. See module docstring.
         """
+        # Determine whether the static instruction block qualifies for prompt caching.
+        # This is independent of whether there are pending chunks.
+        cached: bool = False
+        if self._context_manager is not None:
+            static_block = self._context_manager.get_static_block(config)
+            token_count = self._provider.count_tokens(static_block, config.model)
+            cached = token_count >= 1024  # Anthropic prompt-cache minimum
+
         pending = [c for c in chunks if c.status != ChunkStatus.DONE]
 
         if not pending:
@@ -84,7 +102,7 @@ class CostEstimator:
                 output_tokens=0,
                 usd=0.0,
                 model=config.model,
-                cached=False,
+                cached=cached,
                 within_budget=True,
             )
 
@@ -119,6 +137,6 @@ class CostEstimator:
             output_tokens=total_output,
             usd=usd,
             model=config.model,
-            cached=False,
+            cached=cached,
             within_budget=within_budget,
         )
