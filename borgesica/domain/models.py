@@ -128,6 +128,8 @@ class JobConfig(BaseModel):
     line_length: int = 42  # SRT reflow limit
     glossary_strategy: Literal["llm", "spacy", "hybrid", "none"] = "llm"
     quality_mode: Literal["fast", "reflective"] = "fast"
+    # EPUB/PDF prose token budget per chunk — distinct from chunk_size (SRT cue-batch control).
+    prose_chunk_tokens: int = 800
 
 
 class Job(BaseModel):

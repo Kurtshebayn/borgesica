@@ -163,14 +163,6 @@ def test_empty_cues_returns_empty_list() -> None:
 
 
 # ---------------------------------------------------------------------------
-# chunk_prose stub raises NotImplementedError
+# chunk_prose (M2-2) — stub test removed; full behaviour tested in
+# tests/unit/test_prose_chunker.py
 # ---------------------------------------------------------------------------
-
-
-def test_chunk_prose_stub_raises_not_implemented() -> None:
-    from borgesica.domain.chunking import chunk_prose
-
-    import pytest
-
-    with pytest.raises(NotImplementedError):
-        chunk_prose([], make_config(chunk_size=25), None)  # type: ignore[arg-type]

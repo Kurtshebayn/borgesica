@@ -131,6 +131,18 @@ def test_job_config_defaults() -> None:
     assert config.quality_mode == "fast"
 
 
+def test_job_config_prose_chunk_tokens_default() -> None:
+    """M2-2: prose_chunk_tokens is a distinct field with default 800 (not reusing chunk_size)."""
+    from borgesica.domain.models import JobConfig, SourceType
+
+    config = JobConfig(source_type=SourceType.SRT, model="claude-haiku-4-5")
+    # New field must exist and default to 800.
+    assert config.prose_chunk_tokens == 800
+    # Must be independent of chunk_size (the SRT cue-batch control).
+    assert config.chunk_size == 25
+    assert config.prose_chunk_tokens != config.chunk_size
+
+
 # --- Job ---
 
 def test_job_accepts_all_required_fields() -> None:

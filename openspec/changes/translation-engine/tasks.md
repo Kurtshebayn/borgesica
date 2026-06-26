@@ -680,7 +680,7 @@ Deliverable: `pytest tests/integration/test_epub_reader.py` → all pass.
 
 ---
 
-### M2-2 [T] — Prose chunker
+### M2-2 [x] — Prose chunker
 
 **Depends on**: M1-4  
 **Spec**: book-translation/prose-chunking  
