@@ -657,7 +657,7 @@ Deliverable: full suite green; the cue-spanning regression (test 6) confirmed RE
 
 ---
 
-### M2-1 [T] — EpubReader adapter
+### M2-1 [x] — EpubReader adapter
 
 **Depends on**: M1-12  
 **Spec**: book-translation/EPUB-reader; book-translation/spine-order; book-translation/images  
