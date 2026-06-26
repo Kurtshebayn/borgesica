@@ -273,6 +273,23 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
+def _reconfigure_streams(*streams: Any) -> None:
+    """Reconfigure text streams to use UTF-8 encoding where supported.
+
+    On Windows, console streams default to cp1252, which raises UnicodeEncodeError
+    when printing non-ASCII characters (e.g. the progress arrow →, accented Spanish).
+    This function calls stream.reconfigure(encoding='utf-8') on any stream that
+    supports it (TextIOWrapper-like objects with a reconfigure() method).
+
+    Args:
+        *streams: One or more text streams to reconfigure (e.g. sys.stdout, sys.stderr).
+                  Streams that do not have reconfigure() are silently skipped.
+    """
+    for _stream in streams:
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse args and dispatch to subcommand handlers.
 
@@ -284,9 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     # Windows consoles default to cp1252, which raises UnicodeEncodeError on
     # non-ASCII output (arrows, accented Spanish). Force UTF-8 where supported.
-    for _stream in (sys.stdout, sys.stderr):
-        if hasattr(_stream, "reconfigure"):
-            _stream.reconfigure(encoding="utf-8")
+    _reconfigure_streams(sys.stdout, sys.stderr)
 
     parser = _build_parser()
     args = parser.parse_args(argv)

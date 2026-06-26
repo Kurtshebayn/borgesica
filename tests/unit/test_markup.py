@@ -173,3 +173,32 @@ def test_validate_tags_extra_tag_in_result_is_false() -> None:
     original = "<i>word</i>"
     result = "<i>word</i><b>extra</b>"
     assert validate_tags(original, result) is False
+
+
+# ---------------------------------------------------------------------------
+# M2-0 Test 7 — strip/reinsert/validate_tags behavior unchanged (no regression)
+# reinsert is now fallback-only but its behavior is identical.
+# ---------------------------------------------------------------------------
+
+
+def test_m2_0_strip_reinsert_validate_roundtrip_unchanged() -> None:
+    """M2-0: strip/reinsert/validate_tags behavior is UNCHANGED — they are now
+    fallback-only, but every existing guarantee still holds.
+    Spec: subtitle-translation/inline-tags-in-text (reinsert is fallback-only from M2-0).
+    See NOTE in borgesica/domain/markup.py: reinsert is fallback-only; M4 will harden
+    the placement heuristic.
+    """
+    # Round-trip: strip then reinsert must preserve tag count
+    source = "We don't have <i>much</i> time"
+    plain, tags = strip(source)
+    assert plain == "We don't have much time"
+    assert len(tags) == 2  # <i> and </i>
+
+    # Simulate a translated plain text (as fallback would do)
+    translated_plain = "No tenemos mucho tiempo"
+    reinserted = reinsert(translated_plain, tags, plain)
+
+    # validate_tags must pass: source has 2 tags, reinserted must also have 2 tags
+    assert validate_tags(source, reinserted) is True, (
+        "Fallback path: reinsert must produce same tag count as source"
+    )

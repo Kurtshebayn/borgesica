@@ -99,9 +99,9 @@ Then the chunks from chapter A and the chunks from chapter B SHALL not be merged
 
 ---
 
-### Requirement: inline EPUB tags are preserved with strip/reinsert discipline
+### Requirement: inline EPUB tags are preserved in place (tags-in-text), with strip/reinsert fallback
 
-The same `markup.strip` / `markup.reinsert` / `markup.validate_tags` pipeline used for SRT SHALL be applied to EPUB text nodes. Inline formatting tags (`<em>`, `<strong>`, `<span>`, `<a>`, and similar inline HTML elements) SHALL be stripped before the provider call and reinserted after. Tag count mismatch triggers the same retry-then-FAILED flow as SRT (≤2 retries, then `ChunkStatus.FAILED` + `JobStatus.PAUSED`).
+EPUB text nodes SHALL use the SAME tag-handling pipeline as SRT (see subtitle-translation): inline formatting tags (`<em>`, `<strong>`, `<span>`, `<a>`, and similar inline HTML elements) are kept IN the text sent to the provider, the model is instructed to carry them with the translated words, and `markup.validate_tags` checks the count. On mismatch the orchestrator retries (≤2), then falls back to deterministic `markup.strip` → translate-plain → `markup.reinsert`; only if the fallback also fails does the chunk become `ChunkStatus.FAILED` and the job `JobStatus.PAUSED`. Because EPUB prose is markup-dense, this shared behavior is the reason the M2 tag-rework (M2-0) is a prerequisite for the EPUB reader/writer.
 
 #### Scenario: EPUB italic tag round-trips
 
@@ -109,7 +109,7 @@ Given an EPUB text node `"A <em>critical</em> point."`,
 
 When the markup pipeline processes it through a translation cycle,
 
-Then the output SHALL contain exactly 2 inline tags (`<em>` and `</em>`) in valid positions, and the surrounding translated text SHALL be coherent Spanish.
+Then the output SHALL contain exactly 2 inline tags (`<em>` and `</em>`) wrapping the translated equivalent word(s), and the surrounding translated text SHALL be coherent Spanish.
 
 ---
 

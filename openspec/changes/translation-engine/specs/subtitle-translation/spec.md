@@ -83,33 +83,49 @@ Then the result SHALL be exactly 1 chunk containing that cue.
 
 ---
 
-### Requirement: inline tags are stripped before translation and reinserted after
+### Requirement: inline tags are preserved in place (tags-in-text), with deterministic strip/reinsert as fallback
 
-The `markup` module SHALL strip inline SRT tags (`<i>`, `<b>`, `<u>`, and their closing forms) from `source_text` before sending to the provider. After receiving the translated plain text, it SHALL reinsert stripped tags at their original character positions (by mapping tag positions relative to surrounding plain-text characters). The tag count in the reassembled output SHALL equal the tag count in the original.
+The engine SHALL preserve inline SRT tags (`<i>`, `<b>`, `<u>`, and their closing forms) by keeping them IN the `source_text` sent to the provider and instructing the model — via the system prompt — to carry each tag with the word(s) it wraps, preserving tag count and nesting. The `markup` module SHALL validate the result with `markup.validate_tags` (tag count in output equals tag count in source). On mismatch the orchestrator SHALL retry the provider call (≤2 additional attempts). If validation still fails after retries, the engine SHALL fall back to the deterministic `markup.strip` → translate-plain → `markup.reinsert` path. Only if the deterministic fallback also fails validation SHALL the chunk be marked FAILED and the job PAUSED.
 
-#### Scenario: single italic tag round-trips correctly
+Rationale: proportional `reinsert` placed tags by character fraction, which drifts across multi-cue chunks (a tag opened in one cue closed in the next — reproduced in the 2026-06-25 live test). Keeping tags in the text lets the model anchor them to the translated words. `strip`/`reinsert` is retained as a deterministic fallback for weak/local models; hardening that fallback's placement heuristic is tracked for M4.
+
+#### Scenario: tags travel with the translated words (primary path)
 
 Given `source_text = "The <i>quick</i> fox."`,
 
-When `markup.strip` is called, it returns `("The quick fox.", [(<i>, pos=4), (</i>, pos=9)])`.
+When the chunk is translated with tags kept in the text,
 
-When `markup.reinsert` is called with translation `"El <i>veloz</i> zorro."` (model respects position semantics) or with plain text `"El veloz zorro."` and the tag list,
+Then the output SHALL contain exactly 2 tags (`<i>` and `</i>`) wrapping the translated equivalent word (e.g. `"El zorro <i>rápido</i>."`), and `markup.strip` SHALL NOT have removed the tags before the provider call.
 
-Then the output SHALL contain exactly 2 tags (`<i>` and `</i>`) in syntactically valid positions surrounding the translated equivalent word.
+#### Scenario: system prompt instructs the model to preserve inline tags
+
+Given a chunk whose `source_text` contains inline tags,
+
+When the `ContextManager` builds the system prompt,
+
+Then the prompt SHALL contain an explicit instruction to keep every inline tag, move it with the word(s) it wraps, and preserve the exact tag count.
 
 #### Scenario: tag count mismatch triggers retry
 
-Given a `source_text` with 2 opening and 2 closing tags (4 tags total),
+Given a translated chunk where `markup.validate_tags(source, translated)` returns `False`,
 
-When `markup.validate_tags` finds the translated+reinserted text contains a different number of tags,
+When validation fails,
 
 Then the orchestrator SHALL retry the provider call for that chunk, up to 2 additional attempts (3 total).
 
-#### Scenario: tag mismatch persists after 2 retries — chunk fails
+#### Scenario: retries exhausted — deterministic strip/reinsert fallback
 
-Given a chunk where tag-count validation fails on all 3 attempts (initial + 2 retries),
+Given a chunk whose tag-count validation fails on all 3 provider attempts,
 
-When the third validation fails,
+When the retries are exhausted,
+
+Then the engine SHALL apply `markup.strip` → translate the plain text → `markup.reinsert`, and if the reinserted result passes `markup.validate_tags`, the chunk SHALL be completed as `DONE` using the fallback output.
+
+#### Scenario: fallback also fails — chunk fails, job pauses
+
+Given a chunk where both the tags-in-text path (3 attempts) and the deterministic strip/reinsert fallback fail validation,
+
+When the final validation fails,
 
 Then the chunk `status` SHALL be set to `ChunkStatus.FAILED`, the job `status` SHALL be set to `JobStatus.PAUSED`, and no further chunks SHALL be translated until the job is resumed.
 

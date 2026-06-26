@@ -73,6 +73,14 @@ def reinsert(
     Strategy: map each tag's position as a fraction of *original_plain* length,
     then place it at the proportionally equivalent position in *plain_translation*.
     Tags are inserted from right to left to avoid offset drift.
+
+    # NOTE: As of M2-0, this function is FALLBACK-ONLY.
+    # The primary translation path sends source text WITH inline tags to the provider
+    # and instructs the model to carry them (see TranslationOrchestrator._translate_with_retry).
+    # reinsert() is called only when all primary (tags-in-text) attempts fail validation.
+    # The proportional character-position heuristic used here can drift across multi-cue
+    # chunks; hardening this heuristic (e.g. token-alignment, word-anchor placement)
+    # is tracked for M4. See: sdd/translation-engine/todo-tag-placement.
     """
     if not tags:
         return plain_translation

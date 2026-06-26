@@ -99,6 +99,25 @@ an error.
 # Output format / task description
 # ---------------------------------------------------------------------------
 
+_INLINE_TAG_RULES = """\
+## Inline Tag Preservation Rules
+
+The source text may contain inline formatting tags such as <i>, </i>, <b>, \
+</b>, <u>, </u>, <em>, </em>, <strong>, </strong>, <span ...>, </span>, \
+<a ...>, </a>.
+
+You MUST preserve every inline tag exactly as it appears:
+1. Keep every inline tag in the output — do NOT drop or add any tag.
+2. Move each tag WITH the word(s) it wraps: if <i>word</i> translates to \
+   <i>palabra</i>, keep the tag pair around the translated word.
+3. Preserve the EXACT tag count: the number of tags in the output MUST equal \
+   the number of tags in the source. Any mismatch is an error.
+4. Preserve nesting order: if tags are nested in the source, maintain the \
+   same nesting in the translation.
+
+Failure to preserve inline tags is a critical translation error."""
+
+
 _TASK_DESCRIPTION = """\
 ## Task
 
@@ -194,7 +213,7 @@ class ContextManager:
         The static block never changes for a given config, so it is the
         caching boundary for Anthropic prompt caching.
         """
-        parts = [_TASK_DESCRIPTION, _PHILOSOPHY]
+        parts = [_TASK_DESCRIPTION, _PHILOSOPHY, _INLINE_TAG_RULES]
         if config.target_lang == "es-neutral":
             parts.append(_NEUTRAL_SPANISH)
         return "\n\n".join(parts)

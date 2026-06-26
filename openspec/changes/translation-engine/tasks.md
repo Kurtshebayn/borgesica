@@ -617,7 +617,43 @@ S-2 is explicitly deferred to M4/cost-control — DO NOT implement here.
 
 ## M2 — EPUB Support
 
-M2 tasks may begin as soon as M1-12 is green. M2-1 and M2-2 are parallel; M2-3 requires both.
+M2 begins with **M2-0** (the shared tag-rework — engram `sdd/translation-engine/todo-tag-placement`), a prerequisite for EPUB because EPUB prose is markup-dense and would amplify the proportional-reinsert bug. After M2-0, M2-1 and M2-2 are parallel; M2-3 requires both.
+
+---
+
+### M2-0 [x] — Tag-rework: tags-in-text primary, strip/reinsert fallback (+ pending CLI UTF-8 regression test)
+
+**Depends on**: M1-12 (engine green)
+**Spec**: subtitle-translation/inline-tags-in-text; book-translation/inline-EPUB-tags
+**seq** (must land before any EPUB task)
+
+Context: the 2026-06-25 live real-API test (Haiku) reproduced inline tags SPANNING cues because `markup.reinsert` places tags by proportional character position across a multi-cue chunk. Fix: keep tags IN the text and instruct the model to carry them with the words; keep `strip`/`reinsert` as the deterministic fallback for weak/local models.
+
+Tests first (strict TDD):
+
+`tests/unit/test_context.py` (extend):
+1. System prompt contains an explicit "preserve inline tags / move them with the words / keep exact count" instruction (substring test).
+
+`tests/unit/test_orchestrator.py` (extend):
+2. Tags-in-text primary: provider returns a translation that KEEPS the tags and passes `validate_tags` → 1 provider call, chunk `DONE`, and `markup.strip` is NOT applied before the provider call (assert via call_log / spy on the user message containing the raw tags).
+3. Mismatch on attempt 1, valid on attempt 2 → 2 provider calls, chunk `DONE` (retry behavior preserved under the new path).
+4. All 3 tags-in-text attempts fail → engine falls back to `strip`→translate-plain→`reinsert`; fallback passes `validate_tags` → chunk `DONE` using fallback output.
+5. Both tags-in-text (3 attempts) and the strip/reinsert fallback fail → chunk `FAILED`, job `PAUSED`.
+6. Cue-spanning regression: a 2-cue chunk where cue 1 = `"We don't have <i>much</i> time"` → translated output keeps `<i>...</i>` WITHIN cue 1's text after the SrtWriter `"\n\n"` split (no tag leaks into cue 2). This is the exact bug from the live test.
+
+`tests/unit/test_markup.py` (extend):
+7. `strip`/`reinsert`/`validate_tags` behavior unchanged (no regression to M1 tests); `reinsert` is now exercised as fallback only.
+
+CLI regression (pending from M1, commit 9440760):
+8. CLI prints a non-ASCII character (the progress arrow) on a cp1252-configured stdout WITHOUT raising `UnicodeEncodeError` (regression test for the UTF-8 stdout/stderr reconfigure).
+
+Implement:
+- `borgesica/domain/context.py` — add the tag-preservation instruction to the static system-prompt block (always-on text is fine; cheap).
+- `borgesica/domain/orchestrator.py` — change the per-chunk flow: send `source_text` WITH tags (do NOT strip up front); after translate, `validate_tags(source, translated)`; retry ≤2; on exhaustion, fall back to `strip`→translate-plain→`reinsert`→`validate_tags`; only then FAILED/PAUSED.
+- `borgesica/domain/markup.py` — keep `strip`/`reinsert`/`validate_tags` as-is (fallback). Add a `# NOTE:` documenting fallback-only status + the M4 hardening pointer.
+- `borgesica/__main__.py` — ensure the UTF-8 stdout/stderr reconfigure is covered by the new regression test; refactor only if needed for testability.
+
+Deliverable: full suite green; the cue-spanning regression (test 6) confirmed RED before the orchestrator change, GREEN after.
 
 ---
 

@@ -3,23 +3,27 @@
 Dependency rule: only stdlib + pydantic + domain models/ports/helpers.
 No I/O, no adapter imports.
 
-Design (M1-8):
+Design (M2-0 tag-rework — replaces M1-8 per-chunk flow):
   TranslationOrchestrator.run(job, chunks, glossary, config, on_progress, cancel_flag)
     For each PENDING chunk (in index order):
       1. Check cancel_flag BEFORE the chunk (cooperative, not mid-chunk).
       2. Budget check: if cost_so_far + projected_cost > budget_usd → raise BudgetExceeded.
       3. Build system prompt via ContextManager (using current glossary + last summary).
-      4. Strip markup from source_text → user prompt.
-      5. provider.translate(system, user, model) → TranslationUnit (draft).
-      6. If quality_mode="reflective": critique + revise via two more provider calls.
+      4. PRIMARY (tags-in-text): send source_text WITH inline tags to the provider.
+         After translate, validate_tags(source, translated):
+           - pass → chunk DONE.
+           - mismatch → retry (≤2 additional, 3 total).
+      5. If quality_mode="reflective": critique + revise on the tagged user prompt.
          Persisted text = REVISE step output.
-      7. validate_tags(source, translated) → if mismatch, retry ≤ 2 more times.
-         All retries still failed → chunk FAILED, job PAUSED, stop.
-      8. markup.reinsert(tags) → final translated_text.
-      9. checkpoint.save_chunk(DONE) — idempotent.
-     10. summary = unit.summary_update; checkpoint.save_summary(N).
-     11. Merge glossary_additions (locked wins; new terms added as unlocked).
-     12. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
+      6. FALLBACK (only after 3 tags-in-text attempts all fail validation):
+         strip(source) → translate plain text (fresh provider call) → reinsert(tags)
+         → validate_tags:
+           - pass → chunk DONE using fallback output.
+           - fail (or provider raises) → chunk FAILED, job PAUSED, stop.
+      7. checkpoint.save_chunk(DONE) — idempotent.
+      8. summary = unit.summary_update; checkpoint.save_summary(N).
+      9. Merge glossary_additions (locked wins; new terms added as unlocked).
+     10. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
     After loop: job.status = DONE (if all completed normally).
 
 Resume semantics:
@@ -36,7 +40,12 @@ from datetime import UTC, datetime
 
 from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import CostEstimator
-from borgesica.domain.errors import BudgetExceeded, JobStateError
+from borgesica.domain.errors import (
+    BudgetExceeded,
+    JobStateError,
+    MalformedOutput,
+    ProviderError,
+)
 from borgesica.domain.glossary import merge_additions
 from borgesica.domain.markup import reinsert, strip, validate_tags
 from borgesica.domain.models import (
@@ -203,17 +212,13 @@ class TranslationOrchestrator:
             # Build system prompt for this chunk.
             system_prompt = self._ctx.build_system_prompt(config, live_glossary, current_summary)
 
-            # Strip markup from source text for the user prompt.
-            plain_source, tags = strip(chunk.source_text)
-            user_prompt = plain_source
-
-            # Translate with retry loop for tag mismatches.
+            # PRIMARY: send source_text WITH tags (do NOT strip up front).
+            # The system prompt instructs the model to carry every tag with its word.
+            # FALLBACK (if primary exhausted): strip → translate plain → reinsert.
             final_unit, final_text = self._translate_with_retry(
                 chunk=chunk,
                 system=system_prompt.text,
-                user=user_prompt,
                 config=config,
-                tags=tags,
             )
 
             if final_unit is None:
@@ -317,34 +322,72 @@ class TranslationOrchestrator:
         self,
         chunk: Chunk,
         system: str,
-        user: str,
         config: JobConfig,
-        tags: list[tuple[str, int]],
     ) -> tuple[TranslationUnit | None, str | None]:
-        """Attempt translation with up to _MAX_TAG_RETRIES retries on tag mismatch.
+        """Attempt translation using the tags-in-text PRIMARY path, with up to
+        _MAX_TAG_RETRIES retries on tag-count mismatch, then a deterministic
+        FALLBACK (strip → translate plain → reinsert) if all primary attempts fail.
+
+        PRIMARY (tags-in-text):
+          - Send chunk.source_text WITH inline tags as the user prompt.
+          - validate_tags(source, translated_text) on the raw output.
+          - Retry up to _MAX_TAG_RETRIES times (3 total attempts) on mismatch.
+
+        FALLBACK (strip/reinsert deterministic path):
+          - Applied only after all primary attempts fail.
+          - strip(source) → translate plain text (fresh provider call) → reinsert(tags).
+          - validate_tags again; if pass → chunk DONE using fallback output.
+          - If provider raises or validate_tags fails → return (None, None).
 
         Returns:
             (TranslationUnit, translated_text) on success.
-            (None, None) if all attempts fail the tag-count validation.
+            (None, None) if both primary and fallback fail.
         """
+        user_prompt = chunk.source_text  # PRIMARY: send WITH tags
+
+        # --- PRIMARY: tags-in-text attempts ---
         for attempt in range(_MAX_TAG_RETRIES + 1):  # 0, 1, 2
             if config.quality_mode == "reflective":
                 unit, translated_text = self._translate_reflective(
                     system=system,
-                    user=user,
+                    user=user_prompt,
                     config=config,
-                    tags=tags,
                 )
             else:
-                unit = self._provider.translate(system=system, user=user, model=config.model)
-                translated_text = reinsert(unit.translation, tags, user)
+                unit = self._provider.translate(
+                    system=system,
+                    user=user_prompt,
+                    model=config.model,
+                )
+                translated_text = unit.translation
 
-            # Validate tag counts.
+            # Validate tag counts in the raw translation (tags-in-text path).
             if validate_tags(chunk.source_text, translated_text):
                 return unit, translated_text
 
-            # Tag mismatch — retry (unless last attempt).
-        # All attempts exhausted.
+            # Tag mismatch — retry unless this was the last attempt.
+
+        # --- FALLBACK: strip → translate plain → reinsert ---
+        # All primary (tags-in-text) attempts exhausted.
+        # Apply the OLD deterministic path as a last resort.
+        try:
+            plain_source, tags = strip(chunk.source_text)
+            fallback_unit = self._provider.translate(
+                system=system,
+                user=plain_source,
+                model=config.model,
+            )
+            fallback_text = reinsert(fallback_unit.translation, tags, plain_source)
+            if validate_tags(chunk.source_text, fallback_text):
+                return fallback_unit, fallback_text
+        except (MalformedOutput, ProviderError):
+            # Provider failed during the fallback call — treat as total failure
+            # (chunk FAILED, job PAUSED). Any OTHER exception (a real bug in
+            # strip/reinsert, etc.) is intentionally NOT caught here so it surfaces
+            # instead of being silently mislabeled as a tag failure.
+            pass
+
+        # Both primary and fallback failed.
         return None, None
 
     def _translate_reflective(
@@ -352,14 +395,17 @@ class TranslationOrchestrator:
         system: str,
         user: str,
         config: JobConfig,
-        tags: list[tuple[str, int]],
     ) -> tuple[TranslationUnit, str]:
         """Execute the translate → critique → revise loop.
 
+        As of M2-0, the user prompt is the source text WITH inline tags (tags-in-text
+        primary path). The REVISE step's output is returned as the translated_text;
+        the caller validates tags against chunk.source_text.
+
         Returns (final_unit, translated_text) where translated_text is
-        the REVISE step's output with markup reinserted.
+        the REVISE step's output (raw — caller handles validate_tags).
         """
-        # Step 1: Draft translation
+        # Step 1: Draft translation (user prompt has tags)
         draft_unit = self._provider.translate(system=system, user=user, model=config.model)
         draft_text = draft_unit.translation
 
@@ -388,5 +434,5 @@ class TranslationOrchestrator:
             user=revise_prompt,
             model=config.model,
         )
-        translated_text = reinsert(revised_unit.translation, tags, user)
-        return revised_unit, translated_text
+        # Return the REVISE output directly; caller validates tags.
+        return revised_unit, revised_unit.translation

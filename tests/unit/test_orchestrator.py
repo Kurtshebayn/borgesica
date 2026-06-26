@@ -722,8 +722,9 @@ def test_tag_mismatch_all_retries_fail_chunk_failed_job_paused():
         cancel_flag=threading.Event(),
     )
 
-    # 3 attempts for chunk 0 (initial + 2 retries)
-    assert provider.call_count == 3
+    # M2-0: 3 primary (tags-in-text) attempts + 1 fallback (strip→translate→reinsert) call
+    # = 4 total provider calls before chunk is marked FAILED.
+    assert provider.call_count == 4
     saved = {c.index: c for c in store.load_chunks(job.id)}
     assert saved[0].status == ChunkStatus.FAILED
     assert result.status == JobStatus.PAUSED
@@ -914,3 +915,400 @@ def test_first_chunk_uses_placeholder_summary():
     system_for_chunk0 = provider.call_log[0][0]
     # Either empty or the standard placeholder text from ContextManager
     assert "No prior context." in system_for_chunk0 or "[SUMMARY]" in system_for_chunk0
+
+
+# ===========================================================================
+# M2-0 Tests — Tag-rework: tags-in-text primary, strip/reinsert fallback
+# ===========================================================================
+
+
+# ===========================================================================
+# M2-0 Test 2: Tags-in-text primary: source is sent WITH tags, strip NOT applied
+# ===========================================================================
+
+
+def test_tags_in_text_primary_strip_not_applied():
+    """Tags-in-text primary path: provider receives raw source WITH tags in the user
+    message. markup.strip must NOT have been applied before the provider call.
+    Spec: subtitle-translation/inline-tags-in-text scenario 'tags travel with translated words'.
+    """
+    store = InMemoryCheckpointStore()
+    # Provider returns a translation that KEEPS the tags and passes validate_tags
+    canned = TranslationUnit(
+        translation="El zorro <i>rápido</i>.",
+        summary_update="Summary.",
+    )
+    provider = FakeTranslationProvider(canned_unit=canned)
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    source_with_tags = "The <i>quick</i> fox."
+    chunks = [Chunk(index=0, source_text=source_with_tags)]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    assert result.status == JobStatus.DONE
+    assert provider.call_count == 1
+
+    # The user message (second element of call_log tuple) must CONTAIN the raw tags.
+    # If strip had been applied, the user message would be plain text without tags.
+    user_message = provider.call_log[0][1]
+    assert "<i>" in user_message, (
+        "User message must contain raw <i> tag — strip must NOT have been applied before call"
+    )
+    assert "</i>" in user_message, (
+        "User message must contain raw </i> tag — strip must NOT have been applied before call"
+    )
+
+
+# ===========================================================================
+# M2-0 Test 3: Mismatch on attempt 1, valid on attempt 2 → 2 provider calls, DONE
+# ===========================================================================
+
+
+def test_tags_in_text_mismatch_retry_succeeds_on_second():
+    """When validate_tags fails on attempt 1 but succeeds on attempt 2, the chunk
+    completes as DONE with exactly 2 provider calls (retry behavior preserved under
+    the new tags-in-text path).
+    Spec: subtitle-translation/inline-tags-in-text scenario 'tag count mismatch triggers retry'.
+    """
+    store = InMemoryCheckpointStore()
+
+    class MismatchThenOkProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            if n == 0:
+                # First attempt: tags missing in output → validate_tags will fail
+                # (source has <i>...</i> but translation has none)
+                return TranslationUnit(
+                    translation="El zorro rápido.",  # missing tags
+                    summary_update="Summary.",
+                )
+            else:
+                # Second attempt: tags preserved → validate_tags passes
+                return TranslationUnit(
+                    translation="El zorro <i>rápido</i>.",
+                    summary_update="Summary.",
+                )
+
+    provider = MismatchThenOkProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    source_with_tags = "The <i>quick</i> fox."
+    chunks = [Chunk(index=0, source_text=source_with_tags)]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    assert provider.call_count == 2
+    assert result.status == JobStatus.DONE
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+
+
+# ===========================================================================
+# M2-0 Test 4: All 3 tags-in-text attempts fail → strip/reinsert fallback used
+# ===========================================================================
+
+
+def test_all_tags_in_text_fail_falls_back_to_strip_reinsert():
+    """When all 3 tags-in-text attempts fail validation, the engine falls back to
+    the deterministic strip→translate-plain→reinsert path. If the fallback passes
+    validate_tags, the chunk is DONE using the fallback output.
+    Spec: subtitle-translation/inline-tags-in-text scenario 'retries exhausted — deterministic fallback'.
+    """
+    store = InMemoryCheckpointStore()
+
+    call_count_ref: list[int] = [0]
+
+    class AllTagsFailThenPlainProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            if n < 3:
+                # First 3 calls (tags-in-text attempts): drop a tag → validate_tags fails
+                return TranslationUnit(
+                    translation="El zorro rápido.",  # missing <i>...</i>
+                    summary_update="Summary.",
+                )
+            else:
+                # 4th call (fallback — plain text translate): return plain translation
+                # strip() will have removed tags; plain text in → plain text out → valid
+                return TranslationUnit(
+                    translation="El zorro rápido.",
+                    summary_update="Summary.",
+                )
+
+    provider = AllTagsFailThenPlainProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    source_with_tags = "The <i>quick</i> fox."
+    chunks = [Chunk(index=0, source_text=source_with_tags)]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    # 3 tags-in-text calls + 1 fallback (plain text) call = 4 total
+    assert provider.call_count == 4
+    assert result.status == JobStatus.DONE
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+
+
+# ===========================================================================
+# M2-0 Test 5: Both tags-in-text (3) and fallback fail → FAILED, PAUSED
+# ===========================================================================
+
+
+def test_both_tags_in_text_and_fallback_fail_chunk_failed_job_paused():
+    """When all 3 tags-in-text attempts AND the strip/reinsert fallback all fail
+    validate_tags, chunk is FAILED and job is PAUSED.
+    Spec: subtitle-translation/inline-tags-in-text scenario 'fallback also fails'.
+    """
+    store = InMemoryCheckpointStore()
+
+    class AlwaysMismatchProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+            self.call_log.append((system, user, model))
+            # Always produce a translation that has DIFFERENT tag count from source.
+            # Source has 2 tags (<i> and </i>), we return 0 tags from the first 3
+            # (tags-in-text path fails), then on fallback we return extra tags to force
+            # fallback validate_tags to also fail.
+            n = len(self.call_log) - 1
+            if n < 3:
+                # Tags-in-text: return 0 tags (source has 2) → mismatch
+                return TranslationUnit(
+                    translation="El zorro rápido.",
+                    summary_update="Summary.",
+                )
+            else:
+                # Fallback call (plain text): return EXTRA tags → mismatch again
+                # After reinsert, the result will have the original tags reinserted
+                # so validate_tags will pass (2 tags in, 2 tags out).
+                # We need to make the fallback fail differently — return a response
+                # whose reinserted form still mismatches.
+                # Actually: reinsert always puts EXACTLY the source tags back in
+                # So fallback validate_tags should ALWAYS pass.
+                # To force fallback failure we need reinsert to produce a different count.
+                # This is not possible with the current reinsert — reinsert always
+                # re-adds the exact tags stripped. So the only way fallback fails is if
+                # validate_tags check on (source, reinserted) mismatches — it can't
+                # because reinsert puts EXACTLY the stripped tags back.
+                # Conclusion: per the spec, fallback FAILS only if the provider call itself
+                # raises or returns something the orchestrator marks as failed.
+                # For this test: simulate the fallback failing by making the fallback
+                # provider call raise MalformedOutput so no TranslationUnit is obtained.
+                # Actually the spec says "validate_tags fails" but reinsert guarantees tag count.
+                # Therefore: the ONLY way to fail fallback is if the provider raises.
+                # We raise MalformedOutput on the 4th call to simulate a broken fallback call.
+                from borgesica.domain.errors import MalformedOutput as MO
+                raise MO(job_id="fake-job", chunk_index=n)
+
+    provider = AlwaysMismatchProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=2)
+    chunks = [
+        Chunk(index=0, source_text="The <i>quick</i> fox."),
+        Chunk(index=1, source_text="Second chunk."),
+    ]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    # 3 tags-in-text calls + 1 fallback (raises) = 4 total
+    assert provider.call_count == 4
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.FAILED
+    assert result.status == JobStatus.PAUSED
+
+
+# ===========================================================================
+# M2-0 Review fix: unexpected (non-provider) exception in fallback propagates.
+# A bare `except Exception` in the fallback would mask real bugs (a strip/reinsert
+# defect, an AttributeError) as a clean tag-failure. Only provider errors
+# (MalformedOutput / ProviderError) become FAILED/PAUSED; anything else propagates.
+# ===========================================================================
+
+
+def test_unexpected_exception_in_fallback_propagates():
+    """A non-provider exception raised during the fallback path must NOT be
+    swallowed and mislabeled as a tag failure — it must propagate so real bugs
+    surface instead of producing a silent FAILED/PAUSED chunk.
+    """
+    store = InMemoryCheckpointStore()
+
+    class BoomOnFallbackProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            if n < 3:
+                # Tags-in-text attempts: drop the tags → validate_tags fails.
+                return TranslationUnit(
+                    translation="El zorro rápido.",  # 0 tags vs 2 in source
+                    summary_update="Summary.",
+                )
+            # Fallback call: raise an UNEXPECTED (non-provider) error.
+            raise RuntimeError("unexpected boom in fallback")
+
+    provider = BoomOnFallbackProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="The <i>quick</i> fox.")]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    with pytest.raises(RuntimeError, match="unexpected boom"):
+        orch.run(
+            job=job,
+            chunks=chunks,
+            glossary=Glossary(),
+            config=config,
+            on_progress=lambda p: None,
+            cancel_flag=threading.Event(),
+        )
+
+    # 3 tags-in-text + 1 fallback call that raised = 4 total.
+    assert provider.call_count == 4
+
+
+# ===========================================================================
+# M2-0 Test 6 (REGRESSION): Cue-spanning tag regression
+# A 2-cue chunk where cue 1 = "We don't have <i>much</i> time"
+# After translation and SrtWriter "\n\n" split, <i>...</i> must stay in cue 1.
+# ===========================================================================
+
+
+def test_cue_spanning_tag_regression():
+    """Regression: a 2-cue chunk where cue 1 has <i>...</i> tags.
+    After the tags-in-text path and SrtWriter split on '\\n\\n', the <i>...</i>
+    pair must remain WITHIN cue 1's text — no tag may leak into cue 2.
+
+    This is the exact bug from the 2026-06-25 live test with proportional reinsert.
+    Using the tags-in-text primary path, the model is given the full source WITH tags
+    and told to carry them — so translation output keeps <i>...</i> in place.
+    The SrtWriter split on '\\n\\n' then correctly places them in cue 1.
+    """
+    from borgesica.domain.markup import validate_tags
+
+    # Source: 2-cue chunk joined by \n\n
+    # Cue 1: has inline tags
+    # Cue 2: plain text
+    cue1_source = "We don't have <i>much</i> time"
+    cue2_source = "before they arrive."
+    source_text = f"{cue1_source}\n\n{cue2_source}"
+
+    # The provider is given the raw source WITH tags (tags-in-text primary path).
+    # In a real translation, the model returns something like:
+    # "No tenemos <i>mucho</i> tiempo\n\nantes de que lleguen."
+    # We simulate this with a canned TranslationUnit that keeps tags in cue 1.
+    canned_translation = "No tenemos <i>mucho</i> tiempo\n\nantes de que lleguen."
+    canned = TranslationUnit(
+        translation=canned_translation,
+        summary_update="Summary.",
+    )
+    provider = FakeTranslationProvider(canned_unit=canned)
+
+    store = InMemoryCheckpointStore()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text=source_text, meta={"cue_batches": [
+        {"cue_index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": cue1_source},
+        {"cue_index": 2, "start": "00:00:04,000", "end": "00:00:06,000", "text": cue2_source},
+    ]})]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    assert result.status == JobStatus.DONE
+    saved = store.load_chunks(job.id)
+    translated_text = saved[0].translated_text
+    assert translated_text is not None
+
+    # Split the translated chunk on "\n\n" to get per-cue text (as SrtWriter does)
+    cue_texts = translated_text.split("\n\n")
+    assert len(cue_texts) == 2, f"Expected 2 cue texts after split, got {len(cue_texts)}: {cue_texts!r}"
+
+    cue1_translated = cue_texts[0]
+    cue2_translated = cue_texts[1]
+
+    # Tags must be entirely in cue 1 — none may leak into cue 2
+    assert "<i>" in cue1_translated, f"<i> must be in cue 1, got: {cue1_translated!r}"
+    assert "</i>" in cue1_translated, f"</i> must be in cue 1, got: {cue1_translated!r}"
+    assert "<i>" not in cue2_translated, f"<i> must NOT be in cue 2, got: {cue2_translated!r}"
+    assert "</i>" not in cue2_translated, f"</i> must NOT be in cue 2, got: {cue2_translated!r}"
+
+    # Verify overall validate_tags still passes
+    assert validate_tags(source_text, translated_text), (
+        "validate_tags must pass: tag count in source and translation must match"
+    )

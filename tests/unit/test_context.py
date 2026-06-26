@@ -259,3 +259,39 @@ def test_system_prompt_has_text_and_cached_fields():
     assert isinstance(sp, SystemPrompt)
     assert isinstance(sp.text, str)
     assert isinstance(sp.cached, bool)
+
+
+# ---------------------------------------------------------------------------
+# Test 11 (M2-0) — system prompt contains tag-preservation instruction
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_contains_tag_preservation_instruction():
+    """Static block must contain an explicit instruction to preserve inline tags,
+    move them with the translated words, and preserve the exact tag count.
+    Spec: subtitle-translation/inline-tags-in-text scenario 'system prompt instructs
+    the model to preserve inline tags'.
+    """
+    from borgesica.domain.context import ContextManager
+
+    provider = FakeTranslationProvider()
+    cm = ContextManager(provider=provider)
+    config = make_config()
+    glossary = Glossary()
+    summary = RollingSummary()
+
+    sp = cm.build_system_prompt(config, glossary, summary)
+    text = sp.text.lower()
+
+    # Must explicitly mention tag preservation / inline tags
+    assert "tag" in text or "inline" in text, (
+        "system prompt must mention inline tags"
+    )
+    # Must instruct to keep/preserve tags
+    assert "preserv" in text or "keep" in text or "mantener" in text or "mant" in text, (
+        "system prompt must instruct to preserve/keep tags"
+    )
+    # Must mention moving tags with translated words
+    assert "word" in text or "palabra" in text or "move" in text or "wrap" in text, (
+        "system prompt must mention tags moving with words"
+    )
