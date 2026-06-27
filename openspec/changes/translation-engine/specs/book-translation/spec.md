@@ -39,7 +39,7 @@ Then the call SHALL return an ordered list of `Chunk` objects with no exception 
 
 ### Requirement: EPUB reader extracts text nodes, preserving structure metadata
 
-The EPUB reader SHALL traverse the EPUB's XHTML content documents in reading order (spine order as defined by the OPF). For each content document, it SHALL extract text nodes from the `<body>` element only, preserving paragraph and heading boundaries. Each `Chunk.meta` SHALL carry at minimum `{"epub_item_href": str, "node_path": str}` to enable faithful reinsertion. Structural markup (chapter headings, `<div>` wrappers) SHALL NOT be translated — only the text content of leaf nodes is extracted.
+The EPUB reader SHALL traverse the EPUB's XHTML content documents in reading order (spine order as defined by the OPF). For each content document, it SHALL extract text nodes from the `<body>` element only, preserving paragraph and heading boundaries. Each `Chunk.meta` SHALL carry at minimum `{"epub_item_href": str, "node_path": str, "chapter_index": int}` to enable faithful reinsertion and chapter-boundary enforcement. `chapter_index` is 0-based per spine document (all nodes from the first spine document share `chapter_index=0`, all from the second share `chapter_index=1`, etc.). The reader returns one `Chunk` per text node. Structural markup (chapter headings, `<div>` wrappers) SHALL NOT be translated — only the text content of leaf nodes is extracted.
 
 #### Scenario: spine order is respected
 
@@ -59,43 +59,76 @@ Then no `Chunk` SHALL contain binary image data; image elements SHALL be left in
 
 ---
 
-### Requirement: prose text is chunked at paragraph boundaries; over-long paragraphs split at sentence boundaries
+### Requirement: prose text is chunked preserving per-node provenance for reinsertion
 
-The prose chunker SHALL split text into chunks that do not exceed the configured token budget (derived from `JobConfig.chunk_size` reinterpreted as a prose token ceiling; default 800 tokens). Paragraph boundaries are the preferred split point.
+**M2-2R (provenance rework)** — supersedes the original M2-2 contract.
 
-When a single paragraph exceeds the token budget, it SHALL be split at sentence boundaries (`.`, `!`, `?` followed by whitespace or end-of-string). When a single sentence exceeds the token budget, it SHALL be hard-split at the budget boundary with a WARNING logged (containing the job ID, chunk index, and the sentence's character length). This rule is normative for both EPUB (M2) and PDF (M3) prose.
+Signature: `chunk_prose(node_chunks: list[Chunk], config: JobConfig, provider: TranslationProvider) -> list[Chunk]`
 
-#### Scenario: paragraph that fits is kept intact
+Each input `Chunk` is one text node from EpubReader with `meta={"epub_item_href": str, "node_path": str, "chapter_index": int}` and `source_text` = the node's raw text (inline tags like `<em>` preserved).
 
-Given a paragraph of 400 tokens and a token budget of 800,
+The prose chunker SHALL:
+- Skip empty/whitespace-only nodes (no empty chunks emitted).
+- Group nodes by `meta["chapter_index"]`; NEVER batch across chapters.
+- Within a chapter, greedily accumulate nodes while cumulative tokens (`provider.count_tokens`) stay within `config.prose_chunk_tokens` (default 800 tokens).
+- When a single node exceeds the budget, split at sentence boundaries (`.`, `!`, `?` followed by whitespace or end-of-string).
+- When a single sentence exceeds the budget, hard-split at the nearest word boundary ≤ budget and log exactly ONE WARNING per oversized sentence (containing chunk index and sentence character length — NOT one per fragment).
+
+Each output `Chunk` SHALL carry:
+- `source_text` = batched node texts joined with `"\n\n"`.
+- `meta["prose_nodes"]` = ordered `list[{"epub_item_href": str, "node_path": str}]`, one entry per `"\n\n"`-separated segment of `source_text`, in the same order, so the writer can split on `"\n\n"` and map segment `i` → `prose_nodes[i].node_path`.
+- `meta["hard_split"] = True` on hard-split chunks only.
+- `index` = 0-based output index; `status` = PENDING.
+
+This rule is normative for EPUB (M2). PDF (M3) prose may use a compatible extension of this contract.
+
+#### Scenario: nodes that fit within budget → single output chunk with full prose_nodes
+
+Given two 200-token text-node Chunks in the same chapter (total 400 tokens, budget 800),
+
+When `chunk_prose` processes them,
+
+Then a single output Chunk SHALL be emitted with `source_text` equal to both node texts joined with `"\n\n"`, and `meta["prose_nodes"]` SHALL contain exactly 2 entries in input order, each mapping to the correct `node_path`.
+
+#### Scenario: over-budget chapter splits into multiple chunks, prose_nodes correct per chunk
+
+Given a chapter whose nodes total more than the token budget,
+
+When `chunk_prose` processes them,
+
+Then the output SHALL contain 2 or more chunks, each ≤ `prose_chunk_tokens`, and each chunk's `meta["prose_nodes"]` length SHALL equal `len(chunk.source_text.split("\n\n"))`.
+
+#### Scenario: single over-budget node → hard-split, exactly one WARNING per sentence
+
+Given a single text node containing one sentence of 1,500 tokens and a budget of 800 tokens,
 
 When the prose chunker processes it,
 
-Then the paragraph SHALL be emitted as a single chunk, unsplit.
-
-#### Scenario: over-long paragraph splits at sentence boundary
-
-Given a paragraph containing 3 sentences totalling 1,200 tokens, each sentence individually ≤ 800 tokens, with a budget of 800 tokens,
-
-When the prose chunker processes it,
-
-Then the paragraph SHALL be split at sentence boundaries into 2 or more chunks, each ≤ 800 tokens, with no mid-sentence break.
-
-#### Scenario: single over-long sentence is hard-split with logged warning
-
-Given a single sentence of 1,500 tokens and a budget of 800 tokens,
-
-When the prose chunker processes it,
-
-Then the sentence SHALL be split at the 800-token boundary (or the nearest word boundary at or below 800 tokens), and a WARNING SHALL be emitted to the logging system containing: job ID, chunk index, and sentence character length. Translation proceeds — this is NOT a job-stopping error.
+Then the node SHALL be hard-split into fragments ≤ 800 tokens, exactly ONE WARNING SHALL be logged for that sentence (not one per fragment), the warning SHALL contain the sentence's character length, and each output chunk SHALL carry `meta["hard_split"]=True` and a `meta["prose_nodes"]` entry pointing to the original node.
 
 #### Scenario: chapter boundary is never merged across chunks
 
-Given two paragraphs in different EPUB chapters,
+Given two text-node Chunks from different `chapter_index` values, each well under the token budget individually,
 
 When the prose chunker processes them,
 
-Then the chunks from chapter A and the chunks from chapter B SHALL not be merged into a single chunk. Each chapter boundary SHALL produce a chunk boundary.
+Then the output SHALL contain exactly 2 chunks (one per chapter), and no single chunk SHALL contain nodes from more than one `chapter_index`. `meta["prose_nodes"]` in each output chunk SHALL only reference nodes from that chunk's chapter.
+
+#### Scenario: provenance alignment — segment i maps to prose_nodes[i]
+
+Given N text-node Chunks in the same chapter that fit within budget (producing one output chunk),
+
+When the output chunk's `source_text` is split on `"\n\n"`,
+
+Then the number of segments SHALL equal `len(meta["prose_nodes"])`, and segment `i` SHALL contain text originating from the node referenced by `prose_nodes[i]["node_path"]`.
+
+#### Scenario: empty or whitespace-only nodes are skipped
+
+Given input containing empty or whitespace-only text-node Chunks,
+
+When `chunk_prose` processes them,
+
+Then no output Chunk SHALL be emitted for those nodes.
 
 ---
 
@@ -112,6 +145,10 @@ When the markup pipeline processes it through a translation cycle,
 Then the output SHALL contain exactly 2 inline tags (`<em>` and `</em>`) wrapping the translated equivalent word(s), and the surrounding translated text SHALL be coherent Spanish.
 
 ---
+
+### Requirement: EPUB writer reinserts translated text using prose_nodes provenance
+
+The EPUB writer SHALL reinsert translated text by splitting each output chunk's `translated_text` on `"\n\n"` and writing segment `i` into the XHTML node identified by `chunk.meta["prose_nodes"][i]["node_path"]` within the document identified by `chunk.meta["prose_nodes"][i]["epub_item_href"]`. Segments sharing a `node_path` SHALL be concatenated back into that single node.
 
 ### Requirement: EPUB writer produces a valid, openable EPUB
 

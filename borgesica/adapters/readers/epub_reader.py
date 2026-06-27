@@ -151,12 +151,22 @@ def _serialize_element_text(element: etree._Element) -> str:  # type: ignore[typ
 def _extract_chunks_from_item(
     item: epub.EpubHtml,
     start_index: int,
+    chapter_index: int = 0,
 ) -> list[Chunk]:
     """Parse one XHTML content document and return Chunks for each text node.
 
     Traverses only the ``<body>`` element.  Skips ``<img>``, ``<svg>``,
     ``<script>``, ``<style>``, and ``<nav>`` subtrees entirely.
     Only elements in ``_TEXT_ELEMENTS`` produce a Chunk.
+
+    Args:
+        item:          The XHTML spine document to extract from.
+        start_index:   The 0-based global chunk index to start counting from.
+        chapter_index: The 0-based index of this spine document in the reading
+                       order.  Every Chunk produced by this call shares the same
+                       ``chapter_index`` so ``chunk_prose`` can enforce chapter
+                       boundaries without knowing which ``epub_item_href`` belongs
+                       to which position in the spine.
     """
     raw_content: bytes = item.get_content()
     if not raw_content:
@@ -201,6 +211,7 @@ def _extract_chunks_from_item(
                         meta={
                             "epub_item_href": item.get_name(),
                             "node_path": _node_path(node, body),
+                            "chapter_index": chapter_index,
                         },
                     )
                 )
@@ -266,6 +277,7 @@ class EpubReader:
         # Step 3: Traverse spine in OPF reading order
         chunks: list[Chunk] = []
         seen_ids: set[str] = set()
+        chapter_index = 0
 
         for spine_id, _linear in book.spine:
             item = book.get_item_with_id(spine_id)
@@ -286,7 +298,12 @@ class EpubReader:
                 if isinstance(item, epub.EpubNav):
                     continue
 
-            new_chunks = _extract_chunks_from_item(item, start_index=len(chunks))
+            new_chunks = _extract_chunks_from_item(
+                item,
+                start_index=len(chunks),
+                chapter_index=chapter_index,
+            )
             chunks.extend(new_chunks)
+            chapter_index += 1
 
         return chunks

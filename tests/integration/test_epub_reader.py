@@ -324,3 +324,106 @@ def test_chunk_meta_contains_required_keys() -> None:
             assert isinstance(chunk.meta["node_path"], str) and chunk.meta["node_path"]
     finally:
         os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Test 7: chunk.meta contains chapter_index; it increases per spine document
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_meta_contains_chapter_index() -> None:
+    """Each chunk.meta must contain 'chapter_index' (int, 0-based per spine document).
+
+    Nodes from the first spine document have chapter_index=0.
+    Nodes from the second spine document have chapter_index=1, etc.
+    chapter_index must be monotonically non-decreasing in spine order.
+    """
+    chapters = [
+        ("ch1.xhtml", (
+            b"<?xml version='1.0' encoding='utf-8'?>"
+            b"<html xmlns='http://www.w3.org/1999/xhtml'>"
+            b"<head><title>Ch1</title></head>"
+            b"<body>"
+            b"<p>Chapter one paragraph one.</p>"
+            b"<p>Chapter one paragraph two.</p>"
+            b"</body>"
+            b"</html>"
+        )),
+        ("ch2.xhtml", (
+            b"<?xml version='1.0' encoding='utf-8'?>"
+            b"<html xmlns='http://www.w3.org/1999/xhtml'>"
+            b"<head><title>Ch2</title></head>"
+            b"<body>"
+            b"<p>Chapter two paragraph one.</p>"
+            b"<p>Chapter two paragraph two.</p>"
+            b"</body>"
+            b"</html>"
+        )),
+        ("ch3.xhtml", (
+            b"<?xml version='1.0' encoding='utf-8'?>"
+            b"<html xmlns='http://www.w3.org/1999/xhtml'>"
+            b"<head><title>Ch3</title></head>"
+            b"<body>"
+            b"<p>Chapter three paragraph one.</p>"
+            b"</body>"
+            b"</html>"
+        )),
+    ]
+    epub_bytes = _make_epub(chapters)
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        assert chunks, "Expected at least one chunk"
+
+        # Every chunk must carry chapter_index as an int
+        for chunk in chunks:
+            assert "chapter_index" in chunk.meta, (
+                f"Missing 'chapter_index' in chunk.meta: {chunk.meta}"
+            )
+            assert isinstance(chunk.meta["chapter_index"], int), (
+                f"chapter_index must be int, got {type(chunk.meta['chapter_index'])}"
+            )
+
+        # Gather chapter_index values per epub_item_href (spine document)
+        ch1_indices = [
+            c.meta["chapter_index"] for c in chunks
+            if "ch1.xhtml" in c.meta.get("epub_item_href", "")
+        ]
+        ch2_indices = [
+            c.meta["chapter_index"] for c in chunks
+            if "ch2.xhtml" in c.meta.get("epub_item_href", "")
+        ]
+        ch3_indices = [
+            c.meta["chapter_index"] for c in chunks
+            if "ch3.xhtml" in c.meta.get("epub_item_href", "")
+        ]
+
+        assert ch1_indices, "Expected chunks from ch1.xhtml"
+        assert ch2_indices, "Expected chunks from ch2.xhtml"
+        assert ch3_indices, "Expected chunks from ch3.xhtml"
+
+        # All nodes within the same spine doc share the same chapter_index
+        assert len(set(ch1_indices)) == 1, (
+            f"ch1 nodes should all share chapter_index; got {set(ch1_indices)}"
+        )
+        assert len(set(ch2_indices)) == 1, (
+            f"ch2 nodes should all share chapter_index; got {set(ch2_indices)}"
+        )
+        assert len(set(ch3_indices)) == 1, (
+            f"ch3 nodes should all share chapter_index; got {set(ch3_indices)}"
+        )
+
+        # chapter_index increases by spine position: ch1 < ch2 < ch3
+        assert ch1_indices[0] == 0, (
+            f"First spine doc should have chapter_index=0, got {ch1_indices[0]}"
+        )
+        assert ch2_indices[0] == 1, (
+            f"Second spine doc should have chapter_index=1, got {ch2_indices[0]}"
+        )
+        assert ch3_indices[0] == 2, (
+            f"Third spine doc should have chapter_index=2, got {ch3_indices[0]}"
+        )
+    finally:
+        os.unlink(path)

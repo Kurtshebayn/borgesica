@@ -13,30 +13,36 @@ SrtChunker.chunk(cues, config)
       - index: 0-based batch index
       - status: ChunkStatus.PENDING
 
-chunk_prose(paragraphs_by_chapter, config, provider)
-    EPUB/PDF prose chunker.
+chunk_prose(node_chunks, config, provider)
+    EPUB prose chunker — M2-2R (provenance rework).
 
     Signature:
         chunk_prose(
-            paragraphs_by_chapter: list[list[str]],
+            node_chunks: list[Chunk],
             config: JobConfig,
             provider: TranslationProvider,
         ) -> list[Chunk]
 
-    The caller (EpubReader / PdfReader) groups paragraphs per chapter into a
-    list of lists.  chunk_prose processes each chapter independently, so no
-    chunk ever crosses a chapter boundary.
+    Each input Chunk is ONE text node as produced by EpubReader, with:
+        meta = {"epub_item_href": str, "node_path": str, "chapter_index": int}
+        source_text = the node's raw text (inline tags like <em> preserved)
 
-    Within a chapter the following strategy is applied:
-      1. Paragraphs are accumulated into a running chunk while the cumulative
-         token count stays within config.prose_chunk_tokens.
-      2. When adding the next paragraph would exceed the budget, the current
-         accumulation is emitted as a chunk and a new one starts.
-      3. If a single paragraph exceeds the budget it is split at sentence
-         boundaries (.  !  ? followed by whitespace or end-of-string).
-      4. If a single sentence exceeds the budget it is hard-split at the
-         nearest word boundary at or below the budget, and a WARNING is logged
-         containing the chunk index and the sentence character length.
+    Behavior:
+      - Empty/whitespace-only nodes are SKIPPED.
+      - Nodes are grouped by meta["chapter_index"]; NEVER batched across chapters.
+      - Within a chapter, nodes are greedily accumulated while cumulative tokens
+        stay within config.prose_chunk_tokens (default 800).
+      - An over-budget SINGLE node is split at sentence boundaries (_split_sentences);
+        a sentence over budget is hard-split at the nearest word boundary ≤ budget
+        (_hard_split).  Exactly ONE WARNING is logged per oversized SENTENCE
+        (containing chunk index + sentence char length) — NOT once per fragment.
+      - Each output Chunk:
+          source_text = batched node texts joined with "\\n\\n"
+          meta["prose_nodes"] = ordered list[{"epub_item_href": str, "node_path": str}]
+                                 one entry per "\\n\\n"-separated segment of source_text
+          index = 0-based output index
+          status = ChunkStatus.PENDING
+          meta["hard_split"] = True  ← only present on hard-split chunks
 
     Token counting is delegated to provider.count_tokens(text, config.model)
     so the domain layer never imports any LLM SDK.
@@ -45,6 +51,7 @@ from __future__ import annotations
 
 import logging
 import re
+from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
 from borgesica.domain.models import Chunk, ChunkStatus, JobConfig
@@ -105,124 +112,158 @@ class SrtChunker:
 
 
 def chunk_prose(
-    paragraphs_by_chapter: list[list[str]],
+    node_chunks: list[Chunk],
     config: JobConfig,
     provider: "TranslationProvider",
 ) -> list[Chunk]:
-    """Prose chunker for EPUB/PDF.
+    """Prose chunker for EPUB — M2-2R provenance-aware implementation.
+
+    Mirrors the SrtChunker pattern: takes per-node Chunks from EpubReader
+    and batches them while preserving provenance so EpubWriter can reinstate
+    each translated segment into its original XHTML node.
 
     Args:
-        paragraphs_by_chapter: Outer list = chapters; inner list = paragraphs
-            for that chapter.  Chapter boundaries are NEVER crossed when
-            building chunks — an EpubReader or PdfReader provides this grouping.
+        node_chunks: Ordered list of per-node Chunks from EpubReader.
+                     Each chunk must have meta["epub_item_href"],
+                     meta["node_path"], and meta["chapter_index"].
         config: Job configuration; ``prose_chunk_tokens`` sets the token budget
-            per chunk.  ``model`` is forwarded to ``provider.count_tokens``.
+                per chunk.  ``model`` is forwarded to ``provider.count_tokens``.
         provider: Used ONLY for ``count_tokens(text, model)``; no translation
-            calls are made here (pure domain, no SDK imports).
+                  calls are made here (pure domain, no SDK imports).
 
     Returns:
-        Ordered list of Chunks.  Each chunk stays within ``prose_chunk_tokens``
-        OR, when a single sentence exceeds the budget, is as close to the budget
-        as a word boundary allows (with a WARNING logged).
+        Ordered list of output Chunks.  Each chunk:
+          - source_text: node texts joined with "\\n\\n"
+          - meta["prose_nodes"]: list[{"epub_item_href": str, "node_path": str}]
+                                 one entry per segment of source_text
+          - index: 0-based output index
+          - status: PENDING
+          - meta["hard_split"]: True (only on hard-split chunks)
     """
     budget = config.prose_chunk_tokens
     model = config.model
     chunks: list[Chunk] = []
     chunk_index = 0
 
-    for chapter_paragraphs in paragraphs_by_chapter:
-        # Accumulate paragraphs for this chapter into running chunks.
-        accumulated: list[str] = []
-        accumulated_tokens = 0
+    # --- Skip empty/whitespace nodes up front ---
+    valid_nodes = [n for n in node_chunks if n.source_text.strip()]
 
-        def _flush(texts: list[str]) -> None:
+    # --- Group by chapter_index; preserve input order within each group ---
+    # itertools.groupby preserves ordering so we get consecutive groups.
+    for _ch_idx, chapter_node_iter in groupby(
+        valid_nodes, key=lambda n: n.meta.get("chapter_index", 0)
+    ):
+        chapter_nodes = list(chapter_node_iter)
+
+        # Accumulators for the current running batch within this chapter
+        accumulated_texts: list[str] = []
+        accumulated_nodes: list[dict[str, str]] = []  # {"epub_item_href", "node_path"}
+        accumulated_tokens: int = 0
+
+        def _flush_batch(texts: list[str], nodes: list[dict[str, str]]) -> None:
             nonlocal chunk_index
             if not texts:
                 return
-            text = "\n\n".join(texts)
+            source_text = "\n\n".join(texts)
             chunks.append(
                 Chunk(
                     index=chunk_index,
-                    source_text=text,
+                    source_text=source_text,
                     status=ChunkStatus.PENDING,
-                    meta={"chunk_type": "prose"},
+                    meta={"prose_nodes": nodes},
                 )
             )
             chunk_index += 1
 
-        for paragraph in chapter_paragraphs:
-            para_tokens = provider.count_tokens(paragraph, model)
+        for node in chapter_nodes:
+            text = node.source_text
+            node_ref = {
+                "epub_item_href": node.meta.get("epub_item_href", ""),
+                "node_path": node.meta.get("node_path", ""),
+            }
+            node_tokens = provider.count_tokens(text, model)
 
-            if para_tokens <= budget:
-                # Happy path: paragraph fits within budget.
-                if accumulated_tokens + para_tokens > budget and accumulated:
-                    # Flushing current accumulation before adding this paragraph.
-                    _flush(accumulated)
-                    accumulated = []
+            if node_tokens <= budget:
+                # Happy path: node fits within budget.
+                if accumulated_tokens + node_tokens > budget and accumulated_texts:
+                    # Flush current batch before starting a new one with this node.
+                    _flush_batch(accumulated_texts, accumulated_nodes)
+                    accumulated_texts = []
+                    accumulated_nodes = []
                     accumulated_tokens = 0
-                accumulated.append(paragraph)
-                accumulated_tokens += para_tokens
+                accumulated_texts.append(text)
+                accumulated_nodes.append(node_ref)
+                accumulated_tokens += node_tokens
             else:
-                # Paragraph exceeds budget — must split at sentence boundaries.
-                # First flush any pending accumulation.
-                if accumulated:
-                    _flush(accumulated)
-                    accumulated = []
+                # Node exceeds budget — flush pending batch first, then split node.
+                if accumulated_texts:
+                    _flush_batch(accumulated_texts, accumulated_nodes)
+                    accumulated_texts = []
+                    accumulated_nodes = []
                     accumulated_tokens = 0
 
-                # Split paragraph into sentences.
-                sentences = _split_sentences(paragraph)
-                sent_accumulated: list[str] = []
-                sent_tokens = 0
+                # Split node at sentence boundaries.
+                sentences = _split_sentences(text)
+                sent_accumulated_texts: list[str] = []
+                sent_accumulated_nodes: list[dict[str, str]] = []
+                sent_accumulated_tokens: int = 0
 
                 for sentence in sentences:
                     s_tokens = provider.count_tokens(sentence, model)
 
                     if s_tokens > budget:
                         # Single sentence exceeds budget — hard-split required.
-                        # Flush current sentence accumulation first.
-                        if sent_accumulated:
-                            _flush(sent_accumulated)
-                            sent_accumulated = []
-                            sent_tokens = 0
+                        # Flush any pending sentence accumulation first.
+                        if sent_accumulated_texts:
+                            _flush_batch(sent_accumulated_texts, sent_accumulated_nodes)
+                            sent_accumulated_texts = []
+                            sent_accumulated_nodes = []
+                            sent_accumulated_tokens = 0
 
-                        # Hard-split the sentence at nearest word boundary ≤ budget.
+                        # Log exactly ONE WARNING for this oversized sentence.
+                        logger.warning(
+                            "Hard-splitting oversized sentence at chunk %d "
+                            "(sentence char length=%d, budget=%d)",
+                            chunk_index,
+                            len(sentence),
+                            budget,
+                        )
+
+                        # Hard-split at word boundaries ≤ budget.
                         for fragment in _hard_split(sentence, budget, provider, model):
-                            frag_tokens = provider.count_tokens(fragment, model)
-                            logger.warning(
-                                "Hard-splitting oversized sentence at chunk %d "
-                                "(sentence char length=%d, fragment tokens=%d, budget=%d)",
-                                chunk_index,
-                                len(sentence),
-                                frag_tokens,
-                                budget,
-                            )
                             chunks.append(
                                 Chunk(
                                     index=chunk_index,
                                     source_text=fragment,
                                     status=ChunkStatus.PENDING,
-                                    meta={"chunk_type": "prose", "hard_split": True},
+                                    meta={
+                                        "prose_nodes": [node_ref],
+                                        "hard_split": True,
+                                    },
                                 )
                             )
                             chunk_index += 1
                     else:
                         # Sentence fits — accumulate or flush-and-start.
-                        if sent_tokens + s_tokens > budget and sent_accumulated:
-                            _flush(sent_accumulated)
-                            sent_accumulated = []
-                            sent_tokens = 0
-                        sent_accumulated.append(sentence)
-                        sent_tokens += s_tokens
+                        if (
+                            sent_accumulated_tokens + s_tokens > budget
+                            and sent_accumulated_texts
+                        ):
+                            _flush_batch(sent_accumulated_texts, sent_accumulated_nodes)
+                            sent_accumulated_texts = []
+                            sent_accumulated_nodes = []
+                            sent_accumulated_tokens = 0
+                        sent_accumulated_texts.append(sentence)
+                        # All sentences from a single over-budget node reference the same node_ref
+                        sent_accumulated_nodes.append(node_ref)
+                        sent_accumulated_tokens += s_tokens
 
-                if sent_accumulated:
-                    _flush(sent_accumulated)
-                    sent_accumulated = []
+                if sent_accumulated_texts:
+                    _flush_batch(sent_accumulated_texts, sent_accumulated_nodes)
 
-        # End of chapter — flush whatever is left.
-        if accumulated:
-            _flush(accumulated)
-            accumulated = []
+        # End of chapter — flush remainder.
+        if accumulated_texts:
+            _flush_batch(accumulated_texts, accumulated_nodes)
 
     return chunks
 

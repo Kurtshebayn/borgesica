@@ -303,3 +303,54 @@ Partial failure never loses paid work — every DONE chunk is committed before t
 - [ ] Prompt-caching boundary: confirm the static-instruction block is large enough to make Anthropic prompt caching worth the cache-write cost at typical book sizes.
 - [ ] Glossary mid-run growth: `TranslationUnit.glossary_additions` lets the model surface new terms during a run — decide in spec whether these auto-apply or require user re-confirmation (default: stage as unlocked, don't override locked entries).
 - [ ] Very long single paragraph (prose) exceeding chunk budget: confirm sentence-level fallback split rule in the chunker (M2 detail).
+
+---
+
+## EPUB prose provenance & reinsertion (M2-2R)
+
+Decision #291 — resolves composition gap discovered in post-M2 review (gap #290).
+
+### Problem
+
+M2-1 EpubReader produced one Chunk per text node (with `node_path` in meta) and M2-2 chunk_prose took `list[list[str]]` — discarding all provenance. A translated prose chunk could not be mapped back to its source XHTML node, blocking EpubWriter (M2-3).
+
+### Decided Flow (mirrors SRT reader → chunker → writer)
+
+```
+EpubReader
+  └─ per-node Chunk:
+       source_text = raw node text (inline tags preserved)
+       meta = {
+           "epub_item_href": str,   # spine XHTML file
+           "node_path": str,        # XPath-like positional path within <body>
+           "chapter_index": int,    # 0-based spine position — enforces chapter boundaries
+       }
+         │
+         ▼
+chunk_prose(node_chunks: list[Chunk], config, provider) -> list[Chunk]
+  - Groups nodes by chapter_index; NEVER batches across chapters.
+  - Greedy accumulation within budget (prose_chunk_tokens, default 800).
+  - Over-budget single node → sentence split; over-budget sentence → hard-split
+    with exactly ONE WARNING per oversized sentence.
+  - Skips empty/whitespace nodes.
+  - Output Chunk:
+       source_text = node texts joined with "\n\n"
+       meta["prose_nodes"] = [{"epub_item_href": str, "node_path": str}, ...]
+                               one entry per "\n\n"-separated segment (in order)
+       meta["hard_split"] = True  (only on hard-split chunks)
+         │
+         ▼
+EpubWriter (M2-3)
+  - For each output chunk, split translated_text on "\n\n".
+  - Map segment i → meta["prose_nodes"][i]["node_path"].
+  - Write each segment back to its node in the source XHTML.
+  - Segments sharing a node_path are concatenated into that node.
+```
+
+### Why prose_nodes mirrors cue_batches
+
+`SrtChunker` stores `meta["cue_batches"]` — one entry per SRT cue in the batch — so `SrtWriter` can split the translated text on `"\n\n"` and restore each cue. `chunk_prose` stores `meta["prose_nodes"]` for the same reason: the writer splits on `"\n\n"` and restores each XHTML text node. Same pattern, same guarantee.
+
+### Domain purity preserved
+
+`chunk_prose` is pure domain: no ebooklib imports. `chapter_index` is an integer stored in `Chunk.meta` by the adapter (EpubReader); the chunker reads it to enforce chapter boundaries without knowing anything about spine structure.

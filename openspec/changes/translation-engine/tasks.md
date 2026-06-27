@@ -680,26 +680,66 @@ Deliverable: `pytest tests/integration/test_epub_reader.py` → all pass.
 
 ---
 
-### M2-2 [x] — Prose chunker
+### M2-2 [x] — Prose chunker (original contract)
 
 **Depends on**: M1-4  
 **Spec**: book-translation/prose-chunking  
 **par**
 
-Tests (`tests/unit/test_prose_chunker.py`):
-1. Paragraph of 400 tokens, budget 800 → single chunk, unsplit.
-2. Paragraph with 3 sentences (1,200 tokens total), budget 800 → split at sentence boundaries, each chunk ≤ 800 tokens.
-3. Single sentence of 1,500 tokens → hard-split at 800-token boundary + WARNING logged (check `caplog`).
-4. Paragraphs from different chapters never merged into one chunk.
-5. `prose_chunk_tokens: int = 800` is a DISTINCT field on `JobConfig` (not reusing `chunk_size`). Add this field to `JobConfig` in `models.py` now; default `800`. `chunk_size` remains the SRT cue-batch control. Update `JobConfig` tests in M1-1 test file.
-
-Implement `chunk_prose(paragraphs: list[str], config: JobConfig, provider: TranslationProvider) -> list[Chunk]` in `borgesica/domain/chunking.py`.
-
-Deliverable: `pytest tests/unit/test_prose_chunker.py` → all pass.
+NOTE: M2-2 shipped with the old `list[list[str]]` signature. See **M2-2R** (immediately below) which supersedes the contract and resolves the composition gap with EpubWriter. M2-3 depends on M2-2R, not M2-2.
 
 ---
 
-### M2-3 [T] — EpubWriter adapter (seq — requires M2-1 + M2-2)
+### M2-2R [x] — Prose chunker provenance rework
+
+**Depends on**: M2-1, M2-2  
+**Spec**: book-translation/prose-chunking (updated), book-translation/EPUB-writer reinsertion  
+**seq** (prerequisite for M2-3)
+
+**Context**: Post-M2 review (decision #291, gap #290) found that M2-1 EpubReader (per-node Chunks with `node_path`) and M2-2 `chunk_prose` (`list[list[str]]`, drops provenance) do NOT compose — a translated prose chunk cannot be mapped back to its source XHTML node, blocking EpubWriter.
+
+**Fix**: Change signature to mirror SrtChunker (SrtReader → SrtChunker → SrtWriter).
+
+**EpubReader change** (`borgesica/adapters/readers/epub_reader.py`):
+- Add `chapter_index: int` (0-based per spine document) to each Chunk's meta alongside the existing `epub_item_href` and `node_path`.
+- Pass `chapter_index` from the spine traversal loop in `EpubReader.read()`.
+
+**chunk_prose new signature** (`borgesica/domain/chunking.py`):
+```python
+chunk_prose(node_chunks: list[Chunk], config: JobConfig, provider: TranslationProvider) -> list[Chunk]
+```
+Behavior:
+- Skip empty/whitespace nodes.
+- Group by `meta["chapter_index"]`; NEVER cross chapter boundaries.
+- Greedy accumulation within `prose_chunk_tokens` budget.
+- Over-budget single node → sentence split; over-budget sentence → hard-split + exactly ONE WARNING per sentence (not per fragment).
+- Output Chunk meta:
+  - `prose_nodes`: ordered `list[{"epub_item_href": str, "node_path": str}]`, one entry per `"\n\n"` segment.
+  - `hard_split=True` on hard-split chunks.
+
+**Tests** (`tests/unit/test_prose_chunker.py`) — rewritten, 6 tests covering:
+1. Nodes within budget → 1 chunk; `prose_nodes` lists both in order.
+2. Over-budget chapter → multiple chunks ≤ budget; `prose_nodes` correct per chunk.
+3. Single over-budget node → hard-split + exactly 1 WARNING; all chunks carry `hard_split=True` and `prose_nodes`.
+4. Chapter isolation: `== 2` chunks (not `>= 2`) when two chapters each have 1 node under budget.
+5. Provenance: `source_text.split("\n\n")` length == `len(meta["prose_nodes"])`; segment `i` aligns to `prose_nodes[i].node_path`.
+6. Empty/whitespace nodes skipped.
+
+**Integration test** (`tests/integration/test_epub_reader.py`) — Test 7 added:
+- Each chunk carries `chapter_index` as int.
+- Nodes from the same spine doc share the same `chapter_index`.
+- `chapter_index` is 0-based and increases per spine document.
+
+**SDD docs updated**:
+- `design.md`: added "EPUB prose provenance & reinsertion" subsection.
+- `specs/book-translation/spec.md`: updated requirements and scenarios to match new contract.
+- `tasks.md` (this file): M2-2R added; M2-3 depends on M2-2R.
+
+Deliverable: full suite 196 passed, 1 skipped; ruff exits 0; domain purity green.
+
+---
+
+### M2-3 [T] — EpubWriter adapter (seq — requires M2-1 + M2-2R)
 
 **Depends on**: M2-1, M2-2  
 **Spec**: book-translation/EPUB-writer; book-translation/EPUB-tags  
@@ -852,7 +892,8 @@ M0-1 → M0-2 → M0-3
                ┌─────────┴──────────┐
               M2-1              M2-2 (prose chunker; adds prose_chunk_tokens to JobConfig)
               (EpubReader)          ↓
-               └───────────────────M2-3 (EpubWriter)
+               │               M2-2R (prose chunker provenance rework)
+               └───────────────────M2-3 (EpubWriter — depends on M2-1 + M2-2R)
                                     ↓
                                    M3-1 (PDF)
                                     ↓
