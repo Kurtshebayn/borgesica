@@ -739,7 +739,7 @@ Deliverable: full suite 196 passed, 1 skipped; ruff exits 0; domain purity green
 
 ---
 
-### M2-3 [T] — EpubWriter adapter (seq — requires M2-1 + M2-2R)
+### M2-3 [x] — EpubWriter adapter (seq — requires M2-1 + M2-2R)
 
 **Depends on**: M2-1, M2-2  
 **Spec**: book-translation/EPUB-writer; book-translation/EPUB-tags  

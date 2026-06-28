@@ -14,7 +14,7 @@ import threading
 import uuid
 from datetime import UTC, datetime
 
-from borgesica.domain.chunking import SrtChunker
+from borgesica.domain.chunking import SrtChunker, chunk_prose
 from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import CostEstimator
 from borgesica.domain.errors import JobNotFoundError, JobStateError
@@ -95,9 +95,14 @@ class TranslatorEngine:
         # 1. Select reader
         reader = self._readers[config.source_type]
 
-        # 2. Read + chunk
+        # 2. Read + chunk (dispatch by source type)
         cues = reader.read(source_path, config)
-        chunks = SrtChunker.chunk(cues, config)
+        if config.source_type == SourceType.EPUB:
+            # EPUB: prose chunker with per-node provenance (M2-2R contract)
+            chunks = chunk_prose(cues, config, self._provider)
+        else:
+            # SRT (and future PDF once M3 lands): cue-batch chunker
+            chunks = SrtChunker.chunk(cues, config)
 
         # 3. Seed glossary (no translation for "none" strategy)
         glossary = self._extractor.extract(
