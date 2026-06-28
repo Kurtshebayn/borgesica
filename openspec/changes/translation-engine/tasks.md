@@ -762,6 +762,47 @@ Deliverable: `pytest tests/integration/test_epub_writer.py` → all pass.
 
 ---
 
+## M2-FIX — M2 Verify Fix-Up (W-M2-1, W-M2-2, S-M2-1, S-M2-3)
+
+These tasks address the sdd-verify findings reported after M2 completion.
+S-M2-2 (non-UTF-8 chapter encoding) and W-M2-3 (chapter_index gaps on empty spine items) are DEFERRED — tracked but not fixed here.
+
+### M2-FIX-1 [x] — W-M2-1: DRM detection must be case-insensitive
+
+**Fixed**: `borgesica/adapters/readers/epub_reader.py` — `_check_drm()` changed from `"META-INF/encryption.xml" in names` (case-sensitive `in` check) to `any(n.lower() == "meta-inf/encryption.xml" for n in names)`. EPUBs with `META-INF/ENCRYPTION.XML` or any mixed-case variant now raise `UnsupportedFormatError` with the DRM-specific message.
+**TDD**: New test `test_drm_detection_case_insensitive` in `tests/integration/test_epub_reader.py`. Fixture EPUB has uppercase `META-INF/ENCRYPTION.XML` entry. Confirmed RED (DID NOT RAISE) before fix, GREEN after. Asserts `"drm"` in message and excludes generic "not a valid epub" wording.
+
+---
+
+### M2-FIX-2 [x] — W-M2-2: End-to-end EPUB engine test
+
+**Added**: `tests/integration/test_epub_engine_e2e.py` with 2 tests covering the full EPUB pipeline via `TranslatorEngine`. Test 1 (`test_epub_engine_e2e_basic`) drives `create_job → run_job → EpubWriter.write` for a 2-chapter fixture EPUB, asserts job ends DONE, output opens with `ebooklib.epub.read_epub`, and translated text lands in the correct chapter document (per-chapter placement with cross-chapter guard). Test 2 (`test_epub_engine_e2e_resumable_done_job`) proves resume on a DONE EPUB job makes 0 extra provider calls.
+**Wiring**: `EpubTagFakeProvider` (subclass of `FakeTranslationProvider`) prefixes `"[ES] "` to each `\n\n`-separated segment, preserving tag count so `validate_tags` passes. Engine wired with `{SourceType.EPUB: EpubReader(), SourceType.SRT: SrtReader()}` readers and matching writers; `InMemoryCheckpointStore`; `NullGlossaryExtractor`.
+
+---
+
+### M2-FIX-3 [x] — S-M2-1: Cue-spanning regression test is now a genuine guard
+
+**Hardened**: `tests/unit/test_orchestrator.py::test_cue_spanning_tag_regression` — added assertion `assert "<i>" in provider.call_log[0][1]`. The `call_log` tuple shape is `(system, user, model)`; index `[1]` is the user prompt. This assertion would FAIL against the old strip-before-call flow (where `<i>` was stripped from source before the provider call). All existing assertions preserved.
+
+---
+
+### M2-FIX-4 [x] — S-M2-3: Provenance round-trip test has per-chapter assertions
+
+**Hardened**: `tests/integration/test_epub_writer.py::test_e2e_provenance_round_trip` — replaced the weak `"[ES] " in all_text` check with per-chapter ZIP inspection: chapter-1 translation appears in `ch1.xhtml`, chapter-2 in `ch2.xhtml`, chapter-3 in `ch3.xhtml`, plus cross-chapter guards (ch1 text not in ch2, ch2 text not in ch1). A bug that dumps all translations into one node or the wrong chapter now fails at least one assertion.
+
+---
+
+### DEFERRED — S-M2-2: Non-UTF-8 chapter encoding
+
+Not fixed in this slice. Tracked for a future hardening pass. Non-UTF-8 spine documents (e.g. ISO-8859-1 or windows-1252) may produce mojibake in translated output; requires encoding-detection at the reader or writer level.
+
+### DEFERRED — W-M2-3: chapter_index gaps on empty spine items
+
+Not fixed in this slice. When spine items produce 0 chunks (empty documents, nav-only items, etc.), `chapter_index` increments past them, producing a sparse sequence. Downstream consumers must tolerate gaps. A future fix could make `chapter_index` reflect only non-empty spine documents.
+
+---
+
 ## M3 — PDF Support (coarser-grained; design is done)
 
 M3 tasks depend on M2 being complete (prose chunker and EpubWriter patterns are established).

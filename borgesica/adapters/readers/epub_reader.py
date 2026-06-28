@@ -87,7 +87,7 @@ def _check_drm(path: str) -> None:
             reason=f"not a valid EPUB: cannot open file ({exc})",
         ) from exc
 
-    if "META-INF/encryption.xml" in names:
+    if any(n.lower() == "meta-inf/encryption.xml" for n in names):
         raise UnsupportedFormatError(
             path=path,
             reason="DRM-protected EPUB: META-INF/encryption.xml detected — "

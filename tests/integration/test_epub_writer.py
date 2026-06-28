@@ -545,19 +545,58 @@ def test_e2e_provenance_round_trip() -> None:
         writer = EpubWriter()
         writer.write(translated_chunks, src_path, out_path)
 
-        # Re-read output and inspect XHTML content
+        # Re-read output and inspect XHTML content per chapter.
+        # S-M2-3: per-chapter assertions replace the weak "anywhere in output" check.
+        # A bug that dumps all translations into one node or swaps chapters must fail.
         with zipfile.ZipFile(out_path, "r") as zf:
-            all_xhtml = [n for n in zf.namelist() if n.endswith(".xhtml") or n.endswith(".html")]
-            content_files = [n for n in all_xhtml if "nav" not in n.lower()]
+            all_names = zf.namelist()
 
-            all_text = ""
-            for fname in content_files:
-                all_text += zf.read(fname).decode("utf-8", errors="replace")
+            def _read_xhtml(fname: str) -> str:
+                return zf.read(fname).decode("utf-8", errors="replace")
 
-        # The "[ES] " prefix must appear in the output (translation landed)
-        assert "[ES] " in all_text, (
-            "Expected translated text ('[ES] ' prefix) in output XHTML, "
-            "but it was not found. The writer may not be reinserting translated content."
+            # Find chapter files by name suffix (ebooklib may prefix with OEBPS/ etc.)
+            def _find_chapter(suffix: str) -> str | None:
+                for name in all_names:
+                    if name.endswith(suffix) and "nav" not in name.lower():
+                        return name
+                return None
+
+            ch1_file = _find_chapter("ch1.xhtml")
+            ch2_file = _find_chapter("ch2.xhtml")
+            ch3_file = _find_chapter("ch3.xhtml")
+
+            assert ch1_file is not None, f"ch1.xhtml not found in output; files: {all_names}"
+            assert ch2_file is not None, f"ch2.xhtml not found in output; files: {all_names}"
+            assert ch3_file is not None, f"ch3.xhtml not found in output; files: {all_names}"
+
+            ch1_text = _read_xhtml(ch1_file)
+            ch2_text = _read_xhtml(ch2_file)
+            ch3_text = _read_xhtml(ch3_file)
+
+        # Chapter-1 source: "The quick brown fox." → translated: "[ES] The quick brown fox."
+        # The chapter-1 translation must be in ch1.xhtml, NOT only in some other chapter.
+        assert "[ES] The quick brown fox." in ch1_text, (
+            "Chapter-1 translation must appear in ch1.xhtml. "
+            f"ch1 content snippet: {ch1_text[:300]!r}"
+        )
+        # Chapter-2 source: "Jumps over the lazy dog." → translated: "[ES] Jumps over the lazy dog."
+        assert "[ES] Jumps over the lazy dog." in ch2_text, (
+            "Chapter-2 translation must appear in ch2.xhtml. "
+            f"ch2 content snippet: {ch2_text[:300]!r}"
+        )
+        # Chapter-3 source: "The end of the story." → translated: "[ES] The end of the story."
+        assert "[ES] The end of the story." in ch3_text, (
+            "Chapter-3 translation must appear in ch3.xhtml. "
+            f"ch3 content snippet: {ch3_text[:300]!r}"
+        )
+
+        # Cross-chapter guard: ch1's specific text must NOT appear in ch2 or ch3
+        # (catches a bug where all translations dump into a single document)
+        assert "[ES] The quick brown fox." not in ch2_text, (
+            "Chapter-1 translation must NOT appear in ch2.xhtml — wrong chapter placement"
+        )
+        assert "[ES] Jumps over the lazy dog." not in ch1_text, (
+            "Chapter-2 translation must NOT appear in ch1.xhtml — wrong chapter placement"
         )
     finally:
         os.unlink(src_path)

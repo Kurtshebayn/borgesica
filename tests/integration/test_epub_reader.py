@@ -327,6 +327,65 @@ def test_chunk_meta_contains_required_keys() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 8: DRM detection is case-insensitive (W-M2-1)
+# ---------------------------------------------------------------------------
+
+
+def test_drm_detection_case_insensitive() -> None:
+    """DRM check must be case-insensitive: META-INF/ENCRYPTION.XML raises UnsupportedFormatError.
+
+    W-M2-1: the old code checked for the exact string "META-INF/encryption.xml" with `in`
+    on the namelist. An EPUB whose ZIP stores the entry as "META-INF/ENCRYPTION.XML" or
+    "META-INF/Encryption.xml" should also raise with the DRM-specific message, not silently
+    pass the check and try to translate DRM-protected content.
+
+    RED: current code checks `"META-INF/encryption.xml" in names` (case-sensitive) → the
+    uppercase variant slips through without raising.
+    GREEN: fix uses case-folded comparison.
+    """
+    chapters = [_simple_chapter("DRM-protected content", "ch1.xhtml")]
+    epub_bytes = _make_epub(chapters)
+
+    # Inject the encryption entry with UPPERCASE name (simulates some DRM tools)
+    buf_in = io.BytesIO(epub_bytes)
+    buf_out = io.BytesIO()
+    with (
+        zipfile.ZipFile(buf_in, "r") as zin,
+        zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
+        for item in zin.infolist():
+            zout.writestr(item, zin.read(item.filename))
+        zout.writestr(
+            "META-INF/ENCRYPTION.XML",  # uppercase — the fix must catch this
+            '<?xml version="1.0"?>'
+            '<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">'
+            "<EncryptedData/>"
+            "</encryption>",
+        )
+    epub_bytes_drm = buf_out.getvalue()
+
+    path = _write_temp_epub(epub_bytes_drm)
+    try:
+        reader = EpubReader()
+        with pytest.raises(UnsupportedFormatError) as exc_info:
+            reader.read(path, _config())
+        err = exc_info.value
+        assert err.path == path
+        # The reason MUST mention DRM — not a generic parse error
+        reason_lower = err.reason.lower()
+        assert "drm" in reason_lower, (
+            f"Expected DRM-specific message, got: {err.reason!r}"
+        )
+        # Must NOT say "not a valid EPUB" (which would mean it passed DRM check
+        # and failed later — wrong code path)
+        assert "not a valid epub" not in reason_lower, (
+            f"Error should identify DRM, not generic parse failure: {err.reason!r}"
+        )
+    finally:
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
 # Test 7: chunk.meta contains chapter_index; it increases per spine document
 # ---------------------------------------------------------------------------
 

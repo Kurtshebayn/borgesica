@@ -1312,3 +1312,13 @@ def test_cue_spanning_tag_regression():
     assert validate_tags(source_text, translated_text), (
         "validate_tags must pass: tag count in source and translation must match"
     )
+
+    # S-M2-1: hardening assertion — the provider must have received the tags in
+    # the user message (tags-in-text primary path). call_log entries are
+    # (system, user, model); index [1] is the user prompt.
+    # Against the OLD strip-before-call flow, source_text would have been
+    # stripped of tags before being sent, and this assertion would FAIL.
+    assert "<i>" in provider.call_log[0][1], (
+        "Provider user-message must contain inline tags (tags-in-text path). "
+        f"Got user message: {provider.call_log[0][1][:200]!r}"
+    )
