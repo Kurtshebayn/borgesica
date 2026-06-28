@@ -896,6 +896,24 @@ Implement `borgesica/adapters/providers/ollama_provider.py`.
 
 ---
 
+### M4-4 [T] — EpubReader: honor declared XHTML encoding (deferred from M2, S-M2-2)
+
+**Depends on**: M2-1
+**Spec**: book-translation/EPUB-reader
+**par**
+
+Deferred from M2 (verify finding S-M2-2). A non-UTF-8 EPUB chapter (e.g. `iso-8859-1`) currently produces replacement characters in `source_text` (`"Café"` → `"Caf�"`) because the XML parser defaults to UTF-8. Real correctness bug; deferred only because modern EPUBs are overwhelmingly UTF-8.
+
+Tests first (`tests/integration/test_epub_reader.py`):
+1. A fixture EPUB whose chapter is encoded `iso-8859-1` with accented text → extracted `source_text` contains the correct accented characters (no `�`).
+
+Implement in `borgesica/adapters/readers/epub_reader.py`:
+- Detect the chapter's encoding (XML declaration / EPUB content) and parse with the matching `etree.XMLParser(encoding=...)` (or decode bytes with the declared charset before parsing).
+
+Deliverable: the non-UTF-8 fixture round-trips with correct characters; existing EPUB tests stay green.
+
+---
+
 ## Cross-Cutting: Open Items Resolution
 
 These items are assigned to specific tasks above but explicitly documented here for traceability:

@@ -12,7 +12,7 @@ milestones:
   M4: pending         # quality harness + provider breadth + deferred cost TODOs
 last_milestone_verified: M2
 deferred:
-  - "S-M2-2: non-UTF-8 EPUB chapter encoding"
-  - "W-M2-3: chapter_index gaps on empty spine items"
+  - "S-M2-2: non-UTF-8 EPUB chapter encoding → scheduled as task M4-4"
+  - "W-M2-3: chapter_index gaps on empty spine items (documented non-issue; leave as-is)"
   - "M4/cost-accuracy: reflective×retry call multiplication + failed-chunk cost (engram #289); S-2 real response.usage"
   - "M4: markup.reinsert fallback placement hardening for weak/local models (decision #277)"
