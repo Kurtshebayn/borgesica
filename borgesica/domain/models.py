@@ -152,3 +152,16 @@ class Progress(BaseModel):
     total_chunks: int
     cost_usd: float
     status: JobStatus
+
+
+class QualityScore(BaseModel):
+    """Rubric score produced by the LLM-as-judge harness (M4-2).
+
+    Each dimension is rated 1–5 (1 = poor, 5 = excellent).
+    All four fields are required; out-of-range values raise ValidationError.
+    """
+
+    accuracy: int = Field(..., ge=1, le=5)
+    fluency: int = Field(..., ge=1, le=5)
+    neutral_register: int = Field(..., ge=1, le=5)
+    glossary_consistency: int = Field(..., ge=1, le=5)

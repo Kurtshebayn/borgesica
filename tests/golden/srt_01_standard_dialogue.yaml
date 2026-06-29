@@ -1,0 +1,17 @@
+source: |
+  I don't know what to tell you.
+  She left without saying a word.
+
+expected: |
+  No sé qué decirte.
+  Ella se fue sin decir una palabra.
+
+glossary: []
+
+notes: |
+  Standard two-line dialogue cue. Tests basic accuracy and neutral register.
+  "I don't know what to tell you" → "No sé qué decirte" uses the informal
+  "tú" indirect-object clitic "te", appropriate because an informal register
+  is established by "tell you". No voseo, no leísmo, no localisms.
+  "left" → "se fue" (pronominal, not "salió") captures the sense of departure
+  rather than mere exit.

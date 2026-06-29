@@ -1,0 +1,21 @@
+source: |
+  Welcome to Thornwood. You'll find everything you need here.
+
+expected: |
+  Bienvenido a Thornwood. Aquí encontrarás todo lo que necesitas.
+
+glossary:
+  - term: Thornwood
+    translation: Thornwood
+    locked: true
+    note: "Fictional place name — keep in English as per locked glossary entry"
+
+notes: |
+  Tests that a proper noun locked in the glossary appears verbatim in the
+  translation. "Thornwood" is a fictional place name that must NOT be
+  translated or adapted (e.g. "Bosque Espinoso"). The locked entry enforces
+  the English form in the Spanish output.
+  "You'll find" → "encontrarás" uses the second-person singular future
+  (tú-conjugation), correct for neutral Spanish informal register.
+  "everything you need" → "todo lo que necesitas" — "lo" is the direct-object
+  pronoun (correct); leísmo would yield "le" here, which is wrong.

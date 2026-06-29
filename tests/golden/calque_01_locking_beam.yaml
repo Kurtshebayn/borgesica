@@ -1,0 +1,37 @@
+source: |
+  a slot for a locking wooden beam across the door
+
+expected: |
+  una ranura para la tranca de madera que cierra la puerta
+
+glossary: []
+
+notes: |
+  MARQUEE CALQUE TRAP — the "tranca vs. viga" idiom.
+
+  The source describes a physical slot (recess in the door frame or wall) that
+  receives a wooden beam placed horizontally across the door to bar it from
+  the inside. The BEAM itself IS the locking mechanism — it does not have a
+  separate lock.
+
+  WRONG (literal calque):
+    "una ranura para una viga de madera con cerradura a través de la puerta"
+    "una ranura para un madero de bloqueo a través de la puerta"
+    "una ranura para una viga de madera de cierre a través de la puerta"
+  These are word-for-word substitutions that produce unnatural or misleading
+  Spanish. "Viga" (beam/rafter) suggests structural lumber, not a door bar.
+  "Con cerradura" (with a lock/latch) introduces a separate locking device
+  that is NOT present in the source — the beam IS the lock.
+
+  CORRECT:
+    "una ranura para la tranca de madera que cierra la puerta"
+  "Tranca" is the precise Spanish word for a wooden bar used to secure a door
+  from the inside by resting across it in brackets or slots. It is universally
+  understood across Latin American Spanish and Spain. The relative clause "que
+  cierra la puerta" (that secures/closes the door) conveys the function of the
+  beam being the locking mechanism itself, not a secondary attribute.
+
+  This fixture directly tests the translation-quality/philosophy-prompt
+  anti-calque instruction in context.py: "a locking wooden beam across a door
+  is a 'tranca' — a bar that itself IS the locking mechanism — not 'una viga
+  con cerradura'."

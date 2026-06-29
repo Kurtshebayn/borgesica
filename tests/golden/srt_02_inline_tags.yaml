@@ -1,0 +1,14 @@
+source: |
+  She was <i>absolutely certain</i> he had been there.
+
+expected: |
+  Ella estaba <i>absolutamente segura</i> de que él había estado ahí.
+
+glossary: []
+
+notes: |
+  Tests that the <i>...</i> italic tag pair is preserved and moved with the
+  translated phrase. "absolutely certain" → "absolutamente segura" keeps the
+  adverb+adjective structure inside the tag. The tag must stay intact in the
+  output without duplication or loss. No leísmo: "he" → "él" is the subject,
+  no direct/indirect object issue. Neutral register maintained throughout.

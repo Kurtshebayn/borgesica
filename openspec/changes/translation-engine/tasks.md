@@ -880,7 +880,7 @@ Not fixed in this slice. The regex `(\w)-\n(\w)` cannot distinguish hyphenation 
 
 M4 depends on M1-12 (engine is complete).
 
-### M4-1 [I] — Golden fixtures + QualityScore model
+### M4-1 [x] — Golden fixtures + QualityScore model
 
 **Depends on**: M1-12  
 **Spec**: quality-evaluation/golden-fixtures; translation-quality/calque-golden-sample  
@@ -908,6 +908,8 @@ class QualityScore(BaseModel):
 ```
 
 Tests (`tests/unit/test_quality_score.py`): `QualityScore` validates range [1,5]; out-of-range raises `ValidationError`.
+
+**Implemented**: TDD RED→GREEN. `QualityScore` added to `borgesica/domain/models.py` with `ge=1, le=5` constraints on all four fields. 9 golden fixtures authored in `tests/golden/` (5 SRT + 3 prose + 1 calque). Fixture guard test `tests/unit/test_golden_fixtures.py` verifies schema (≥9 files, 4 required fields, glossary is list, source/expected non-empty). `pyyaml>=6.0` added to `dev` extras in `pyproject.toml`. Suite: 232 passed, 1 skipped (up from 213); ruff clean; domain purity green.
 
 ---
 

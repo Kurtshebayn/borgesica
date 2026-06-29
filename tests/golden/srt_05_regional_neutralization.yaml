@@ -1,0 +1,21 @@
+source: |
+  Come on, man. Don't be a pushover.
+
+expected: |
+  Vamos, hombre. No te dejes pisotear.
+
+glossary: []
+
+notes: |
+  Tests neutralization of a colloquial English expression into neutral Spanish.
+  "Come on, man" is an informal filler/interjection. "Vamos, hombre" is
+  pan-Latin-American neutral and avoids regional markers:
+    - NOT "Dale, che" (Rioplatense)
+    - NOT "Ándale, tío" (Spain/Mexico coloquial)
+    - NOT "Vamo, pana" (Caribbean)
+  "Don't be a pushover" → "No te dejes pisotear" (don't let yourself be
+  trampled/steamrolled) is the meaning-faithful neutral rendering.
+    - NOT "No seas un dejado" (regional: some countries, ambiguous register)
+    - NOT "No seas cobarde" (wrong meaning — cowardice ≠ passive compliance)
+  The reflexive "dejarse + infinitive" construction is universally understood
+  in neutral Latin American Spanish for passive acceptance of mistreatment.

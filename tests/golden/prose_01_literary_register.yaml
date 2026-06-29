@@ -1,0 +1,30 @@
+source: |
+  The library had stood for centuries at the heart of the city, its stone walls
+  bearing witness to revolutions and plagues, to the rise and fall of dynasties
+  that had long since been forgotten. Only the books remained, patient and
+  indifferent, outlasting every ambition that had ever sought shelter beneath
+  their vaulted roof.
+
+expected: |
+  La biblioteca había permanecido durante siglos en el corazón de la ciudad,
+  sus muros de piedra como testigos de revoluciones y pestes, del ascenso y la
+  caída de dinastías que hacía mucho habían caído en el olvido. Solo los libros
+  permanecían, pacientes e indiferentes, sobreviviendo a cada ambición que
+  alguna vez había buscado refugio bajo su techo abovedado.
+
+glossary: []
+
+notes: |
+  Tests literary register consistency in a formal prose paragraph.
+  Key decisions:
+  - "bearing witness" → "como testigos" (adjectival construction rather than
+    participial "siendo testigos de") is more literary in Spanish.
+  - "that had long since been forgotten" → "que hacía mucho habían caído en
+    el olvido" — the idiom "caer en el olvido" (to fall into oblivion) is
+    more literary than the calque "que habían sido olvidadas hace mucho".
+  - "patient and indifferent" → "pacientes e indiferentes" — the conjunction
+    "e" (not "y") before a word starting with "i" is mandatory in Spanish
+    grammar (euphonic rule).
+  - "outlasting" → "sobreviviendo a" — the gerund construction preserves the
+    aspect better than the participle "que sobrevivieron a".
+  - Register is consistently formal throughout; no colloquial vocabulary.

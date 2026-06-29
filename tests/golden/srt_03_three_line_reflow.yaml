@@ -1,0 +1,18 @@
+source: |
+  The investigation had been ongoing for almost three years without any conclusive results whatsoever.
+
+expected: |
+  La investigación había estado en curso durante casi tres años sin ningún resultado concluyente.
+
+glossary: []
+
+notes: |
+  Long single-line source (98 chars) that must trigger 3-line reflow at the
+  default line_length=42. The Spanish translation (80 chars) is shorter than
+  the English but still exceeds two lines at 42 chars each, so the SrtWriter
+  3-line fallback path activates.
+  "ongoing" → "en curso" is neutral and formal; "en marcha" would also be
+  valid but "en curso" is more register-neutral across Latin America.
+  "whatsoever" is an intensifier that is naturally absorbed into "ningún"
+  (already emphatic in Spanish negation) — adding "en absoluto" would be
+  redundant and unnatural.

@@ -1,0 +1,45 @@
+source: |
+  The Conclave met twice a year in the Chamber of Echoes to deliberate on
+  matters of doctrine. No outsider had ever witnessed its proceedings.
+
+  When the Conclave finally reached a verdict, its ruling was binding on all
+  members of the Order, without exception or appeal.
+
+expected: |
+  El Cónclave se reunía dos veces al año en la Cámara de los Ecos para
+  deliberar sobre asuntos de doctrina. Ningún extraño había presenciado jamás
+  sus deliberaciones.
+
+  Cuando el Cónclave llegó por fin a un veredicto, su resolución era
+  vinculante para todos los miembros de la Orden, sin excepción ni apelación.
+
+glossary:
+  - term: Conclave
+    translation: Cónclave
+    locked: true
+    note: "Fictional governing body — use Spanish form with accent"
+  - term: Chamber of Echoes
+    translation: Cámara de los Ecos
+    locked: true
+    note: "Fictional place name — translate the components, do not leave in English"
+  - term: Order
+    translation: Orden
+    locked: true
+    note: "Fictional religious/political organization — capitalize in Spanish"
+
+notes: |
+  Tests that locked glossary terms are used consistently across two paragraphs.
+  "Conclave" → "Cónclave" (with accent, Spanish form) must appear in BOTH
+  paragraphs where the term occurs.
+  "Chamber of Echoes" → "Cámara de los Ecos" (locked) appears only in para 1.
+  "Order" → "Orden" (locked, capitalized as a proper noun) appears in para 2.
+  Key decisions:
+  - "No outsider had ever witnessed its proceedings" → "Ningún extraño había
+    presenciado jamás sus deliberaciones" — "extraño" is neutral (not "intruso"
+    or "forastero" which have slightly different connotations); "sus
+    deliberaciones" preserves the plural noun better than "sus procedimientos"
+    (which is more bureaucratic/legal).
+  - "binding" → "vinculante" is the precise legal/formal adjective in neutral
+    Spanish; "obligatorio" would lose the specific sense of binding precedent.
+  - "without exception or appeal" → "sin excepción ni apelación" — the "ni"
+    construction (not "o") is grammatically correct in negative context.

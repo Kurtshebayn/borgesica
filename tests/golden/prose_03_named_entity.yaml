@@ -1,0 +1,39 @@
+source: |
+  In 1847, Charlotte Brontë published Jane Eyre under the pseudonym Currer Bell,
+  fearing that her work would not be taken seriously if readers knew the author
+  was a woman.
+
+expected: |
+  En 1847, Charlotte Brontë publicó Jane Eyre bajo el seudónimo de Currer Bell,
+  temerosa de que su obra no fuera tomada en serio si los lectores supieran que
+  la autora era una mujer.
+
+glossary:
+  - term: Charlotte Brontë
+    translation: Charlotte Brontë
+    locked: true
+    note: "Historical person — keep name exactly as in source"
+  - term: Jane Eyre
+    translation: Jane Eyre
+    locked: true
+    note: "Novel title — do not translate (Spanish editions keep the English title)"
+  - term: Currer Bell
+    translation: Currer Bell
+    locked: true
+    note: "Historical pseudonym — keep exactly as in source"
+
+notes: |
+  Tests that named entities (historical person, literary title, pseudonym) are
+  preserved verbatim. All three are locked in the glossary.
+  Key decisions:
+  - "fearing that" → "temerosa de que" — the adjective construction ("siendo
+    temerosa" would be heavier; the short participial/adjectival "temerosa" is
+    more natural) agrees with Charlotte as subject.
+  - "would not be taken seriously" → "no fuera tomada en serio" — subjunctive
+    is required after "si" (hypothetical condition referring to past) in the
+    indirect-speech clause. NOT "no sería tomada en serio" (conditional is
+    possible but subjunctive is more literary and precise here).
+  - "pseudonym" → "seudónimo" (with the "de" preposition: "bajo el seudónimo
+    de Currer Bell"). NOT "pseudónimo" — "seudónimo" is the standard RAE form.
+  - "if readers knew" → "si los lectores supieran" — imperfect subjunctive,
+    correct for a hypothetical past condition.
