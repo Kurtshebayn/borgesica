@@ -116,16 +116,29 @@ def chunk_prose(
     config: JobConfig,
     provider: "TranslationProvider",
 ) -> list[Chunk]:
-    """Prose chunker for EPUB — M2-2R provenance-aware implementation.
+    """Prose chunker for EPUB and PDF — M2-2R provenance-aware implementation.
 
-    Mirrors the SrtChunker pattern: takes per-node Chunks from EpubReader
-    and batches them while preserving provenance so EpubWriter can reinstate
-    each translated segment into its original XHTML node.
+    Mirrors the SrtChunker pattern: takes per-node Chunks from a document
+    reader (EpubReader or PdfPlumberReader) and batches them while preserving
+    source-locator provenance so the downstream writer can reinstate each
+    translated segment into its original document location.
+
+    Format-agnostic design (M3-FIX / W-M3-2):
+      - Each input Chunk must have meta["chapter_index"] for grouping.
+      - All OTHER meta keys are treated as format-specific source locators
+        and are passed through verbatim into each prose_nodes entry.
+      - EPUB nodes carry {"epub_item_href": str, "node_path": str, "chapter_index": int}
+        → prose_nodes entries: {"epub_item_href": str, "node_path": str}
+      - PDF nodes carry {"pdf_page": int, "para_index": int, "chapter_index": int}
+        → prose_nodes entries: {"pdf_page": int, "para_index": int}
+      - EpubWriter reads epub_item_href + node_path from prose_nodes.
+        PdfWriter (M4) will read pdf_page + para_index from prose_nodes.
+        The chunker has no knowledge of which format is in use.
 
     Args:
-        node_chunks: Ordered list of per-node Chunks from EpubReader.
-                     Each chunk must have meta["epub_item_href"],
-                     meta["node_path"], and meta["chapter_index"].
+        node_chunks: Ordered list of per-node Chunks from any prose reader.
+                     Each chunk must have meta["chapter_index"].  All other
+                     meta keys are passed through to prose_nodes.
         config: Job configuration; ``prose_chunk_tokens`` sets the token budget
                 per chunk.  ``model`` is forwarded to ``provider.count_tokens``.
         provider: Used ONLY for ``count_tokens(text, model)``; no translation
@@ -134,7 +147,7 @@ def chunk_prose(
     Returns:
         Ordered list of output Chunks.  Each chunk:
           - source_text: node texts joined with "\\n\\n"
-          - meta["prose_nodes"]: list[{"epub_item_href": str, "node_path": str}]
+          - meta["prose_nodes"]: list of source-locator dicts (format-specific keys),
                                  one entry per segment of source_text
           - index: 0-based output index
           - status: PENDING
@@ -177,9 +190,13 @@ def chunk_prose(
 
         for node in chapter_nodes:
             text = node.source_text
+            # Build a format-agnostic source-locator by passing through all
+            # meta keys EXCEPT "chapter_index" (the grouping key, not a locator).
+            # EPUB nodes contribute {"epub_item_href": ..., "node_path": ...}.
+            # PDF nodes contribute {"pdf_page": ..., "para_index": ...}.
+            # The downstream writer reads whichever keys its format expects.
             node_ref = {
-                "epub_item_href": node.meta.get("epub_item_href", ""),
-                "node_path": node.meta.get("node_path", ""),
+                k: v for k, v in node.meta.items() if k != "chapter_index"
             }
             node_tokens = provider.count_tokens(text, model)
 

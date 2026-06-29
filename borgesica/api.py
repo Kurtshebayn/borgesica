@@ -97,11 +97,15 @@ class TranslatorEngine:
 
         # 2. Read + chunk (dispatch by source type)
         cues = reader.read(source_path, config)
-        if config.source_type == SourceType.EPUB:
-            # EPUB: prose chunker with per-node provenance (M2-2R contract)
+        if config.source_type in (SourceType.EPUB, SourceType.PDF):
+            # Prose formats: chunker with per-node provenance (M2-2R / M3-FIX contract).
+            # EPUB nodes carry {epub_item_href, node_path, chapter_index}.
+            # PDF nodes carry {pdf_page, para_index, chapter_index}.
+            # chunk_prose passes through all meta keys except chapter_index into
+            # prose_nodes, making it format-agnostic.
             chunks = chunk_prose(cues, config, self._provider)
         else:
-            # SRT (and future PDF once M3 lands): cue-batch chunker
+            # SRT: cue-batch chunker (meta carries cue_batches + line_length)
             chunks = SrtChunker.chunk(cues, config)
 
         # 3. Seed glossary (no translation for "none" strategy)

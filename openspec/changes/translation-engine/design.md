@@ -239,6 +239,8 @@ Each step is a domain function; only `provider.translate`, `reader.read`, `write
 
 **Rationale**: License hygiene for an open-source tool that proprietary users may integrate. `pdf_plumber_reader.py` is the only PDF reader imported by default. `pdf_pymupdf_reader.py` lives behind the same `DocumentReader` port, is **never imported by `api.py` by default**, and carries a clear AGPL header + docs warning. The hexagonal port makes the swap a one-line DI change. (PDF is M3 — designed now, built later.)
 
+**Deviation (M3-FIX / W-M3-1)**: The table above says `layout=True` and the spec said the same. The implementation uses `page.extract_text()` with no arguments (pdfplumber default mode). `layout=True` produces whitespace-padded output where text positions are approximated spatially — this makes verbatim line-frequency boilerplate counting unreliable because padded lines do not match their unpadded counterparts across pages. Default extraction returns clean newline-separated text in reading order, which is exactly what the header/footer detection and hyphen-rejoin pipeline need. The deviation is technically correct and is the accepted implementation; the spec literal and this table should be read as "pdfplumber default extraction" going forward.
+
 ### Decision 5 — Translation quality: always-on philosophy prompt + optional reflection pass
 
 | Option | Tradeoff | Verdict |

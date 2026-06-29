@@ -807,7 +807,7 @@ Not fixed in this slice. When spine items produce 0 chunks (empty documents, nav
 
 M3 tasks depend on M2 being complete (prose chunker and EpubWriter patterns are established).
 
-### M3-1 [T] — PdfPlumberReader adapter
+### M3-1 [x] — PdfPlumberReader adapter
 
 **Depends on**: M2-3  
 **Spec**: book-translation/PDF-reader  
@@ -820,6 +820,59 @@ Tests (`tests/integration/test_pdf_reader.py`):
 Implement `borgesica/adapters/readers/pdf_plumber_reader.py` (pdfplumber, MIT).
 Create `borgesica/adapters/readers/pdf_pymupdf_reader.py` as a commented stub with AGPL header — not imported by default anywhere.
 Create `borgesica/adapters/writers/pdf_writer.py` stub (`write` raises `NotImplementedError("PDF output not supported in M3 — export as text or use source EPUB")`).
+
+**Implemented**: All 3 tests RED-before / GREEN-after. Suite: 209 passed, 1 skipped. ruff clean. Domain purity green. pdfplumber installed via `pip install -e ".[dev,pdf]"`. fpdf2 added to `dev` extras for fixture generation. Boilerplate detection threshold requires ≥ 3 pages to avoid false positives on single-page PDFs. `__main__.py` wires `SourceType.PDF → PdfPlumberReader` and `SourceType.PDF → PdfWriter`. PyMuPDF stub is a commented-only file — never imported in default paths.
+
+---
+
+## M3-FIX — M3 Verify Fix-Up (W-M3-1, W-M3-2, S-M3-2)
+
+These tasks address the sdd-verify findings reported after M3-1 completion.
+W-M3-3 and W-M3-4 are explicitly deferred — tracked but not fixed here.
+
+### W-M3-1 [x] — Document the layout=True deviation (doc + comment only)
+
+**Fixed**: Documentation only — no code behavior changed.
+- `openspec/changes/translation-engine/specs/book-translation/spec.md`: added "Deviation (M3-FIX / W-M3-1)" paragraph to the PDF reader requirement explaining that default `extract_text()` is used (not `layout=True`) because layout mode's positional whitespace padding makes verbatim line-frequency header/footer detection unreliable; reading order is still preserved.
+- `openspec/changes/translation-engine/design.md`: added "Deviation (M3-FIX / W-M3-1)" paragraph to Decision 4 with the same rationale.
+- `borgesica/adapters/readers/pdf_plumber_reader.py`: added a `# NOTE:` comment at the `extract_text()` call site (line ~86) pointing to the rationale and referencing W-M3-1 in spec.md and design.md.
+
+---
+
+### W-M3-2 [x] — Route PDF prose through chunk_prose, not SrtChunker
+
+**Composition choice**: `chunk_prose` generalized to be format-agnostic (no EPUB-specific keys hardcoded). The `node_ref` dict now passes through all meta keys EXCEPT `chapter_index` (the grouping key), making it work for both EPUB (`{epub_item_href, node_path}`) and PDF (`{pdf_page, para_index}`). No EPUB tests broken. `PdfPlumberReader` simplified to emit flat meta (`{pdf_page, chapter_index, para_index}`) instead of a pre-nested `prose_nodes` list — the reader no longer pre-builds what `chunk_prose` is responsible for building.
+
+**Files changed**:
+- `borgesica/adapters/readers/pdf_plumber_reader.py`: removed nested `prose_nodes` from emitted meta; now emits flat `{pdf_page, chapter_index, para_index}` per chunk. Updated module docstring.
+- `borgesica/domain/chunking.py`: `node_ref` now built as `{k: v for k, v in node.meta.items() if k != "chapter_index"}` — format-agnostic pass-through. Updated `chunk_prose` docstring.
+- `borgesica/api.py`: dispatch changed from `if EPUB → chunk_prose else SrtChunker` to `if EPUB or PDF → chunk_prose else SrtChunker`.
+
+**TDD**: `tests/integration/test_pdf_chunking_dispatch.py` — 2 tests.
+- `test_pdf_create_job_uses_chunk_prose_not_srt_chunker`: asserts that PDF chunks carry `prose_nodes` (not `cue_batches`), each node has `pdf_page` and `para_index` keys.
+- `test_pdf_chunk_prose_nodes_alignment`: asserts `source_text.split("\n\n")` length == `len(prose_nodes)` per chunk.
+- RED: Chunk 0 meta had `{'cue_batches': [...], 'line_length': 42}` — SrtChunker confirmed.
+- GREEN: after dispatch fix, all chunks carry `prose_nodes` with `pdf_page`/`para_index` locators.
+
+---
+
+### S-M3-2 [x] — Chapter-detection test coverage
+
+**Added**: `tests/integration/test_pdf_chapter_detection.py` — 2 tests.
+- `test_chapter_headings_produce_distinct_chapter_index_values`: 2-chapter PDF (each on its own page starting with "Chapter N" heading); asserts ≥2 distinct, 0-based, consecutive `chapter_index` values across chunks; asserts chapter-1 content has lower `chapter_index` than chapter-2 content.
+- `test_three_chapter_pdf_produces_three_distinct_chapter_indices`: 3-chapter PDF; asserts indices 0, 1, 2 all present.
+- RED: code existed but was completely untested (zero coverage of `_is_chapter_heading` / `chapter_index` increment path).
+- GREEN: existing implementation is correct; tests pass immediately once written.
+
+---
+
+### DEFERRED — W-M3-3: integration marker has no conftest.py enforcement hook
+
+Not fixed in this slice. Pre-existing gap since M2: `pytest.ini` declares `integration` and `golden` markers but there is no `conftest.py` skip hook to gate them behind `INTEGRATION=1`. All 53 integration tests currently run in every `pytest` invocation. Tracked for a future infrastructure hardening pass.
+
+### DEFERRED — W-M3-4: hyphen-rejoin over-joins legitimate compound hyphens
+
+Not fixed in this slice. The regex `(\w)-\n(\w)` cannot distinguish hyphenation artifacts (`incompre-\nhensible` → `incomprehensible`, correct) from legitimate compound hyphens split across lines (`well-\nknown` → `wellknown`, incorrect). Fixing this requires a dictionary-backed disambiguation approach. Tracked for a future text-cleanup hardening pass.
 
 ---
 

@@ -194,7 +194,9 @@ Then no incomplete output file SHALL be left at `out_path` (the writer SHALL wri
 
 ### Requirement: PDF reader (M3) extracts clean text from digital PDFs using pdfplumber by default
 
-The PDF reader adapter `PdfPlumberReader` SHALL extract text from digital (non-scanned) PDF files using `pdfplumber` with `layout=True`. It SHALL apply a post-extraction cleanup pipeline: strip repeated headers/footers (detected as lines appearing verbatim on ≥ 80% of pages), rejoin hyphenated line-breaks (`word-\n` → `word`), and detect chapter boundaries from heading patterns. The adapter SHALL NOT be used for scanned PDFs (OCR is out of scope for M3).
+The PDF reader adapter `PdfPlumberReader` SHALL extract text from digital (non-scanned) PDF files using `pdfplumber`. It SHALL apply a post-extraction cleanup pipeline: strip repeated headers/footers (detected as lines appearing verbatim on ≥ 80% of pages), rejoin hyphenated line-breaks (`word-\n` → `word`), and detect chapter boundaries from heading patterns. The adapter SHALL NOT be used for scanned PDFs (OCR is out of scope for M3).
+
+**Deviation (M3-FIX / W-M3-1)**: The spec originally said `layout=True`. The implementation deliberately uses `page.extract_text()` with no layout argument (pdfplumber default). `layout=True` inserts large amounts of positional whitespace padding to approximate visual layout, which makes verbatim line-frequency header/footer detection unreliable (padded lines never match verbatim). The default extraction produces clean newline-separated text and preserves reading order. This is technically superior for the use-case and is the accepted implementation; the original spec literal was incorrect.
 
 #### Scenario: header/footer stripping removes repeated boilerplate
 
