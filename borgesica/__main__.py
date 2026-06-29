@@ -66,7 +66,11 @@ def _build_engine(*, model: str, db_path: str = "") -> TranslatorEngine:
     # for people who only use the test helpers.
     from borgesica.adapters.checkpoints.sqlite_checkpoint import SQLiteCheckpointStore
     from borgesica.adapters.providers.anthropic_provider import AnthropicProvider
+    from borgesica.adapters.readers.epub_reader import EpubReader
+    from borgesica.adapters.readers.pdf_plumber_reader import PdfPlumberReader
     from borgesica.adapters.readers.srt_reader import SrtReader
+    from borgesica.adapters.writers.epub_writer import EpubWriter
+    from borgesica.adapters.writers.pdf_writer import PdfWriter
     from borgesica.adapters.writers.srt_writer import SrtWriter
     from borgesica.domain.glossary import NullGlossaryExtractor
 
@@ -78,8 +82,16 @@ def _build_engine(*, model: str, db_path: str = "") -> TranslatorEngine:
     return TranslatorEngine(
         provider=AnthropicProvider(api_key=api_key),
         checkpoint=SQLiteCheckpointStore(db_path=db_path),
-        readers={SourceType.SRT: SrtReader()},
-        writers={SourceType.SRT: SrtWriter()},
+        readers={
+            SourceType.SRT: SrtReader(),
+            SourceType.EPUB: EpubReader(),
+            SourceType.PDF: PdfPlumberReader(),
+        },
+        writers={
+            SourceType.SRT: SrtWriter(),
+            SourceType.EPUB: EpubWriter(),
+            SourceType.PDF: PdfWriter(),
+        },
         extractor=NullGlossaryExtractor(),  # default: no LLM glossary seed on CLI
     )
 

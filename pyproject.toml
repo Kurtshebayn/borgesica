@@ -18,7 +18,7 @@ epub = ["ebooklib>=0.18"]
 pdf = ["pdfplumber>=0.10"]
 pdf-fast = ["pymupdf4llm>=0.0.5"]  # WARNING: AGPL-3.0 license — opt-in only
 spacy = ["spacy>=3.7"]
-dev = ["pytest>=8", "pytest-cov", "ruff>=0.4"]
+dev = ["pytest>=8", "pytest-cov", "ruff>=0.4", "fpdf2>=2.7"]
 
 [project.scripts]
 borgesica = "borgesica.__main__:main"
