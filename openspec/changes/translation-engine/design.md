@@ -31,7 +31,7 @@ borgesica/
     readers/  srt_reader.py  epub_reader.py  pdf_plumber_reader.py
               pdf_pymupdf_reader.py   # AGPL, opt-in, not imported by default
     writers/  srt_writer.py  epub_writer.py  pdf_writer.py
-    providers/ anthropic_provider.py  ollama_provider.py(M4)  litellm_provider.py(M4)
+    providers/ anthropic_provider.py  openai_compatible_provider.py(M4)  ollama_provider.py(M4)
     checkpoints/ sqlite_checkpoint.py
     extraction/ spacy_extractor.py  llm_extractor.py
   api.py                 # TranslatorEngine: the public surface
@@ -251,6 +251,16 @@ Each step is a domain function; only `provider.translate`, `reader.read`, `write
 
 **Rationale**: A real failure shared by Sonnet, Haiku, and Google Translate — EN "a slot for a locking wooden beam across the door" → "una ranura para una viga de madera con cerradura" (nonsense: the beam doesn't HAVE a lock, it IS the lock; correct: "tranca de madera que cierra la puerta"). Two architecture-neutral levers: (1) the static instruction block ALWAYS carries a translation philosophy — translate MEANING and the physical IMAGE, never literal calques, prioritize naturalness while staying faithful (free; lifts every job's floor); (2) `quality_mode="reflective"` adds an orchestrator-level **translate → critique → revise** loop (extra provider calls; the `TranslationProvider` port is unchanged), ~2x cost/time, off by default, worth it for literary work. The M4 eval harness lets a user measure whether reflective actually helps THEIR content before paying 2x.
 
+### Decision 6 — Provider breadth via a generic OpenAI-compatible adapter
+
+| Option | Tradeoff | Verdict |
+|---|---|---|
+| One `OpenAICompatibleProvider` (generic, parameterized) | Single adapter unlocks DeepSeek, OpenRouter, Together, Fireworks, Groq, vLLM, LM Studio, Ollama `/v1`; structured-output tiering reuses the `AnthropicProvider` pattern | **Chosen** |
+| Per-provider adapters (DeepSeekProvider, GroqProvider, …) | Full control per provider; significant duplication across adapters that all speak the same protocol | Rejected — combinatorial boilerplate |
+| Reuse `AnthropicProvider` via DeepSeek's Anthropic-compat endpoint | Fewer files; BUT DeepSeek's Anthropic-compat endpoint is less documented and less stable than its OpenAI-compat one; locks us to the Anthropic SDK for a non-Anthropic provider | Rejected — wrong abstraction, fragile dependency |
+
+**Rationale**: DeepSeek, OpenRouter, Together AI, Fireworks, Groq, vLLM (local), and LM Studio all expose `/v1/chat/completions` — the same endpoint shape. One adapter behind the existing `TranslationProvider` port covers all of them with zero domain change. DeepSeek is delivered as a thin constructor preset (`base_url="https://api.deepseek.com"`, `default_model="deepseek-v4-flash"`) rather than a separate class. Structured-output tiering reuses the AnthropicProvider pattern: **Tier 1 function/tool-calling → Tier 2 JSON mode → Tier 3 prompt-and-parse + retry ≤ 2**; all-fail → `MalformedOutput`. The DeepSeek JSON-mode quirk (JSON mode occasionally returns EMPTY content) is specifically absorbed by Tier 3 — no special-case code, the existing retry handles it. Domain purity is fully preserved: `openai` SDK / `httpx` are imported ONLY under `adapters/providers/`; the domain never sees them. Ollama MAY collapse to a thin config of this same adapter (Ollama exposes an OpenAI-compatible `/v1` endpoint) — left as a decision for the M4-4 apply phase. DeepSeek V4 Flash pricing (~$0.14/Mtok input, $0.28/Mtok output) is roughly an order of magnitude cheaper than Anthropic Sonnet/Opus, making it the recommended cheap default. **Model-id note**: `deepseek-chat` / `deepseek-reasoner` are kept as aliases but deprecate 2026-07-24; use `deepseek-v4-flash` / `deepseek-v4-pro`. The engine is model-agnostic so no code change is required — documented in `MODELS.md`.
+
 ---
 
 ## 7. Error Handling & Resilience
@@ -293,7 +303,8 @@ Partial failure never loses paid work — every DONE chunk is committed before t
 | PDF opt-in | **pymupdf4llm** (AGPL, M3) | Fast/accurate; viral license → opt-in only |
 | Provider (M1) | **anthropic** SDK | First concrete `TranslationProvider`; tool-calling structured output |
 | Structured output | **instructor** — adapter-internal ONLY | Convenience inside Anthropic adapter; never in domain |
-| Provider (M4) | **ollama**, optional **litellm** | Local/offline + multi-provider behind same Protocol |
+| Provider (M4) | **openai** SDK (adapter-internal only) | `OpenAICompatibleProvider`: one adapter for any `/chat/completions` endpoint; DeepSeek preset ($0.14/$0.28 per Mtok — cheap default), also serves OpenRouter, Groq, vLLM, LM Studio, Ollama `/v1` |
+| Provider (M4) | **ollama** (may collapse to config) | Local/offline via `OllamaProvider` — MAY reuse `OpenAICompatibleProvider` + Ollama's `/v1` endpoint as a thin config rather than a separate native adapter; decision deferred to M4-4 apply |
 | Checkpoint | **sqlite3** (stdlib) | Zero-dep, ACID, crash-safe, idempotent |
 | Glossary | **LLM default**; **spacy** opt-in | Low install friction default; deterministic opt-in |
 | Tests | **pytest** | Strict TDD; fakes for provider, fixtures for I/O |

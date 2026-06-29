@@ -25,6 +25,10 @@ Strong quality at significantly lower cost. Recommended default for most jobs.
 | `claude-sonnet-4-5` | Anthropic | Best price/quality for translation tasks |
 | `claude-haiku-4-5` | Anthropic | Fastest and cheapest; good for drafts and estimation |
 | `claude-3-5-sonnet-20241022` | Anthropic | Previous Sonnet generation, still solid |
+| `deepseek-v4-flash` | DeepSeek (`https://api.deepseek.com`) | ~$0.14/Mtok input (cache miss), ~$0.0028/Mtok cache hit, ~$0.28/Mtok output — roughly 10× cheaper than Sonnet. Recommended cheap default for OpenAICompatibleProvider (M4). |
+| `deepseek-v4-pro` | DeepSeek (`https://api.deepseek.com`) | ~$0.435/Mtok input, ~$0.87/Mtok output. Higher quality than Flash; still significantly cheaper than Anthropic frontier models. |
+
+> **NOTE — DeepSeek model-id deprecation (2026-07-24)**: the legacy identifiers `deepseek-chat` and `deepseek-reasoner` continue to work as aliases after that date but are deprecated. Use `deepseek-v4-flash` and `deepseek-v4-pro` for new jobs. Borgésica passes model strings unchanged so no library update is needed — update your `--model` argument only.
 
 ### Private / Free / Offline
 

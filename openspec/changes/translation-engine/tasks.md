@@ -932,11 +932,44 @@ Implement `borgesica/domain/quality.py`:
 
 ---
 
-### M4-3 [T] — OllamaProvider adapter
+### M4-3 [T] — OpenAICompatibleProvider (DeepSeek + other OpenAI-compatible providers)
+
+**Depends on**: M1-11  
+**Spec**: quality-evaluation/OpenAICompatibleProvider (new requirement, above Ollama requirement)  
+**par**
+
+This task mirrors M1-11 (AnthropicProvider) but targets any OpenAI `/chat/completions`-compatible endpoint. No network in unit tests — all behavior is driven via a `FakeHttpClient`.
+
+Unit tests (`tests/unit/test_openai_compatible_provider.py`):
+
+1. `OpenAICompatibleProvider` satisfies `TranslationProvider` Protocol (runtime `isinstance` check).
+2. **Tier-1 tool-call success**: `FakeHttpClient` returns a valid tool-call response on the first call → `TranslationUnit` returned, exactly 1 HTTP call made.
+3. **Tier fallback to JSON mode**: Tier-1 tool-call rejected by `FakeHttpClient`; Tier-2 JSON-mode response is valid → `TranslationUnit` returned, 2 HTTP calls made.
+4. **JSON-mode empty-content → Tier-3 retry → success**: `FakeHttpClient` fails Tier-1 and returns EMPTY content on Tier-2 (the known DeepSeek JSON-mode quirk) → adapter falls through to Tier-3; valid JSON returned on first Tier-3 retry → `TranslationUnit` returned, no exception.
+5. **All tiers exhausted → `MalformedOutput`**: `FakeHttpClient` fails Tier-1, returns empty on Tier-2, returns invalid JSON on both Tier-3 retries → `MalformedOutput` raised; total call count equals Tier-1 + Tier-2 + 2 Tier-3 retries (no extra calls).
+6. **429 Retry-After honored**: `FakeHttpClient` returns HTTP 429 with `Retry-After: 2` on first call, valid on second → adapter waits ≥ 2 seconds (monkeypatch `time.sleep`) before retry, returns valid `TranslationUnit`.
+7. **3 × 5xx → `ProviderError`**: `FakeHttpClient` returns HTTP 5xx on all 3 attempts → `ProviderError` raised after exactly 3 attempts.
+8. **`price()` / `count_tokens()`**: `price("deepseek-v4-flash")` returns a tuple of two floats matching the DeepSeek Flash preset; unknown model returns the configured table default. `count_tokens(text, model)` returns a non-negative integer.
+9. **Configurable `base_url` / `api_key` / price-table with DeepSeek preset**: constructing the adapter with the DeepSeek preset (`base_url="https://api.deepseek.com"`, `default_model="deepseek-v4-flash"`) and inspecting the outgoing HTTP request asserts the correct base URL and model string in the request body (model string passed unchanged).
+10. **Import purity**: `openai` and `httpx` do NOT appear in any file under `borgesica/domain/` — already covered by the existing `test_domain_purity.py`; reference it, do not duplicate.
+
+Integration test (CI-gated by `DEEPSEEK_API_KEY` env, marked `@pytest.mark.integration`):
+11. Real call to `https://api.deepseek.com` with a short English text → valid `TranslationUnit`; `translation` non-empty; `pydantic.ValidationError` not raised.
+
+Implementation targets:
+- `borgesica/adapters/providers/openai_compatible_provider.py` — generic adapter; `openai` SDK (or `httpx` directly) as the HTTP layer, imported here and nowhere else.
+- A `DeepSeekPreset` factory function or named constructor (e.g. `OpenAICompatibleProvider.deepseek(api_key)`) with `base_url="https://api.deepseek.com"`, `default_model="deepseek-v4-flash"`, and a price table covering `deepseek-v4-flash` and `deepseek-v4-pro`.
+- `MODELS.md` — add DeepSeek models under the "Best Value" tier (see M4 MODELS.md update below).
+
+---
+
+### M4-4 [T] — OllamaProvider adapter
 
 **Depends on**: M1-11  
 **Spec**: quality-evaluation/Ollama-adapter  
 **par**
+
+NOTE: Ollama exposes an OpenAI-compatible `/v1/chat/completions` endpoint. The apply phase for this task MAY implement `OllamaProvider` as a thin config of `OpenAICompatibleProvider` (constructed with `base_url=f"http://{OLLAMA_HOST}/v1"`, `api_key="ollama"`, and a price table of zeroes) rather than a separate native adapter. That decision is left to the implementer; either approach is acceptable as long as the tests below pass and no network calls are made in unit tests.
 
 Tests:
 1. `OllamaProvider` satisfies `TranslationProvider` Protocol.
@@ -949,7 +982,7 @@ Implement `borgesica/adapters/providers/ollama_provider.py`.
 
 ---
 
-### M4-4 [T] — EpubReader: honor declared XHTML encoding (deferred from M2, S-M2-2)
+### M4-5 [T] — EpubReader: honor declared XHTML encoding (deferred from M2, S-M2-2)
 
 **Depends on**: M2-1
 **Spec**: book-translation/EPUB-reader
@@ -1009,7 +1042,10 @@ M0-1 → M0-2 → M0-3
                                     ↓
                                    M3-1 (PDF)
                                     ↓
-                          M4-1 (Fixtures) → M4-2 (Judge) || M4-3 (Ollama)
+                          M4-1 (Fixtures) → M4-2 (Judge)          [par]
+                          M1-11 (Anthropic) → M4-3 (OpenAICompatibleProvider) → M4-4 (Ollama)
+                                                                                  [par]
+                          M4-5 (EPUB non-UTF-8 encoding, depends M2-1)           [par]
 ```
 
 ---
