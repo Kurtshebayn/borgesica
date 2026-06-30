@@ -976,7 +976,7 @@ Implementation targets:
 
 ---
 
-### M4-4 [T] — OllamaProvider adapter
+### M4-4 [x] — OllamaProvider adapter
 
 **Depends on**: M1-11  
 **Spec**: quality-evaluation/Ollama-adapter  
@@ -992,6 +992,8 @@ Integration test (marked `@pytest.mark.integration`; gated by `OLLAMA_HOST` env)
 3. Real Ollama call → valid `TranslationUnit`, no `ValidationError`.
 
 Implement `borgesica/adapters/providers/ollama_provider.py`.
+
+**Implemented** (M4-4): `OllamaProvider` is a thin subclass (not wrapper) of `OpenAICompatibleProvider`. Design decision: subclass chosen over wrapper because OllamaProvider IS-A OpenAICompatibleProvider with different defaults (no duplicate constructor logic needed). Preset: `base_url="http://localhost:11434/v1"` (or `http://{OLLAMA_HOST}/v1` if env is set), `api_key="ollama"` (SDK requires non-empty; Ollama ignores it), `default_model="llama3"`, `price_table={}` with `price()` override returning `(0.0, 0.0)` for all models. No native `ollama` client lib — reuses the `openai` SDK from `openai-compat` extra (M4-3). Full Tier-1/2/3 fallback chain inherited. 7 unit tests RED→GREEN. Live integration test skipped without `OLLAMA_HOST`. Suite: **271 passed, 6 skipped**; ruff clean; domain purity green; `ollama_provider` NOT in default DI (not imported by api.py or __main__.py).
 
 ---
 
