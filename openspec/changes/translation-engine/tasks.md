@@ -943,7 +943,7 @@ without `GOLDEN=1`). Protocol NOT modified — TranslationUnit-as-carrier patter
 
 ---
 
-### M4-3 [T] — OpenAICompatibleProvider (DeepSeek + other OpenAI-compatible providers)
+### M4-3 [x] — OpenAICompatibleProvider (DeepSeek + other OpenAI-compatible providers)
 
 **Depends on**: M1-11  
 **Spec**: quality-evaluation/OpenAICompatibleProvider (new requirement, above Ollama requirement)  
@@ -971,6 +971,8 @@ Implementation targets:
 - `borgesica/adapters/providers/openai_compatible_provider.py` — generic adapter; `openai` SDK (or `httpx` directly) as the HTTP layer, imported here and nowhere else.
 - A `DeepSeekPreset` factory function or named constructor (e.g. `OpenAICompatibleProvider.deepseek(api_key)`) with `base_url="https://api.deepseek.com"`, `default_model="deepseek-v4-flash"`, and a price table covering `deepseek-v4-flash` and `deepseek-v4-pro`.
 - `MODELS.md` — add DeepSeek models under the "Best Value" tier (see M4 MODELS.md update below).
+
+**Implemented**: TDD RED→GREEN. Client choice: `openai` SDK (custom `base_url`), mirroring AnthropicProvider's vendor-SDK pattern. All 10 unit tests pass in `tests/unit/test_openai_compatible_provider.py` (14 test methods total including sub-cases). Integration test skipped without `DEEPSEEK_API_KEY`. Suite: 264 passed, 5 skipped (up from 250/4). ruff clean. Domain purity green — `openai` only in `adapters/providers/`. `openai-compat = ["openai>=1.0"]` added to `pyproject.toml` optional extras. Key design decisions: `_call_with_retry` helper retries 429 in-place (same tier) before falling through; empty Tier-2 content (DeepSeek quirk) detected as `not content.strip()` and triggers Tier-3; `_Propagate` sentinel relays server_err_count across tiers. TranslationProvider Protocol NOT modified.
 
 ---
 
