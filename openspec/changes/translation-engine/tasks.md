@@ -913,7 +913,7 @@ Tests (`tests/unit/test_quality_score.py`): `QualityScore` validates range [1,5]
 
 ---
 
-### M4-2 [T] — LLM-as-judge harness
+### M4-2 [x] — LLM-as-judge harness
 
 **Depends on**: M4-1  
 **Spec**: quality-evaluation/LLM-as-judge; quality-evaluation/back-translation  
@@ -931,6 +931,15 @@ Implement `borgesica/domain/quality.py`:
 - `evaluate(source: str, translation: str, glossary: Glossary, model: str) -> QualityScore`.
 - Optional `back_translate: bool = False`.
 - Judgment prompt covers all 4 rubric dimensions.
+
+**Implemented**: TDD RED→GREEN. `borgesica/domain/quality.py` created with `QualityHarness`,
+`advisory_gate()`, and `AdvisoryResult`. Deterministic unit tests in `tests/unit/test_quality.py`
+(19 tests). Golden advisory tests in `tests/golden/test_judge_golden.py` (3 tests, SKIPPED
+without `GOLDEN=1`). Protocol NOT modified — TranslationUnit-as-carrier pattern used with
+`# NOTE:` documenting the deliberate reuse. Back-translation uses `difflib.SequenceMatcher`
+(stdlib). Suite: 251 passed, 4 skipped. ruff clean. Domain purity green.
+
+**M4-2-FIX**: `evaluate()` is Tier-2 pure (no `back_translate` param, no `object.__setattr__` hack, returns clean `QualityScore`). `back_translation_similarity(source, translation, model) -> float` is a separate Tier-3 method on `QualityHarness` — callers opt in by calling it; skipping costs 0 extra provider calls. Tautological `hasattr(result, "back_similarity") or True` assertion removed; replaced with genuine ratio assertion (`ratio == 1.0` for identical strings). Suite: 250 passed, 4 skipped (net -1 test from 3→2 back-translate tests).
 
 ---
 

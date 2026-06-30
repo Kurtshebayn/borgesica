@@ -72,6 +72,11 @@ The harness SHALL support an optional `--back-translate` flag (or equivalent con
 
 This tier is NOT run in CI by default and SHALL NOT block any job or test suite if disabled.
 
+> **Implementation note (M4-2-FIX)**: "equivalent config" is realised as a separate method
+> `QualityHarness.back_translation_similarity(source, translation, model) -> float` on the harness.
+> Callers opt in by calling this method; not calling it costs 0 extra provider calls (equivalent
+> to the flag being absent). `evaluate()` is Tier-2 only and never triggers Tier-3 internally.
+
 #### Scenario: back-translation is skipped when flag is absent
 
 Given a default CI run (no `--back-translate` flag),
