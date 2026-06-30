@@ -167,8 +167,24 @@ def _extract_chunks_from_item(
                        ``chapter_index`` so ``chunk_prose`` can enforce chapter
                        boundaries without knowing which ``epub_item_href`` belongs
                        to which position in the spine.
+
+    Encoding note (M4-5 / S-M2-2):
+        We read ``item.content`` (raw bytes as stored in the ZIP) rather than
+        ``item.get_content()``.  ebooklib's ``get_content()`` calls
+        ``parse_html_string(self.content)`` with a hard-coded
+        ``html.HTMLParser(encoding='utf-8')`` that misinterprets non-UTF-8
+        chapters (e.g. ISO-8859-1 / windows-1252), then re-serialises the
+        tree as UTF-8 with the wrong bytes in place.  lxml's XML parser
+        (``etree.fromstring``) honours the ``<?xml ... encoding='...'>``
+        declaration when given raw bytes, so passing ``item.content`` directly
+        is both correct and cheaper (no intermediate re-encoding round-trip).
+        The HTML-parser fallback is retained for chapters that lack a valid
+        XML declaration (EPUB 2 HTML4 doctype, etc.).
     """
-    raw_content: bytes = item.get_content()
+    # Use item.content (raw bytes from ZIP) instead of item.get_content().
+    # item.get_content() always re-encodes via lxml.html.HTMLParser(encoding='utf-8')
+    # which corrupts non-UTF-8 content.  Raw bytes let lxml honour the declared encoding.
+    raw_content: bytes = getattr(item, "content", None) or b""
     if not raw_content:
         return []
 

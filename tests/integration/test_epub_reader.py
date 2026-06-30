@@ -486,3 +486,126 @@ def test_chunk_meta_contains_chapter_index() -> None:
         )
     finally:
         os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Test M4-5: Non-UTF-8 chapter encoding (iso-8859-1) → correct accented chars
+# ---------------------------------------------------------------------------
+
+
+def _make_epub_with_latin1_chapter() -> bytes:
+    """Build a minimal EPUB whose chapter content is encoded in ISO-8859-1.
+
+    The chapter declares ``<?xml version='1.0' encoding='iso-8859-1'?>`` and
+    stores accented bytes (0xe9 for é, 0xf1 for ñ, 0xf3 for ó) in ISO-8859-1.
+    ebooklib stores raw bytes; ``get_content()`` forces UTF-8 parsing -> mojibake.
+    The fix reads ``item.content`` directly and honours the declared encoding.
+    """
+    import io as _io
+    import zipfile as _zipfile
+
+    # Build the chapter in ISO-8859-1 (Latin-1).
+    # "Café", "mañana", "corazón" — the accented chars are meaningful test targets.
+    chapter_text_unicode = "Café mañana corazón"
+    chapter_xml_bytes = (
+        "<?xml version='1.0' encoding='iso-8859-1'?>"
+        "<html xmlns='http://www.w3.org/1999/xhtml'>"
+        "<head><title>Test</title></head>"
+        "<body><p>" + chapter_text_unicode + "</p></body>"
+        "</html>"
+    ).encode("iso-8859-1")
+
+    # We need to build a minimal EPUB ZIP manually because ebooklib always
+    # re-encodes content as UTF-8 when writing.  The raw ZIP is the only way
+    # to inject a genuine ISO-8859-1 XHTML file.
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+        # mimetype MUST be the first entry and uncompressed
+        zf.writestr(
+            _zipfile.ZipInfo("mimetype"),
+            "application/epub+zip",
+        )
+        zf.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?>'
+            '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+            "<rootfiles>"
+            '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+            "</rootfiles>"
+            "</container>",
+        )
+        zf.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<package xmlns="http://www.idpf.org/2007/opf" version="2.0"'
+            ' unique-identifier="uid">'
+            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            "<dc:identifier id=\"uid\">latin1-test</dc:identifier>"
+            "<dc:title>Latin-1 Test</dc:title>"
+            "<dc:language>en</dc:language>"
+            "</metadata>"
+            "<manifest>"
+            '<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+            "</manifest>"
+            '<spine toc="ncx">'
+            '<itemref idref="ch1"/>'
+            "</spine>"
+            "</package>",
+        )
+        zf.writestr(
+            "OEBPS/toc.ncx",
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"'
+            ' "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">'
+            '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
+            "<head><meta name=\"dtb:uid\" content=\"latin1-test\"/></head>"
+            "<docTitle><text>Latin-1 Test</text></docTitle>"
+            "<navMap>"
+            '<navPoint id="np1" playOrder="1">'
+            "<navLabel><text>Chapter 1</text></navLabel>"
+            '<content src="ch1.xhtml"/>'
+            "</navPoint>"
+            "</navMap>"
+            "</ncx>",
+        )
+        # Inject the ISO-8859-1 encoded chapter as raw bytes
+        zf.writestr("OEBPS/ch1.xhtml", chapter_xml_bytes)
+    return buf.getvalue()
+
+
+def test_non_utf8_chapter_encoding_produces_correct_accented_chars() -> None:
+    """EpubReader must honour the chapter's declared ISO-8859-1 encoding.
+
+    M4-5 / S-M2-2: a chapter whose XML declaration says ``encoding='iso-8859-1'``
+    and whose bytes are Latin-1 encoded should yield correct Unicode text in
+    ``source_text``.  Before the fix, ``get_content()`` forces UTF-8 -> replacement
+    char U+FFFD (``�``) or mojibake.  After the fix all accented chars survive.
+
+    RED (before fix): source_text contains U+FFFD -- replacement chars.
+    GREEN (after fix): source_text contains "Café", "mañana", "corazón" verbatim,
+    zero replacement chars.
+    """
+    epub_bytes = _make_epub_with_latin1_chapter()
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        assert chunks, "Expected at least one chunk from the ISO-8859-1 chapter"
+
+        # Collect all text from all chunks
+        all_text = " ".join(c.source_text for c in chunks)
+
+        # Must NOT contain the Unicode replacement character
+        assert "�" not in all_text, (
+            f"Replacement char U+FFFD found in source_text -- encoding not honoured. "
+            f"Got: {all_text!r}"
+        )
+
+        # Must contain the correct accented characters
+        assert "é" in all_text, f"Expected 'é' (from 'Café') in text, got: {all_text!r}"
+        assert "ñ" in all_text, f"Expected 'ñ' (from 'mañana') in text, got: {all_text!r}"
+        assert "ó" in all_text, f"Expected 'ó' (from 'corazón') in text, got: {all_text!r}"
+    finally:
+        os.unlink(path)

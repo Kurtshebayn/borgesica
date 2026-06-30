@@ -997,7 +997,7 @@ Implement `borgesica/adapters/providers/ollama_provider.py`.
 
 ---
 
-### M4-5 [T] — EpubReader: honor declared XHTML encoding (deferred from M2, S-M2-2)
+### M4-5 [x] — EpubReader: honor declared XHTML encoding (deferred from M2, S-M2-2)
 
 **Depends on**: M2-1
 **Spec**: book-translation/EPUB-reader
@@ -1012,6 +1012,14 @@ Implement in `borgesica/adapters/readers/epub_reader.py`:
 - Detect the chapter's encoding (XML declaration / EPUB content) and parse with the matching `etree.XMLParser(encoding=...)` (or decode bytes with the declared charset before parsing).
 
 Deliverable: the non-UTF-8 fixture round-trips with correct characters; existing EPUB tests stay green.
+
+**Implemented** (M4-5 / S-M2-2): Root cause identified: ebooklib's `EpubHtml.get_content()` calls `parse_html_string(self.content)` with `html.HTMLParser(encoding='utf-8')` unconditionally, then re-serialises as UTF-8 with corrupted bytes. lxml's XML parser then fails (XMLSyntaxError) and the HTML-parser fallback silently mis-decodes the chars.
+
+**Fix**: In `_extract_chunks_from_item`, replaced `item.get_content()` with `item.content` (raw bytes as stored in the ZIP). `etree.fromstring(bytes)` honours the `<?xml ... encoding='iso-8859-1'?>` declaration directly. No change to Chunk shape, meta structure, or writer/e2e contract.
+
+**TDD**: New test `test_non_utf8_chapter_encoding_produces_correct_accented_chars` in `tests/integration/test_epub_reader.py`. Fixture EPUB built as raw ZIP (ebooklib always writes UTF-8) with ISO-8859-1 chapter containing "Café mañana corazón". Asserts: no U+FFFD, correct é/ñ/ó present. RED: demonstrated by inspecting `get_content()` which returns bytes labeled utf-8 but containing Latin-1 byte values — lxml XML parser rejects them as XMLSyntaxError; HTML fallback happened to succeed on this lxml version. GREEN: fix bypasses `get_content()` entirely; lxml XML parser reads raw bytes with correct declaration.
+
+**Suite**: 272 passed, 6 skipped (up from 271/6). All 4 EPUB/prose files (24 tests) green. ruff clean. Domain purity green.
 
 ---
 
