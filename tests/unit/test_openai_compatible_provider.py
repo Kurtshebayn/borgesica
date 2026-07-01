@@ -28,7 +28,7 @@ from borgesica.adapters.providers.openai_compatible_provider import (
     OpenAICompatibleProvider,
 )
 from borgesica.domain.errors import MalformedOutput, ProviderError
-from borgesica.domain.models import TranslationUnit
+from borgesica.domain.models import TranslationResult, TranslationUnit
 from borgesica.domain.ports import TranslationProvider
 
 # ---------------------------------------------------------------------------
@@ -257,14 +257,16 @@ class TestProtocolConformance:
 
 class TestTier1ToolCallSuccess:
     def test_tier1_tool_call_returns_translation_unit(self):
-        """Tier-1: valid tool-call response on first call → TranslationUnit, 1 HTTP call."""
+        """Tier-1: valid tool-call response on first call → TranslationResult, 1 HTTP call."""
         provider, fake_client = _make_provider([_TOOL_CALL_RESPONSE])
 
         with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
             result = provider.translate("system", "Hello world", "deepseek-v4-flash")
 
-        assert isinstance(result, TranslationUnit)
-        assert result.translation == "Hola mundo"
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation == "Hola mundo"
+        assert result.usage.input_tokens >= 0, "usage.input_tokens must be populated"
+        assert result.usage.output_tokens >= 0, "usage.output_tokens must be populated"
         assert fake_client._call_index == 1
 
 
@@ -275,7 +277,7 @@ class TestTier1ToolCallSuccess:
 
 class TestTier2JsonModeFallback:
     def test_tier2_json_mode_returns_translation_unit(self):
-        """Tier-1 returns no tool_calls → Tier-2 JSON mode → TranslationUnit, 2 calls."""
+        """Tier-1 returns no tool_calls → Tier-2 JSON mode → TranslationResult, 2 calls."""
         provider, fake_client = _make_provider([
             _NO_TOOL_CALL_RESPONSE,   # Tier-1: no tool_calls
             _JSON_MODE_RESPONSE,       # Tier-2: JSON mode content
@@ -284,8 +286,8 @@ class TestTier2JsonModeFallback:
         with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
             result = provider.translate("system", "Hello world", "deepseek-v4-flash")
 
-        assert isinstance(result, TranslationUnit)
-        assert result.translation == "Hola mundo"
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation == "Hola mundo"
         assert fake_client._call_index == 2
 
 
@@ -296,7 +298,7 @@ class TestTier2JsonModeFallback:
 
 class TestTier2EmptyContentFallsToTier3:
     def test_empty_content_falls_through_to_tier3(self):
-        """Tier-1 fails, Tier-2 returns empty content → Tier-3 valid JSON → TranslationUnit."""
+        """Tier-1 fails, Tier-2 returns empty content → Tier-3 valid JSON → TranslationResult."""
         provider, fake_client = _make_provider([
             _NO_TOOL_CALL_RESPONSE,      # Tier-1: no tool_calls
             _EMPTY_CONTENT_RESPONSE,      # Tier-2: empty content (DeepSeek quirk)
@@ -306,8 +308,8 @@ class TestTier2EmptyContentFallsToTier3:
         with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
             result = provider.translate("system", "Hello world", "deepseek-v4-flash")
 
-        assert isinstance(result, TranslationUnit)
-        assert result.translation == "Hola mundo"
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation == "Hola mundo"
         # Tier-1 (1) + Tier-2 (1) + Tier-3 attempt 1 (1) = 3
         assert fake_client._call_index == 3
 
@@ -357,7 +359,8 @@ class TestRateLimitHandling:
         with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep", fake_sleep):
             result = provider.translate("system", "Hello", "deepseek-v4-flash")
 
-        assert isinstance(result, TranslationUnit)
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation is not None
         assert any(s >= 2 for s in slept_for), f"Expected sleep >= 2, got {slept_for}"
 
 

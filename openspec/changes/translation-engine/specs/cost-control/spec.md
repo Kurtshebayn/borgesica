@@ -131,17 +131,54 @@ Note: the mechanism for updating `budget_usd` on a persisted job is an API-layer
 
 ---
 
-### Requirement: cost is tracked and accumulated per chunk in real time
+### Requirement: cost is tracked and accumulated per chunk using REAL token usage (M4-6)
 
-After each chunk is successfully translated and persisted, `job.cost_usd` SHALL be incremented by the actual cost of that chunk (computed from token counts reported by the provider). The `Progress` object emitted via `on_progress` SHALL contain the current `cost_usd` value at the time of emission.
+After each provider call completes (whether the chunk succeeds, fails, or retries), `job.cost_usd`
+SHALL be incremented by the REAL cost of that call, computed from `TranslationResult.usage`
+(input_tokens and output_tokens as reported by the provider), multiplied by
+`provider.price(model)`.
+
+This requirement supersedes the pre-M4-6 behavior where cost was computed from
+`CostEstimator._project_chunk_cost()` (flat heuristic estimate). Real token counts are now used
+for ALL call types: draft, critique, revise (reflective mode), tag-mismatch retries, strip/reinsert
+fallback calls, and failed-chunk calls.
+
+The `Progress` object emitted via `on_progress` SHALL contain the current `cost_usd` value at the
+time of emission.
 
 #### Scenario: cost accumulates correctly across chunks
 
-Given a `FakeTranslationProvider` where each `translate` call reports 100 input tokens and 50 output tokens, and the model price is `$1.00/Mtok` input and `$5.00/Mtok` output,
+Given a `FakeTranslationProvider` where each `translate` call reports usage derived from
+`count_tokens(system + user)` for input and `count_tokens(translation)` for output,
+and the model price is `$1.00/Mtok` input and `$5.00/Mtok` output,
 
-When a 4-chunk job runs to completion,
+When a job runs to completion,
 
-Then `job.cost_usd` SHALL equal `4 * (100/1_000_000 * 1.0 + 50/1_000_000 * 5.0) = 4 * 0.00035 = 0.00140` (± floating point epsilon).
+Then `job.cost_usd` SHALL be strictly greater than 0 and SHALL grow monotonically with each
+additional chunk processed.
+
+#### Scenario: reflective mode accrues cost for all 3 passes per chunk
+
+Given a reflective-mode job (quality_mode="reflective") with 1 chunk,
+
+When the chunk is translated (draft + critique + revise = 3 provider calls),
+
+Then `job.cost_usd` SHALL equal the sum of the 3 individual call costs, NOT just 1 pass.
+
+#### Scenario: failed chunks accrue non-zero cost
+
+Given a job where chunk 0 fails all tag-mismatch retry attempts (3 primary + 1 fallback = 4 calls),
+
+When the job ends PAUSED,
+
+Then `job.cost_usd` SHALL be greater than 0, reflecting the token cost of all 4 calls made
+before the failure was recorded. Pre-M4-6 behavior (cost=0 for failed chunks) is a bug.
+
+#### Scenario: pre-run CostEstimate stays a conservative heuristic
+
+The `CostEstimator` (used by `estimate_cost`) continues to use `count_tokens` heuristics for
+pre-run estimates; it does NOT use real usage (unavailable before translation). The estimate
+is intentionally conservative and may differ from actual accumulated cost after the job runs.
 
 #### Scenario: progress callback carries current cost
 
@@ -149,4 +186,5 @@ Given a 3-chunk job running with `on_progress=callback`,
 
 When chunk 1 completes (the second chunk),
 
-Then the `Progress` object passed to `callback` SHALL have `cost_usd` equal to the accumulated cost of chunks 0 and 1.
+Then the `Progress` object passed to `callback` SHALL have `cost_usd` equal to the accumulated
+real-usage cost of all calls made for chunks 0 and 1.

@@ -43,7 +43,9 @@ from borgesica.domain.models import (
     JobConfig,
     JobStatus,
     SourceType,
+    TranslationResult,
     TranslationUnit,
+    Usage,
 )
 from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
 
@@ -121,7 +123,7 @@ class EpubTagFakeProvider(FakeTranslationProvider):
     This preserves tag counts (validate_tags passes) and segment count.
     """
 
-    def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+    def translate(self, system: str, user: str, model: str) -> TranslationResult:
         self.call_log.append((system, user, model))
 
         # Prefix each segment with "[ES] " — keeps tag count and structure
@@ -129,11 +131,14 @@ class EpubTagFakeProvider(FakeTranslationProvider):
         translated_segments = ["[ES] " + seg for seg in segments]
         translation_text = "\n\n".join(translated_segments)
 
-        return TranslationUnit(
+        unit = TranslationUnit(
             translation=translation_text,
             summary_update="Fake EPUB translation summary.",
             glossary_additions=[],
         )
+        in_tok = self.count_tokens(system + " " + user, model)
+        out_tok = self.count_tokens(unit.translation, model)
+        return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
 
 # ---------------------------------------------------------------------------

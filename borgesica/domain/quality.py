@@ -199,10 +199,10 @@ class QualityHarness:
         system_prompt = self._build_judge_system_prompt(glossary)
         user_message = _build_judge_user_message(source, translation, glossary)
 
-        unit = self._provider.translate(system_prompt, user_message, model)
+        result = self._provider.translate(system_prompt, user_message, model)
 
         # Parse QualityScore from the TranslationUnit.translation field (the carrier).
-        return self._parse_score(unit.translation)
+        return self._parse_score(result.unit.translation)
 
     def back_translation_similarity(
         self,
@@ -268,12 +268,12 @@ class QualityHarness:
 
     def _back_translate(self, spanish_text: str, model: str) -> str:
         """Translate the Spanish text back to English via the provider."""
-        unit = self._provider.translate(
+        result = self._provider.translate(
             _BACK_TRANSLATE_SYSTEM_PROMPT,
             spanish_text.strip(),
             model,
         )
-        return unit.translation
+        return result.unit.translation
 
     @staticmethod
     def _compute_similarity(original: str, back_translated: str) -> float:

@@ -1023,6 +1023,72 @@ Deliverable: the non-UTF-8 fixture round-trips with correct characters; existing
 
 ---
 
+### M4-6 [x] — Real token-usage cost accounting (debt #289 / S-2)
+
+**Depends on**: M4-3, M4-4 (OpenAICompatibleProvider + OllamaProvider complete)
+**Spec**: cost-control/cost-tracked-per-chunk; model-provider/translate-returns-TranslationResult
+**par**
+
+**Context**: Before M4-6, `job.cost_usd` was accumulated using `CostEstimator._project_chunk_cost()`
+(flat word-count heuristic × 150 assumed output tokens). Real token counts from the provider were
+discarded. Three bugs resulted:
+
+- **BUG-0**: cost accumulation used estimates, not real usage.
+- **BUG-1**: reflective mode charged only 1 pass of real tokens; critique+revise prompts (larger
+  than draft) were undercharged.
+- **BUG-2**: failed chunks accrued ZERO cost because `_actual_chunk_cost` was only called in the
+  DONE branch, never for FAILED/PAUSED chunks.
+
+**Protocol change** (M4-6 core):
+- `TranslationProvider.translate()` return type changed from `TranslationUnit` to `TranslationResult`.
+- New `Usage` model: `{input_tokens: int = 0, output_tokens: int = 0}`.
+- New `TranslationResult` model: `{unit: TranslationUnit, usage: Usage}`.
+- Both models added to `borgesica/domain/models.py`.
+- Port updated in `borgesica/domain/ports.py`.
+
+**Adapter changes**:
+- `AnthropicProvider.translate()`: returns `TranslationResult`; extracts real usage from
+  `response.usage.input_tokens / output_tokens`.
+- `OpenAICompatibleProvider.translate()`: returns `TranslationResult`; extracts real usage from
+  `response.usage.prompt_tokens / completion_tokens`.
+- `OllamaProvider`: thin subclass — inherits fix from `OpenAICompatibleProvider`.
+- `glossary.py` (LlmGlossaryExtractor): caller updated to `.unit.glossary_additions`.
+- `quality.py` (QualityHarness): caller updated to `.unit.translation` and `.unit` for
+  TranslationUnit-as-carrier pattern in judge + back-translate calls.
+
+**Orchestrator changes** (`borgesica/domain/orchestrator.py`):
+- Per-call real cost accrued into `running_cost` immediately after every `translate()` call
+  (draft, critique, revise, tag-retry, fallback).
+- `_usage_cost(usage, in_price, out_price)` static helper converts raw token counts to USD.
+- Failed chunks: cost is accrued BEFORE the failure is recorded — tokens were consumed.
+- `job.cost_usd` updated to `running_cost` on every persisted state transition.
+
+**Test changes** (migration to new return type):
+- `tests/fakes.py` (`FakeTranslationProvider.translate()`): returns `TranslationResult` with
+  deterministic usage (`count_tokens(system+" "+user)` for input, `count_tokens(translation)` for
+  output).
+- `tests/unit/test_orchestrator.py`: all inline provider subclasses updated to return
+  `TranslationResult`. Three new regression-guard tests added:
+  - `test_fast_mode_cost_is_real_usage_not_estimate` (BUG-0)
+  - `test_reflective_mode_cost_reflects_three_calls_per_chunk` (BUG-1)
+  - `test_failed_chunk_cost_is_nonzero` (BUG-2)
+- `tests/unit/test_quality.py`: tests use `FakeTranslationProvider` (now returns
+  `TranslationResult`); no assertion changes needed (quality tests assert on `QualityScore`, not
+  on the raw provider return).
+- `tests/unit/test_anthropic_provider.py`: assert `isinstance(result, TranslationResult)`;
+  access `.unit.translation` etc.
+- `tests/unit/test_openai_compatible_provider.py`: same migration as Anthropic tests.
+- `tests/integration/test_engine_e2e.py` (`LongFakeProvider`): returns `TranslationResult`.
+- `tests/integration/test_epub_engine_e2e.py` (`EpubTagFakeProvider`): returns `TranslationResult`.
+- `tests/integration/test_openai_compatible_provider_live.py`: migrated to `TranslationResult`.
+- `tests/integration/test_ollama_provider_live.py`: migrated to `TranslationResult`.
+
+**Deliverable**: Full suite green: 280 passed, 6 skipped (up from 272/6 before M4-6; the 8 new
+tests: 3 orchestrator regression guards + 5 provider/e2e migration fixes). ruff exits 0. Domain
+purity green. No remaining `.translation` access on a raw `translate()` result (grep-confirmed).
+
+---
+
 ## Cross-Cutting: Open Items Resolution
 
 These items are assigned to specific tasks above but explicitly documented here for traceability:

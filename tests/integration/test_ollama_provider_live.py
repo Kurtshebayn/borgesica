@@ -17,7 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from borgesica.adapters.providers.ollama_provider import OllamaProvider
-from borgesica.domain.models import TranslationUnit
+from borgesica.domain.models import TranslationResult, TranslationUnit
 
 
 @pytest.mark.integration
@@ -49,6 +49,6 @@ class TestOllamaProviderLive:
         except ValidationError as exc:
             pytest.fail(f"OllamaProvider returned output that failed ValidationError: {exc}")
 
-        assert isinstance(result, TranslationUnit), "Expected a TranslationUnit instance"
-        assert result.translation.strip(), "translation must be non-empty"
-        assert result.summary_update is not None
+        assert isinstance(result, TranslationResult), "Expected a TranslationResult instance"
+        assert result.unit.translation.strip(), "translation must be non-empty"
+        assert result.unit.summary_update is not None

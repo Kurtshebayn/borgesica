@@ -26,6 +26,9 @@ from borgesica.domain.models import (
     JobConfig,
     JobStatus,
     SourceType,
+    TranslationResult,
+    TranslationUnit,
+    Usage,
 )
 from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
 
@@ -276,18 +279,21 @@ def test_engine_e2e_line_length_propagates_through_pipeline(tmp_path):
     # We need control over the per-cue translation text. Use a custom provider
     # that always returns a fixed long translation for each cue.
     class LongFakeProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             self.call_log.append((system, user, model))
             # Return a multi-cue translation where each cue is "The quick brown fox jumps over lazy."
             # (one cue per line, separated by \n\n as the chunker joins them)
             cue_count = user.count("\n\n") + 1
             per_cue = "The quick brown fox jumps over lazy."
             translation_text = "\n\n".join([per_cue] * cue_count)
-            return TranslationUnit(
+            unit = TranslationUnit(
                 translation=translation_text,
                 summary_update="Fake.",
                 glossary_additions=[],
             )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider = LongFakeProvider()
     engine = TranslatorEngine(

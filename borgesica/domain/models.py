@@ -110,6 +110,30 @@ class TranslationUnit(BaseModel):
     glossary_additions: list[GlossaryEntry] = Field(default_factory=list)
 
 
+class Usage(BaseModel):
+    """Real token usage returned by a provider call.
+
+    Both fields default to 0 so callers can construct Usage() safely when
+    a provider does not expose usage (e.g. local Ollama with usage disabled).
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+class TranslationResult(BaseModel):
+    """Value object wrapping TranslationUnit + real per-call token Usage.
+
+    Returned by TranslationProvider.translate() (M4-6 protocol change).
+    The orchestrator uses .unit for all content logic and .usage to accrue
+    real cost for every provider call (including reflective passes, retries,
+    and fallback calls — fixes debt #289 / S-2).
+    """
+
+    unit: TranslationUnit
+    usage: Usage = Field(default_factory=Usage)
+
+
 class CostEstimate(BaseModel):
     input_tokens: int
     output_tokens: int

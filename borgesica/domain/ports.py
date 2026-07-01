@@ -16,7 +16,7 @@ from borgesica.domain.models import (
     JobConfig,
     Progress,
     RollingSummary,
-    TranslationUnit,
+    TranslationResult,
 )
 
 # ---------------------------------------------------------------------------
@@ -58,9 +58,12 @@ class TranslationProvider(Protocol):
     The domain only sees this interface — never any SDK types.
     """
 
-    def translate(self, system: str, user: str, model: str) -> TranslationUnit:
-        """Return a VALID TranslationUnit.  Adapter is responsible for retries
-        and structured-output fallback chains."""
+    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+        """Return a TranslationResult containing a VALID TranslationUnit and the
+        real token Usage for this call.  Adapters MUST populate usage from the
+        provider response — not an estimate.  Retries and structured-output
+        fallback chains are the adapter's responsibility; each retry is a separate
+        call and may have its own Usage."""
         ...
 
     def count_tokens(self, text: str, model: str) -> int:

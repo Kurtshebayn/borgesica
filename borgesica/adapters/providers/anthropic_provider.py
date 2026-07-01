@@ -44,7 +44,7 @@ import anthropic
 from pydantic import ValidationError
 
 from borgesica.domain.errors import MalformedOutput, ProviderError
-from borgesica.domain.models import TranslationUnit
+from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
 
 if TYPE_CHECKING:
     pass
@@ -126,8 +126,8 @@ class AnthropicProvider:
 
     # --- TranslationProvider Protocol ---
 
-    def translate(self, system: str, user: str, model: str) -> TranslationUnit:
-        """Return a validated TranslationUnit.
+    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+        """Return a TranslationResult with a validated TranslationUnit and real Usage.
 
         Strategy:
           1. Use tool-calling: request the model to call `submit_translation`.
@@ -135,6 +135,11 @@ class AnthropicProvider:
           3. If plain-text response → try JSON parse (fallback).
           4. Retry up to self._max_retries on transient/malformed failures.
           5. Exhausted retries → raise MalformedOutput (malformed) or ProviderError (5xx).
+
+        Usage is populated from response.usage.input_tokens / output_tokens on
+        every successful response.  On retry, only the last (successful) response's
+        usage is returned — callers that need per-call granularity should not retry
+        internally; that is the orchestrator's responsibility.
         """
         last_error: Exception | None = None
 
@@ -150,7 +155,8 @@ class AnthropicProvider:
                 )
                 unit = self._parse_response(response)
                 if unit is not None:
-                    return unit
+                    usage = self._extract_usage(response)
+                    return TranslationResult(unit=unit, usage=usage)
                 # Malformed but no exception — retry with a more explicit prompt
                 last_error = ValueError("No valid TranslationUnit in response")
 
@@ -202,6 +208,22 @@ class AnthropicProvider:
         return _PRICE_TABLE.get(model, _DEFAULT_PRICE)
 
     # --- Internal helpers ---
+
+    def _extract_usage(self, response: Any) -> Usage:
+        """Extract real token usage from an Anthropic response.
+
+        Anthropic SDK returns a Usage object on response.usage with
+        input_tokens and output_tokens fields.  If the attribute is missing
+        (e.g. a fake client in tests), fall back to zero Usage.
+        """
+        try:
+            raw = response.usage
+            return Usage(
+                input_tokens=int(raw.input_tokens),
+                output_tokens=int(raw.output_tokens),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return Usage()
 
     def _parse_response(self, response: Any) -> TranslationUnit | None:
         """Extract a TranslationUnit from an Anthropic response.

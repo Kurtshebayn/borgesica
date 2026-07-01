@@ -34,7 +34,9 @@ from borgesica.domain.models import (
     Progress,
     RollingSummary,
     SourceType,
+    TranslationResult,
     TranslationUnit,
+    Usage,
 )
 from borgesica.domain.orchestrator import TranslationOrchestrator
 from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
@@ -579,26 +581,29 @@ def test_reflective_persisted_text_is_revise_output():
     call_sequence: list[str] = []
 
     class SequencedProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             n = len(self.call_log)
             self.call_log.append((system, user, model))
             # call 0 = draft, call 1 = critique, call 2 = revise
             step = n % 3
             if step == 0:
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="DRAFT_TEXT",
                     summary_update="Draft summary.",
                 )
             elif step == 1:
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="CRITIQUE_TEXT",
                     summary_update="Critique summary.",
                 )
             else:
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="REVISED_TEXT",
                     summary_update="Revised summary.",
                 )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider = SequencedProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -637,21 +642,24 @@ def test_tag_mismatch_retry_succeeds_on_second():
     call_count_ref: list[int] = [0]
 
     class TagMismatchProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             n = len(self.call_log)
             self.call_log.append((system, user, model))
             if n == 0:
                 # First call: translation has mismatched tags (extra <i>)
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="<i>Texto</i> <i>extra</i>",
                     summary_update="Summary.",
                 )
             else:
                 # Second call: correct — no tags (original source also has no tags)
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="Texto correcto.",
                     summary_update="Summary.",
                 )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider = TagMismatchProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -690,13 +698,16 @@ def test_tag_mismatch_all_retries_fail_chunk_failed_job_paused():
     store = InMemoryCheckpointStore()
 
     class AlwaysMismatchProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             self.call_log.append((system, user, model))
             # Always return extra tags — source has no tags
-            return TranslationUnit(
+            unit = TranslationUnit(
                 translation="<i>Always mismatched</i>",
                 summary_update="Summary.",
             )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider = AlwaysMismatchProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -746,19 +757,23 @@ def test_glossary_midrun_new_term_in_next_chunk_prompt():
     call_counter: list[int] = [0]
 
     class GlossaryAddingProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             n = len(self.call_log)
             self.call_log.append((system, user, model))
             if n == 2:  # 3rd call = chunk index 2
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="Texto con Zorblax.",
                     summary_update="Summary with Zorblax.",
                     glossary_additions=[new_term],
                 )
-            return TranslationUnit(
-                translation=f"[translated] {user}",
-                summary_update="Summary.",
-            )
+            else:
+                unit = TranslationUnit(
+                    translation=f"[translated] {user}",
+                    summary_update="Summary.",
+                )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider2 = GlossaryAddingProvider()
     orch2, _, _ = make_orchestrator(provider=provider2, store=store)
@@ -802,13 +817,16 @@ def test_glossary_midrun_locked_entry_not_overridden():
     conflict_entry = GlossaryEntry(term="Mystara", translation="WRONG OVERRIDE", locked=False)
 
     class ConflictProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             self.call_log.append((system, user, model))
-            return TranslationUnit(
+            unit = TranslationUnit(
                 translation="Texto con Mystara.",
                 summary_update="Summary.",
                 glossary_additions=[conflict_entry],
             )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider = ConflictProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -848,14 +866,17 @@ def test_rolling_summary_chunk_n_uses_n1_summary():
     summaries_seen: list[str] = []
 
     class SummaryTrackingProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             self.call_log.append((system, user, model))
             summaries_seen.append(system)
             n = len(self.call_log) - 1
-            return TranslationUnit(
+            unit = TranslationUnit(
                 translation=f"Translation {n}.",
                 summary_update=f"Summary of chunk {n}.",
             )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider = SummaryTrackingProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -988,22 +1009,25 @@ def test_tags_in_text_mismatch_retry_succeeds_on_second():
     store = InMemoryCheckpointStore()
 
     class MismatchThenOkProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             n = len(self.call_log)
             self.call_log.append((system, user, model))
             if n == 0:
                 # First attempt: tags missing in output → validate_tags will fail
                 # (source has <i>...</i> but translation has none)
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="El zorro rápido.",  # missing tags
                     summary_update="Summary.",
                 )
             else:
                 # Second attempt: tags preserved → validate_tags passes
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="El zorro <i>rápido</i>.",
                     summary_update="Summary.",
                 )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider = MismatchThenOkProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -1049,22 +1073,25 @@ def test_all_tags_in_text_fail_falls_back_to_strip_reinsert():
     call_count_ref: list[int] = [0]
 
     class AllTagsFailThenPlainProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             n = len(self.call_log)
             self.call_log.append((system, user, model))
             if n < 3:
                 # First 3 calls (tags-in-text attempts): drop a tag → validate_tags fails
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="El zorro rápido.",  # missing <i>...</i>
                     summary_update="Summary.",
                 )
             else:
                 # 4th call (fallback — plain text translate): return plain translation
                 # strip() will have removed tags; plain text in → plain text out → valid
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="El zorro rápido.",
                     summary_update="Summary.",
                 )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     provider = AllTagsFailThenPlainProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -1108,7 +1135,7 @@ def test_both_tags_in_text_and_fallback_fail_chunk_failed_job_paused():
     store = InMemoryCheckpointStore()
 
     class AlwaysMismatchProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             self.call_log.append((system, user, model))
             # Always produce a translation that has DIFFERENT tag count from source.
             # Source has 2 tags (<i> and </i>), we return 0 tags from the first 3
@@ -1117,10 +1144,13 @@ def test_both_tags_in_text_and_fallback_fail_chunk_failed_job_paused():
             n = len(self.call_log) - 1
             if n < 3:
                 # Tags-in-text: return 0 tags (source has 2) → mismatch
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="El zorro rápido.",
                     summary_update="Summary.",
                 )
+                in_tok = self.count_tokens(system + " " + user, model)
+                out_tok = self.count_tokens(unit.translation, model)
+                return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
             else:
                 # Fallback call (plain text): return EXTRA tags → mismatch again
                 # After reinsert, the result will have the original tags reinserted
@@ -1191,15 +1221,18 @@ def test_unexpected_exception_in_fallback_propagates():
     store = InMemoryCheckpointStore()
 
     class BoomOnFallbackProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
             n = len(self.call_log)
             self.call_log.append((system, user, model))
             if n < 3:
                 # Tags-in-text attempts: drop the tags → validate_tags fails.
-                return TranslationUnit(
+                unit = TranslationUnit(
                     translation="El zorro rápido.",  # 0 tags vs 2 in source
                     summary_update="Summary.",
                 )
+                in_tok = self.count_tokens(system + " " + user, model)
+                out_tok = self.count_tokens(unit.translation, model)
+                return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
             # Fallback call: raise an UNEXPECTED (non-provider) error.
             raise RuntimeError("unexpected boom in fallback")
 
@@ -1321,4 +1354,180 @@ def test_cue_spanning_tag_regression():
     assert "<i>" in provider.call_log[0][1], (
         "Provider user-message must contain inline tags (tags-in-text path). "
         f"Got user message: {provider.call_log[0][1][:200]!r}"
+    )
+
+
+# ===========================================================================
+# M4-6 — Real token-usage cost accounting (regression guards)
+# ===========================================================================
+#
+# FakeTranslationProvider.price() = (1.0, 5.0) — $1/Mtok in, $5/Mtok out.
+# FakeTranslationProvider.translate() returns TranslationResult with usage
+# derived from count_tokens(system + " " + user, model) for input and
+# count_tokens(unit.translation, model) for output.
+#
+# chunk source_text = "Chunk 0 text." etc.  (from make_chunks)
+# count_tokens("Chunk N text.", model) = len("Chunk N text.".split()) = 3 words = 3 tokens
+# System prompt is generated by ContextManager — we need to measure it
+# deterministically.  But rather than hard-coding the prompt length we use
+# FakeTranslationProvider.count_tokens which just counts words.
+#
+# The key assertions are relative/directional, not exact-USD bets, EXCEPT for
+# the BUG-1 (reflective-cost: 3× calls must produce 3× cost vs 1× call) and
+# BUG-2 (failed-chunk cost is > 0).
+# ===========================================================================
+
+
+def test_fast_mode_cost_is_real_usage_not_estimate():
+    """M4-6 / BUG-0 regression: job.cost_usd is based on TranslationResult.usage
+    (real per-call tokens), NOT the old flat estimate.
+
+    FakeTranslationProvider returns TranslationResult with:
+      - input_tokens  = count_tokens(system + " " + user, model)  [word count]
+      - output_tokens = count_tokens(unit.translation, model)      [word count]
+
+    For a 1-chunk job with source_text="Chunk 0 text." (3 words) and the system
+    prompt generated by ContextManager (measurable word count), the expected cost
+    is: (in_tok/1e6)*1.0 + (out_tok/1e6)*5.0 — summed over all calls.
+
+    We verify: cost > 0 AND cost for 3 chunks > cost for 1 chunk (real accrual).
+    """
+    # 1-chunk job
+    orch1, _, store1 = make_orchestrator()
+    config = make_config(quality_mode="fast")
+    job1 = make_job(config, total=1)
+    chunks1 = make_chunks(1)
+    result1 = run_job(orch1, job1, chunks1, store=store1)
+    assert result1.cost_usd > 0.0, "1-chunk fast-mode cost must be > 0"
+
+    # 3-chunk job — cost must be ~3× the 1-chunk cost (same prompts, 3 calls)
+    orch3, _, store3 = make_orchestrator()
+    job3 = make_job(config, total=3)
+    chunks3 = make_chunks(3)
+    result3 = run_job(orch3, job3, chunks3, store=store3)
+    assert result3.cost_usd > result1.cost_usd, (
+        "3-chunk cost must exceed 1-chunk cost (real usage accrued per call)."
+    )
+    # 3 chunks should cost roughly 3× 1 chunk (within 50% tolerance for prompt variation)
+    ratio = result3.cost_usd / result1.cost_usd
+    assert 2.0 <= ratio <= 4.0, (
+        f"3-chunk cost ratio {ratio:.2f}× unexpected. Expected 2–4× of 1-chunk cost."
+    )
+
+
+def test_reflective_mode_cost_reflects_three_calls_per_chunk():
+    """BUG-1 regression guard: reflective mode makes 3 provider calls per chunk.
+    With REAL per-call usage, reflective cost > fast cost because critique and
+    revise prompts are much longer (they include the original text + draft + context).
+
+    Old code bug: _actual_chunk_cost used _project_chunk_cost which correctly
+    multiplied passes×3 but used a FLAT 150 output tokens. With real usage,
+    the reflective mode's critique+revise prompts are substantially longer than
+    the draft prompt, so actual cost >> old estimate.
+
+    This test uses a TrackingProvider that asserts it was called exactly 3× per chunk,
+    AND that the accrued cost accounts for all 3 calls (not just 1).
+    """
+    call_costs: list[float] = []
+
+    class TrackingProvider(FakeTranslationProvider):
+        """Returns TranslationResult with tracked usage to enable per-call cost checks."""
+        def translate(self, system: str, user: str, model: str) -> "TranslationResult":  # type: ignore[override]
+            from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
+            self.call_log.append((system, user, model))
+            n = len(self.call_log) - 1
+            step = n % 3
+            if step == 0:
+                text = f"[translated] {user}"
+            elif step == 1:
+                text = "critique notes"
+            else:
+                text = f"[revised] {user}"
+            unit = TranslationUnit(translation=text, summary_update="Summary.")
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(text, model)
+            call_costs.append((in_tok / 1e6) * 1.0 + (out_tok / 1e6) * 5.0)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = TrackingProvider()
+    store = InMemoryCheckpointStore()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(quality_mode="reflective")
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    result = run_job(orch, job, chunks, config=config, store=store)
+
+    # Exactly 3 calls for 1 reflective chunk
+    assert provider.call_count == 3, f"Expected 3 calls for reflective, got {provider.call_count}"
+
+    # BUG-1 guard: cost must equal sum of ALL 3 calls' usage, not just 1 call
+    expected_cost = sum(call_costs)
+    assert result.cost_usd == pytest.approx(expected_cost, rel=1e-6), (
+        f"Reflective cost {result.cost_usd:.8f} must equal sum of all 3 call costs "
+        f"{expected_cost:.8f}. Bug-1: old code charged only 1 pass."
+    )
+
+
+def test_failed_chunk_cost_is_nonzero():
+    """BUG-2 regression guard: a chunk that fails all attempts accrues COST > 0.
+    Old code: failed chunk cost was ZERO because _actual_chunk_cost was only called
+    in the DONE branch, never for FAILED/PAUSED chunks.
+    New code: real usage from every call is accrued into running_cost before
+    the failure is recorded — so failed chunks' calls ARE paid for."""
+    store = InMemoryCheckpointStore()
+
+    accumulated_call_costs: list[float] = []
+
+    class AlwaysMismatchProvider(FakeTranslationProvider):
+        """Always returns mismatched tags; tracks individual call costs."""
+        def translate(self, system: str, user: str, model: str) -> "TranslationResult":  # type: ignore[override]
+            from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="<i>Always mismatched</i>",
+                summary_update="Summary.",
+            )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            call_cost = (in_tok / 1e6) * 1.0 + (out_tok / 1e6) * 5.0
+            accumulated_call_costs.append(call_cost)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = AlwaysMismatchProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    # Plain text source (no tags) — provider returns tags → tag mismatch for all 3+1 calls
+    chunks = [Chunk(index=0, source_text="No tags here.")]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    assert result.status == JobStatus.PAUSED
+
+    # BUG-2 guard: failed chunk must have cost > 0 (4 calls were made and charged)
+    assert result.cost_usd > 0.0, (
+        "Failed-chunk cost must be > 0. Calls were made and tokens were consumed. "
+        "Bug-2: old code set cost=0 for failed chunks because _actual_chunk_cost "
+        "was only called in the DONE branch."
+    )
+    # The accrued cost must equal the sum of all call costs (4 calls: 3 primary + 1 fallback)
+    expected_total = sum(accumulated_call_costs)
+    assert result.cost_usd == pytest.approx(expected_total, rel=1e-6), (
+        f"Failed chunk cost {result.cost_usd:.8f} must equal total of all call costs "
+        f"{expected_total:.8f} ({len(accumulated_call_costs)} calls made)."
     )

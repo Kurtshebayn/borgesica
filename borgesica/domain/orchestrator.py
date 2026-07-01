@@ -58,6 +58,7 @@ from borgesica.domain.models import (
     Progress,
     RollingSummary,
     TranslationUnit,
+    Usage,
 )
 from borgesica.domain.ports import CheckpointStore, ProgressCallback, TranslationProvider
 
@@ -212,14 +213,24 @@ class TranslationOrchestrator:
             # Build system prompt for this chunk.
             system_prompt = self._ctx.build_system_prompt(config, live_glossary, current_summary)
 
+            # Fetch price once per chunk (same model throughout — no need to re-fetch per call).
+            in_price, out_price = self._provider.price(config.model)
+
             # PRIMARY: send source_text WITH tags (do NOT strip up front).
             # The system prompt instructs the model to carry every tag with its word.
             # FALLBACK (if primary exhausted): strip → translate plain → reinsert.
-            final_unit, final_text = self._translate_with_retry(
+            final_unit, final_text, call_cost = self._translate_with_retry(
                 chunk=chunk,
                 system=system_prompt.text,
                 config=config,
+                in_price=in_price,
+                out_price=out_price,
             )
+
+            # Accrue the real cost of ALL calls made (regardless of success or failure).
+            # This fixes both Bug-1 (reflective charges 3 calls) and Bug-2 (failed
+            # chunks charged 0 — now they accrue the cost of every attempt made).
+            running_cost += call_cost
 
             if final_unit is None:
                 # All retries exhausted — chunk FAILED, job PAUSED.
@@ -255,10 +266,6 @@ class TranslationOrchestrator:
             if final_unit.glossary_additions:
                 live_glossary = merge_additions(live_glossary, final_unit.glossary_additions)
                 self._checkpoint.save_glossary(job.id, live_glossary)
-
-            # Accrue cost.
-            chunk_cost = self._actual_chunk_cost(chunk, config)
-            running_cost += chunk_cost
 
             # Emit progress callback.
             on_progress(
@@ -300,7 +307,13 @@ class TranslationOrchestrator:
         return self._checkpoint.load_summary(job_id)
 
     def _project_chunk_cost(self, chunk: Chunk, config: JobConfig) -> float:
-        """Estimate the cost of translating a single chunk (for budget guard)."""
+        """Estimate the cost of translating a single chunk (pre-call budget GUARD only).
+
+        This is a CONSERVATIVE PROJECTION used before the provider call to decide
+        whether to proceed.  It is NOT used to accrue actual cost — that comes from
+        TranslationResult.usage after each real call.  Do NOT remove this method;
+        the budget guard requires it.
+        """
         input_tokens = self._provider.count_tokens(chunk.source_text, config.model)
         output_tokens = 150  # conservative default (same as CostEstimator)
         passes = 3 if config.quality_mode == "reflective" else 1
@@ -310,20 +323,22 @@ class TranslationOrchestrator:
             + output_tokens * passes / 1_000_000 * out_price
         )
 
-    def _actual_chunk_cost(self, chunk: Chunk, config: JobConfig) -> float:
-        """Compute the actual cost charged for a completed chunk.
-
-        Uses the same projection formula as _project_chunk_cost for consistency.
-        A real adapter would return actual token counts; here we use the estimate.
-        """
-        return self._project_chunk_cost(chunk, config)
+    @staticmethod
+    def _usage_cost(usage: Usage, in_price: float, out_price: float) -> float:
+        """Compute the USD cost for a single provider call's real Usage."""
+        return (
+            usage.input_tokens / 1_000_000 * in_price
+            + usage.output_tokens / 1_000_000 * out_price
+        )
 
     def _translate_with_retry(
         self,
         chunk: Chunk,
         system: str,
         config: JobConfig,
-    ) -> tuple[TranslationUnit | None, str | None]:
+        in_price: float,
+        out_price: float,
+    ) -> tuple[TranslationUnit | None, str | None, float]:
         """Attempt translation using the tags-in-text PRIMARY path, with up to
         _MAX_TAG_RETRIES retries on tag-count mismatch, then a deterministic
         FALLBACK (strip → translate plain → reinsert) if all primary attempts fail.
@@ -337,33 +352,41 @@ class TranslationOrchestrator:
           - Applied only after all primary attempts fail.
           - strip(source) → translate plain text (fresh provider call) → reinsert(tags).
           - validate_tags again; if pass → chunk DONE using fallback output.
-          - If provider raises or validate_tags fails → return (None, None).
+          - If provider raises or validate_tags fails → return (None, None, total_cost).
 
         Returns:
-            (TranslationUnit, translated_text) on success.
-            (None, None) if both primary and fallback fail.
+            (TranslationUnit, translated_text, total_call_cost) on success.
+            (None, None, total_call_cost) if both primary and fallback fail.
+            total_call_cost is the SUM of real usage costs from ALL calls made
+            (including failed attempts and the fallback call).
         """
         user_prompt = chunk.source_text  # PRIMARY: send WITH tags
+        total_call_cost = 0.0
 
         # --- PRIMARY: tags-in-text attempts ---
         for attempt in range(_MAX_TAG_RETRIES + 1):  # 0, 1, 2
             if config.quality_mode == "reflective":
-                unit, translated_text = self._translate_reflective(
+                unit, translated_text, call_cost = self._translate_reflective(
                     system=system,
                     user=user_prompt,
                     config=config,
+                    in_price=in_price,
+                    out_price=out_price,
                 )
+                total_call_cost += call_cost
             else:
-                unit = self._provider.translate(
+                result = self._provider.translate(
                     system=system,
                     user=user_prompt,
                     model=config.model,
                 )
-                translated_text = unit.translation
+                unit = result.unit
+                translated_text = result.unit.translation
+                total_call_cost += self._usage_cost(result.usage, in_price, out_price)
 
             # Validate tag counts in the raw translation (tags-in-text path).
             if validate_tags(chunk.source_text, translated_text):
-                return unit, translated_text
+                return unit, translated_text, total_call_cost
 
             # Tag mismatch — retry unless this was the last attempt.
 
@@ -372,14 +395,16 @@ class TranslationOrchestrator:
         # Apply the OLD deterministic path as a last resort.
         try:
             plain_source, tags = strip(chunk.source_text)
-            fallback_unit = self._provider.translate(
+            fallback_result = self._provider.translate(
                 system=system,
                 user=plain_source,
                 model=config.model,
             )
+            total_call_cost += self._usage_cost(fallback_result.usage, in_price, out_price)
+            fallback_unit = fallback_result.unit
             fallback_text = reinsert(fallback_unit.translation, tags, plain_source)
             if validate_tags(chunk.source_text, fallback_text):
-                return fallback_unit, fallback_text
+                return fallback_unit, fallback_text, total_call_cost
         except (MalformedOutput, ProviderError):
             # Provider failed during the fallback call — treat as total failure
             # (chunk FAILED, job PAUSED). Any OTHER exception (a real bug in
@@ -388,25 +413,37 @@ class TranslationOrchestrator:
             pass
 
         # Both primary and fallback failed.
-        return None, None
+        return None, None, total_call_cost
 
     def _translate_reflective(
         self,
         system: str,
         user: str,
         config: JobConfig,
-    ) -> tuple[TranslationUnit, str]:
+        in_price: float,
+        out_price: float,
+    ) -> tuple[TranslationUnit, str, float]:
         """Execute the translate → critique → revise loop.
 
         As of M2-0, the user prompt is the source text WITH inline tags (tags-in-text
         primary path). The REVISE step's output is returned as the translated_text;
         the caller validates tags against chunk.source_text.
 
-        Returns (final_unit, translated_text) where translated_text is
-        the REVISE step's output (raw — caller handles validate_tags).
+        Each of the 3 provider calls accrues real usage; the total is returned
+        as the third element so the orchestrator can add it to running_cost
+        regardless of whether this reflective pass ultimately passed validation.
+
+        Returns (final_unit, translated_text, total_cost) where:
+          - final_unit: the REVISE step's TranslationUnit
+          - translated_text: the REVISE step's translation (caller validates tags)
+          - total_cost: sum of real usage costs for all 3 calls (draft+critique+revise)
         """
+        total_cost = 0.0
+
         # Step 1: Draft translation (user prompt has tags)
-        draft_unit = self._provider.translate(system=system, user=user, model=config.model)
+        draft_result = self._provider.translate(system=system, user=user, model=config.model)
+        total_cost += self._usage_cost(draft_result.usage, in_price, out_price)
+        draft_unit = draft_result.unit
         draft_text = draft_unit.translation
 
         # Step 2: Critique
@@ -415,12 +452,13 @@ class TranslationOrchestrator:
             f"Draft translation:\n{draft_text}\n\n"
             "Please critique the draft translation above."
         )
-        critique_unit = self._provider.translate(
+        critique_result = self._provider.translate(
             system=_CRITIQUE_SYSTEM,
             user=critique_prompt,
             model=config.model,
         )
-        critique_text = critique_unit.translation
+        total_cost += self._usage_cost(critique_result.usage, in_price, out_price)
+        critique_text = critique_result.unit.translation
 
         # Step 3: Revise
         revise_prompt = (
@@ -429,10 +467,13 @@ class TranslationOrchestrator:
             f"Critique:\n{critique_text}\n\n"
             "Please produce a revised translation."
         )
-        revised_unit = self._provider.translate(
+        revised_result = self._provider.translate(
             system=_REVISE_SYSTEM,
             user=revise_prompt,
             model=config.model,
         )
+        total_cost += self._usage_cost(revised_result.usage, in_price, out_price)
+        revised_unit = revised_result.unit
+
         # Return the REVISE output directly; caller validates tags.
-        return revised_unit, revised_unit.translation
+        return revised_unit, revised_unit.translation, total_cost

@@ -88,12 +88,12 @@ class LlmGlossaryExtractor:
             Glossary populated with entries from the LLM response.
         """
         user_prompt = f"Extract terminology from the following text:\n\n{text}"
-        unit = self._provider.translate(
+        result = self._provider.translate(
             system=_EXTRACTION_SYSTEM_PROMPT,
             user=user_prompt,
             model=config.model,
         )
-        return Glossary(entries=list(unit.glossary_additions))
+        return Glossary(entries=list(result.unit.glossary_additions))
 
 
 # ---------------------------------------------------------------------------

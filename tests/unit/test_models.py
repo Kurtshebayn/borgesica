@@ -237,3 +237,57 @@ def test_provider_error_status_code_can_be_none() -> None:
 
     err = ProviderError(status_code=None)
     assert err.status_code is None
+
+
+# ---------------------------------------------------------------------------
+# M4-6 — Usage + TranslationResult models
+# ---------------------------------------------------------------------------
+
+
+def test_usage_defaults_to_zero_tokens() -> None:
+    """Usage must default both fields to 0."""
+    from borgesica.domain.models import Usage
+
+    u = Usage()
+    assert u.input_tokens == 0
+    assert u.output_tokens == 0
+
+
+def test_usage_construction_with_values() -> None:
+    """Usage must accept explicit input_tokens and output_tokens."""
+    from borgesica.domain.models import Usage
+
+    u = Usage(input_tokens=100, output_tokens=50)
+    assert u.input_tokens == 100
+    assert u.output_tokens == 50
+
+
+def test_translation_result_requires_unit() -> None:
+    """TranslationResult must hold a TranslationUnit in .unit."""
+    from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
+
+    unit = TranslationUnit(translation="Hola", summary_update="Summary.")
+    result = TranslationResult(unit=unit)
+    assert result.unit is unit
+
+
+def test_translation_result_usage_defaults_to_empty_usage() -> None:
+    """TranslationResult.usage must default to Usage() when not supplied."""
+    from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
+
+    unit = TranslationUnit(translation="Hola", summary_update="Summary.")
+    result = TranslationResult(unit=unit)
+    assert isinstance(result.usage, Usage)
+    assert result.usage.input_tokens == 0
+    assert result.usage.output_tokens == 0
+
+
+def test_translation_result_accepts_explicit_usage() -> None:
+    """TranslationResult must accept an explicit Usage object."""
+    from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
+
+    unit = TranslationUnit(translation="Hola", summary_update="Summary.")
+    usage = Usage(input_tokens=200, output_tokens=80)
+    result = TranslationResult(unit=unit, usage=usage)
+    assert result.usage.input_tokens == 200
+    assert result.usage.output_tokens == 80

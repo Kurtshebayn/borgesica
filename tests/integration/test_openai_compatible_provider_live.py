@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from borgesica.adapters.providers.openai_compatible_provider import OpenAICompatibleProvider
-from borgesica.domain.models import TranslationUnit
+from borgesica.domain.models import TranslationResult, TranslationUnit
 
 
 @pytest.mark.integration
@@ -38,7 +38,9 @@ class TestOpenAICompatibleProviderLive:
             model="deepseek-v4-flash",
         )
 
-        assert isinstance(result, TranslationUnit), "Expected a TranslationUnit instance"
-        assert result.translation.strip(), "translation must be non-empty"
-        assert result.summary_update is not None
+        assert isinstance(result, TranslationResult), "Expected a TranslationResult instance"
+        assert result.unit.translation.strip(), "translation must be non-empty"
+        assert result.unit.summary_update is not None
+        assert result.usage.input_tokens >= 0, "usage.input_tokens must be non-negative"
+        assert result.usage.output_tokens >= 0, "usage.output_tokens must be non-negative"
         # No ValidationError should be raised (validated inside TranslationUnit.model_validate)

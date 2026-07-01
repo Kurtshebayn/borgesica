@@ -49,7 +49,7 @@ import openai
 from pydantic import ValidationError
 
 from borgesica.domain.errors import MalformedOutput, ProviderError
-from borgesica.domain.models import TranslationUnit
+from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -168,55 +168,60 @@ class OpenAICompatibleProvider:
     # TranslationProvider Protocol
     # ------------------------------------------------------------------
 
-    def translate(self, system: str, user: str, model: str) -> TranslationUnit:
-        """Return a validated TranslationUnit.
+    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+        """Return a TranslationResult with a validated TranslationUnit and real Usage.
 
         Tier-1 → Tier-2 → Tier-3 fallback chain.
         429 retries the SAME call (with Retry-After sleep) before falling through.
         5xx errors share a global counter; ProviderError after MAX_5XX_RETRIES.
         All tiers exhausted → MalformedOutput.
+
+        Usage is extracted from response.usage.prompt_tokens / completion_tokens
+        (OpenAI-compatible wire format) on the successful response.
         """
         server_err_count = 0
         last_error: Exception | None = None
 
         # ---- TIER-1: tool/function calling (with inline 429 retry) ----
-        unit = self._call_with_retry(
+        t1 = self._call_with_retry(
             self._tier1_tool_call, system, user, model,
             server_err_count_ref=[server_err_count],
         )
-        if isinstance(unit, _Propagate):
-            server_err_count = unit.server_err_count
-            last_error = unit.last_error
-        elif unit is not None:
-            return unit
-        # unit is None → Tier-1 returned no tool_call → fall through to Tier-2
+        if isinstance(t1, _Propagate):
+            server_err_count = t1.server_err_count
+            last_error = t1.last_error
+        elif t1 is not None:
+            unit, raw_response = t1
+            return TranslationResult(unit=unit, usage=self._extract_usage(raw_response))
+        # t1 is None → Tier-1 returned no tool_call → fall through to Tier-2
 
         # ---- TIER-2: JSON mode ----
-        result = self._call_with_retry(
+        t2 = self._call_with_retry(
             self._tier2_json_mode, system, user, model,
             server_err_count_ref=[server_err_count],
         )
-        if isinstance(result, _Propagate):
-            server_err_count = result.server_err_count
-            last_error = result.last_error
-        elif result is not None:
-            tier2_unit, empty_content = result  # type: ignore[misc]
+        if isinstance(t2, _Propagate):
+            server_err_count = t2.server_err_count
+            last_error = t2.last_error
+        elif t2 is not None:
+            tier2_unit, empty_content, t2_response = t2  # type: ignore[misc]
             if tier2_unit is not None:
-                return tier2_unit
+                return TranslationResult(unit=tier2_unit, usage=self._extract_usage(t2_response))
             # None + empty_content → DeepSeek quirk → fall through to Tier-3
 
         # ---- TIER-3: prompt-and-parse fallback (up to MAX_TIER3_RETRIES calls) ----
         for attempt in range(MAX_TIER3_RETRIES):
-            t3_result = self._call_with_retry(
+            t3 = self._call_with_retry(
                 lambda s, u, m: self._tier3_prompt_parse(s, u, m, attempt),
                 system, user, model,
                 server_err_count_ref=[server_err_count],
             )
-            if isinstance(t3_result, _Propagate):
-                server_err_count = t3_result.server_err_count
-                last_error = t3_result.last_error
-            elif t3_result is not None:
-                return t3_result  # type: ignore[return-value]
+            if isinstance(t3, _Propagate):
+                server_err_count = t3.server_err_count
+                last_error = t3.last_error
+            elif t3 is not None:
+                t3_unit, t3_response = t3  # type: ignore[misc]
+                return TranslationResult(unit=t3_unit, usage=self._extract_usage(t3_response))
             else:
                 last_error = ValueError("Tier-3: no valid JSON in response")
 
@@ -284,11 +289,31 @@ class OpenAICompatibleProvider:
     # Tier internals
     # ------------------------------------------------------------------
 
-    def _tier1_tool_call(self, system: str, user: str, model: str) -> TranslationUnit | None:
+    @staticmethod
+    def _extract_usage(response: Any) -> Usage:
+        """Extract real token usage from an OpenAI-compatible response.
+
+        The OpenAI wire format exposes usage.prompt_tokens and usage.completion_tokens
+        on the top-level response object.  If these attributes are missing (fake client,
+        streaming, or endpoint quirk), fall back to zero Usage.
+        """
+        try:
+            raw = response.usage
+            return Usage(
+                input_tokens=int(raw.prompt_tokens),
+                output_tokens=int(raw.completion_tokens),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return Usage()
+
+    def _tier1_tool_call(
+        self, system: str, user: str, model: str
+    ) -> tuple[TranslationUnit, Any] | None:
         """TIER-1: function/tool-calling.
 
-        Returns a TranslationUnit if the response contains a valid tool_call,
-        None otherwise (caller falls through to Tier-2).
+        Returns (TranslationUnit, raw_response) if the response contains a valid
+        tool_call, None otherwise (caller falls through to Tier-2).
+        The raw response is returned so the caller can extract real Usage.
         """
         response = self._client.chat.completions.create(
             model=model,
@@ -313,19 +338,21 @@ class OpenAICompatibleProvider:
                 if name == _TOOL_NAME and args_str:
                     try:
                         data = json.loads(args_str)
-                        return TranslationUnit.model_validate(data)
+                        unit = TranslationUnit.model_validate(data)
+                        return unit, response
                     except (json.JSONDecodeError, ValidationError):
                         return None
         return None
 
     def _tier2_json_mode(
         self, system: str, user: str, model: str
-    ) -> tuple[TranslationUnit | None, bool]:
+    ) -> tuple[TranslationUnit | None, bool, Any]:
         """TIER-2: JSON mode (response_format={'type': 'json_object'}).
 
-        Returns (TranslationUnit | None, empty_content: bool).
-        The DeepSeek quirk: when content is empty, returns (None, True) so the
-        caller can fall through to Tier-3 (do NOT treat as a parse error).
+        Returns (TranslationUnit | None, empty_content: bool, raw_response).
+        The DeepSeek quirk: when content is empty, returns (None, True, response) so
+        the caller can fall through to Tier-3 (do NOT treat as a parse error).
+        The raw_response is returned so the caller can extract real Usage.
         """
         # OpenAI JSON-mode requirement: the word "json" must appear in the prompt.
         json_hint = " Respond with a JSON object only."
@@ -342,21 +369,22 @@ class OpenAICompatibleProvider:
         content = getattr(choice.message, "content", None) or ""
         if not content.strip():
             # DeepSeek JSON-mode quirk: empty content — signal caller to fall through
-            return None, True
+            return None, True, response
         try:
             data = json.loads(content)
             unit = TranslationUnit.model_validate(data)
-            return unit, False
+            return unit, False, response
         except (json.JSONDecodeError, ValidationError):
-            return None, False
+            return None, False, response
 
     def _tier3_prompt_parse(
         self, system: str, user: str, model: str, attempt: int
-    ) -> TranslationUnit | None:
+    ) -> tuple[TranslationUnit, Any] | None:
         """TIER-3: prompt-and-parse fallback.
 
         Instructs the model to output JSON in the user prompt and parses the
         text response.  Called up to MAX_TIER3_RETRIES times.
+        Returns (TranslationUnit, raw_response) on success, None on parse failure.
         """
         json_instruction = (
             "\n\nYou MUST respond ONLY with a valid JSON object matching this schema:\n"
@@ -383,7 +411,8 @@ class OpenAICompatibleProvider:
             content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         try:
             data = json.loads(content)
-            return TranslationUnit.model_validate(data)
+            unit = TranslationUnit.model_validate(data)
+            return unit, response
         except (json.JSONDecodeError, ValidationError):
             return None
 

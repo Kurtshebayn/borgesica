@@ -92,6 +92,40 @@ Then `ProviderError` SHALL be raised after exactly 3 attempts (no 4th call).
 
 ---
 
+### Requirement: TranslationProvider.translate returns TranslationResult with real Usage (M4-6)
+
+`TranslationProvider.translate(system, user, model)` SHALL return a `TranslationResult` instance
+containing two fields:
+- `unit: TranslationUnit` — the validated structured translation output.
+- `usage: Usage` — the REAL token counts for this call, populated from the provider response
+  (`input_tokens` from prompt tokens, `output_tokens` from completion tokens).
+
+Adapters MUST populate `usage` from the actual API response, not from an estimate. If a provider
+response does not include token usage (e.g. streaming, or a fake client in tests), the adapter
+SHALL fall back to `Usage()` (zeros) rather than raising.
+
+Callers (orchestrator, quality harness, glossary extractor) access the translation via
+`result.unit`; they access cost accounting data via `result.usage`.
+
+#### Scenario: adapter returns TranslationResult with populated usage on a successful call
+
+Given a real (or faithfully-faked) provider response that includes token counts,
+
+When `provider.translate(system, user, model)` succeeds,
+
+Then the return value SHALL be an instance of `TranslationResult` where `result.unit` is a valid
+`TranslationUnit` and `result.usage.input_tokens >= 0` and `result.usage.output_tokens >= 0`.
+
+#### Scenario: fake client with no usage falls back to zero Usage
+
+Given a test double that returns a response with no `.usage` attribute,
+
+When the adapter's `_extract_usage(response)` is called,
+
+Then `Usage(input_tokens=0, output_tokens=0)` SHALL be returned and no exception SHALL be raised.
+
+---
+
 ### Requirement: model-agnostic selection — user provides model string, engine does not hardcode a default
 
 `JobConfig.model` is a required string with no engine-level default. The engine SHALL use whatever model string the caller provides and pass it unchanged to `TranslationProvider.translate` and `count_tokens`. The engine SHALL NOT validate that the string names a known model — that is the adapter's concern.

@@ -17,7 +17,9 @@ from borgesica.domain.models import (
     GlossaryEntry,
     Job,
     RollingSummary,
+    TranslationResult,
     TranslationUnit,
+    Usage,
 )
 
 
@@ -43,7 +45,7 @@ class FakeTranslationProvider:
 
     # --- TranslationProvider Protocol methods ---
 
-    def translate(self, system: str, user: str, model: str) -> TranslationUnit:
+    def translate(self, system: str, user: str, model: str) -> TranslationResult:
         call_index = len(self.call_log)
         self.call_log.append((system, user, model))
 
@@ -51,13 +53,19 @@ class FakeTranslationProvider:
             raise MalformedOutput(job_id="fake-job", chunk_index=call_index)
 
         if self.canned_unit is not None:
-            return self.canned_unit
+            unit = self.canned_unit
+        else:
+            unit = TranslationUnit(
+                translation=f"[translated] {user}",
+                summary_update="Fake summary.",
+                glossary_additions=[],
+            )
 
-        return TranslationUnit(
-            translation=f"[translated] {user}",
-            summary_update="Fake summary.",
-            glossary_additions=[],
-        )
+        # Deterministic usage: count_tokens on the actual input and output text
+        # so cost-based tests get exact, reproducible numbers.
+        in_tok = self.count_tokens(system + " " + user, model)
+        out_tok = self.count_tokens(unit.translation, model)
+        return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
     def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
         """Deterministic approximation: token ≈ word."""

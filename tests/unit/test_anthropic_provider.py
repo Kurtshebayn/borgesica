@@ -15,7 +15,7 @@ import pytest
 
 from borgesica.adapters.providers.anthropic_provider import AnthropicProvider
 from borgesica.domain.errors import MalformedOutput, ProviderError
-from borgesica.domain.models import TranslationUnit
+from borgesica.domain.models import TranslationResult, TranslationUnit
 from borgesica.domain.ports import TranslationProvider
 
 
@@ -112,7 +112,7 @@ class TestProtocolConformance:
 
 class TestGracefulDegradation:
     def test_invalid_tool_use_then_valid_text_fallback(self):
-        """First response has no tool_use → text fallback parsed → TranslationUnit returned."""
+        """First response has no tool_use → text fallback parsed → TranslationResult returned."""
         import json
 
         valid_json = json.dumps({
@@ -128,8 +128,8 @@ class TestGracefulDegradation:
         client = make_fake_client(responses)
         provider = AnthropicProvider(client=client)
         result = provider.translate("system", "Hello world", "claude-3-5-haiku-20241022")
-        assert isinstance(result, TranslationUnit)
-        assert result.translation == "Hola mundo"
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation == "Hola mundo"
 
     def test_all_three_tiers_fail_raises_malformed_output(self):
         """3 bad responses → MalformedOutput raised; exactly 3 attempts made."""
@@ -147,12 +147,15 @@ class TestGracefulDegradation:
         assert client.messages.create.call_count == 3
 
     def test_valid_tool_use_on_first_attempt(self):
-        """Happy path: tool_use block on first attempt → TranslationUnit returned directly."""
+        """Happy path: tool_use block on first attempt → TranslationResult returned directly."""
         responses = [_valid_tool_use_response("Buenos días")]
         client = make_fake_client(responses)
         provider = AnthropicProvider(client=client)
         result = provider.translate("system", "Good morning", "claude-3-5-haiku-20241022")
-        assert result.translation == "Buenos días"
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation == "Buenos días"
+        assert result.usage.input_tokens >= 0, "usage.input_tokens must be non-negative"
+        assert result.usage.output_tokens >= 0, "usage.output_tokens must be non-negative"
         assert client.messages.create.call_count == 1
 
 
@@ -195,7 +198,8 @@ class TestRateLimitHandling:
         with patch("borgesica.adapters.providers.anthropic_provider.time.sleep", fake_sleep):
             result = provider.translate("system", "Hello", "claude-3-5-haiku-20241022")
 
-        assert result.translation is not None
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation is not None
         assert any(s >= 2 for s in slept_for), f"Expected sleep >= 2, got {slept_for}"
 
 
@@ -303,6 +307,6 @@ class TestAnthropicProviderLive:
             user="The quick brown fox jumps over the lazy dog.",
             model="claude-3-5-haiku-20241022",
         )
-        assert isinstance(result, TranslationUnit)
-        assert result.translation.strip()
-        assert result.summary_update.strip()
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation.strip()
+        assert result.unit.summary_update.strip()
