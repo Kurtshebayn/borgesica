@@ -9,18 +9,21 @@ Usage:
     borgesica <subcommand> [options]          # after pip install
 
 Subcommands:
-    create  <srt_file> --model <model> [--chunk-size N] [--budget USD]
-             [--quality-mode fast|reflective]
+    create  <source_file> --model <model> [--provider anthropic|deepseek|ollama]
+             [--chunk-size N] [--budget USD] [--quality-mode fast|reflective]
+             (source format auto-detected from .srt/.epub/.pdf extension)
     estimate <job_id>
-    run     <job_id> --out <path>
-    resume  <job_id> --out <path>
+    run     <job_id> [--out <path>] [--provider ...]
+    resume  <job_id> [--out <path>] [--provider ...]
     status  <job_id>
     cancel  <job_id>
     glossary show   <job_id>
     glossary update <job_id> <term> <translation> [--lock]
 
-Environment:
-    ANTHROPIC_API_KEY  — required for real runs (not needed in tests via _build_engine mock)
+Environment (per provider; only the selected provider's key is required):
+    ANTHROPIC_API_KEY  — for --provider anthropic (default)
+    DEEPSEEK_API_KEY   — for --provider deepseek
+    OLLAMA_HOST        — for --provider ollama (optional; defaults to localhost:11434)
 """
 from __future__ import annotations
 
@@ -32,8 +35,37 @@ from pathlib import Path
 from typing import Any
 
 from borgesica.api import TranslatorEngine
-from borgesica.domain.errors import BorgésicaError, JobNotFoundError
+from borgesica.domain.errors import BorgésicaError, JobNotFoundError, UnsupportedFormatError
 from borgesica.domain.models import GlossaryEntry, JobConfig, Progress, SourceType
+
+# Map file extension → SourceType and back (extension → format detection).
+_EXT_TO_SOURCE_TYPE: dict[str, SourceType] = {
+    ".srt": SourceType.SRT,
+    ".epub": SourceType.EPUB,
+    ".pdf": SourceType.PDF,
+}
+_SOURCE_TYPE_TO_EXT: dict[SourceType, str] = {v: k for k, v in _EXT_TO_SOURCE_TYPE.items()}
+
+
+def _source_type_for(path: str) -> SourceType:
+    """Detect the SourceType from a file's extension (case-insensitive).
+
+    Raises:
+        UnsupportedFormatError: if the extension is not one of .srt/.epub/.pdf.
+    """
+    ext = Path(path).suffix.lower()
+    try:
+        return _EXT_TO_SOURCE_TYPE[ext]
+    except KeyError:
+        raise UnsupportedFormatError(
+            path=path,
+            reason=f"unsupported extension {ext!r}; supported formats: .srt, .epub, .pdf",
+        ) from None
+
+
+def _ext_for(source_type: SourceType) -> str:
+    """Return the output file extension for a SourceType (defaults to .txt)."""
+    return _SOURCE_TYPE_TO_EXT.get(source_type, ".txt")
 
 # ---------------------------------------------------------------------------
 # Engine builder — the ONLY place concrete adapters are instantiated from CLI
@@ -41,31 +73,72 @@ from borgesica.domain.models import GlossaryEntry, JobConfig, Progress, SourceTy
 # ---------------------------------------------------------------------------
 
 
-def _build_engine(*, model: str, db_path: str = "") -> TranslatorEngine:
-    """Construct a TranslatorEngine wired with real adapters.
+def _require_env(var: str, provider: str) -> str:
+    """Return env var *var* or exit(1) with a clear message naming the *provider*."""
+    value = os.environ.get(var)
+    if not value:
+        print(
+            f"ERROR: {var} environment variable is not set (required for --provider {provider}).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return value
 
-    Reads ANTHROPIC_API_KEY from the environment.
 
-    Args:
-        model:   Model string to pass to the provider (not validated here).
-        db_path: Path to the SQLite checkpoint DB. Defaults to ~/.borgesica/jobs.db.
-                 Pass ":memory:" for ephemeral use (testing / one-shot runs).
+def _build_provider(provider: str) -> Any:
+    """Instantiate a TranslationProvider by name.
 
-    Returns:
-        Fully wired TranslatorEngine.
+    Supported: 'anthropic' (ANTHROPIC_API_KEY), 'deepseek' (DEEPSEEK_API_KEY),
+    'ollama' (local; OLLAMA_HOST optional, no key needed).
 
     Raises:
-        SystemExit: if ANTHROPIC_API_KEY is not set.
+        SystemExit: if an unknown provider is given or a required key is missing.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
-        sys.exit(1)
+    name = provider.lower()
+    if name == "anthropic":
+        from borgesica.adapters.providers.anthropic_provider import AnthropicProvider
+
+        return AnthropicProvider(api_key=_require_env("ANTHROPIC_API_KEY", "anthropic"))
+    if name == "deepseek":
+        from borgesica.adapters.providers.openai_compatible_provider import (
+            OpenAICompatibleProvider,
+        )
+
+        key = _require_env("DEEPSEEK_API_KEY", "deepseek")
+        return OpenAICompatibleProvider.deepseek(api_key=key)
+    if name == "ollama":
+        from borgesica.adapters.providers.ollama_provider import OllamaProvider
+
+        return OllamaProvider()  # base_url resolved from OLLAMA_HOST; no API key needed
+    print(
+        f"ERROR: unknown provider {provider!r} (choose: anthropic, deepseek, ollama).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _build_engine(
+    *, provider: str = "anthropic", model: str = "", db_path: str = ""
+) -> TranslatorEngine:
+    """Construct a TranslatorEngine wired with real adapters for all formats.
+
+    Args:
+        provider: Provider name — 'anthropic' (default), 'deepseek', or 'ollama'.
+        model:    Model string (persisted in JobConfig; not validated here).
+        db_path:  SQLite checkpoint DB path. Defaults to ~/.borgesica/jobs.db.
+                  Pass ":memory:" for ephemeral use.
+
+    Returns:
+        Fully wired TranslatorEngine (SRT/EPUB/PDF readers + writers).
+
+    Raises:
+        SystemExit: if the selected provider's API key env var is not set.
+    """
+    translation_provider = _build_provider(provider)
 
     # Lazy imports — keep CLI startup fast and avoid dependency errors
     # for people who only use the test helpers.
     from borgesica.adapters.checkpoints.sqlite_checkpoint import SQLiteCheckpointStore
-    from borgesica.adapters.providers.anthropic_provider import AnthropicProvider
     from borgesica.adapters.readers.epub_reader import EpubReader
     from borgesica.adapters.readers.pdf_plumber_reader import PdfPlumberReader
     from borgesica.adapters.readers.srt_reader import SrtReader
@@ -80,7 +153,7 @@ def _build_engine(*, model: str, db_path: str = "") -> TranslatorEngine:
         db_path = str(db_dir / "jobs.db")
 
     return TranslatorEngine(
-        provider=AnthropicProvider(api_key=api_key),
+        provider=translation_provider,
         checkpoint=SQLiteCheckpointStore(db_path=db_path),
         readers={
             SourceType.SRT: SrtReader(),
@@ -120,14 +193,27 @@ def _print_progress(progress: Progress) -> None:
 
 
 def _cmd_create(args: argparse.Namespace, engine: TranslatorEngine) -> int:
+    try:
+        source_type = _source_type_for(args.source_file)
+    except UnsupportedFormatError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    if source_type is SourceType.PDF:
+        print(
+            "WARNING: PDF input can be read/translated, but PDF output is not yet "
+            "supported (the run step will fail at write). Use .epub or .srt for a full round-trip.",
+            file=sys.stderr,
+        )
+
     config = JobConfig(
-        source_type=SourceType.SRT,
+        source_type=source_type,
         model=args.model,
         chunk_size=getattr(args, "chunk_size", 25),
         budget_usd=getattr(args, "budget", None),
         quality_mode=getattr(args, "quality_mode", "fast"),  # type: ignore[arg-type]
     )
-    job = engine.create_job(args.srt_file, config)
+    job = engine.create_job(args.source_file, config)
     print(job.id)
     return 0
 
@@ -142,9 +228,17 @@ def _cmd_estimate(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         return 1
 
 
+def _resolve_out(args: argparse.Namespace, engine: TranslatorEngine) -> str:
+    """Return the explicit --out, or a default that matches the job's source format."""
+    if getattr(args, "out", None):
+        return str(args.out)
+    job = engine.status(args.job_id)  # raises JobNotFoundError if unknown
+    return _default_out(args.job_id, job.config.source_type)
+
+
 def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
-        out_path = args.out if hasattr(args, "out") and args.out else _default_out(args.job_id)
+        out_path = _resolve_out(args, engine)
         print(f"Running job {args.job_id} → {out_path}")
         final_job = engine.run_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
@@ -156,7 +250,7 @@ def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
 
 def _cmd_resume(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
-        out_path = args.out if hasattr(args, "out") and args.out else _default_out(args.job_id)
+        out_path = _resolve_out(args, engine)
         print(f"Resuming job {args.job_id} → {out_path}")
         final_job = engine.resume_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
@@ -212,8 +306,8 @@ def _cmd_glossary_update(args: argparse.Namespace, engine: TranslatorEngine) -> 
         return 1
 
 
-def _default_out(job_id: str) -> str:
-    return str(Path.home() / ".borgesica" / f"{job_id}_translated.srt")
+def _default_out(job_id: str, source_type: SourceType) -> str:
+    return str(Path.home() / ".borgesica" / f"{job_id}_translated{_ext_for(source_type)}")
 
 
 # ---------------------------------------------------------------------------
@@ -224,15 +318,27 @@ def _default_out(job_id: str) -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="borgesica",
-        description="Borgésica — literary SRT translation engine",
+        description="Borgésica — literary translation engine (SRT / EPUB / PDF)",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
+    provider_choices = ["anthropic", "deepseek", "ollama"]
+
     # create
-    p_create = sub.add_parser("create", help="Create a translation job from an SRT file")
-    p_create.add_argument("srt_file", help="Path to the source .srt file")
-    p_create.add_argument("--model", required=True, help="Model string (e.g. claude-haiku-4-5)")
+    p_create = sub.add_parser(
+        "create", help="Create a translation job from a source file (.srt/.epub/.pdf)"
+    )
+    p_create.add_argument(
+        "source_file", help="Path to the source file (.srt, .epub, or .pdf — format auto-detected)"
+    )
+    p_create.add_argument("--model", required=True, help="Model string (e.g. deepseek-v4-flash)")
+    p_create.add_argument(
+        "--provider",
+        choices=provider_choices,
+        default="anthropic",
+        help="Translation provider (default: anthropic)",
+    )
     p_create.add_argument("--chunk-size", type=int, default=25, dest="chunk_size")
     p_create.add_argument("--budget", type=float, default=None, help="Budget in USD")
     p_create.add_argument(
@@ -250,11 +356,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="Run (translate) a job")
     p_run.add_argument("job_id", help="Job ID")
     p_run.add_argument("--out", default=None, help="Output file path")
+    p_run.add_argument(
+        "--provider", choices=provider_choices, default="anthropic",
+        help="Provider to use for this run (must match what create used)",
+    )
 
     # resume
     p_resume = sub.add_parser("resume", help="Resume a paused or cancelled job")
     p_resume.add_argument("job_id", help="Job ID")
     p_resume.add_argument("--out", default=None, help="Output file path")
+    p_resume.add_argument(
+        "--provider", choices=provider_choices, default="anthropic",
+        help="Provider to use for this run (must match what create used)",
+    )
 
     # status
     p_status = sub.add_parser("status", help="Show current job status as JSON")
@@ -323,7 +437,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # For glossary commands, build engine lazily (tests mock _build_engine)
-    engine = _build_engine(model=getattr(args, "model", ""))
+    engine = _build_engine(
+        provider=getattr(args, "provider", "anthropic"),
+        model=getattr(args, "model", ""),
+    )
 
     dispatch: dict[str, Any] = {
         "create": _cmd_create,

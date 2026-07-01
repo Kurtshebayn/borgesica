@@ -118,7 +118,7 @@ def test_cli_status_unknown_job(tmp_path: Path, capsys: pytest.CaptureFixture) -
 
 
 def test_build_engine_requires_api_key() -> None:
-    """_build_engine raises or exits if ANTHROPIC_API_KEY is not set."""
+    """_build_engine raises or exits if ANTHROPIC_API_KEY is not set (default provider)."""
     import os
     from borgesica.__main__ import _build_engine
 
@@ -127,3 +127,63 @@ def test_build_engine_requires_api_key() -> None:
     with patch.dict(os.environ, env_without_key, clear=True):
         with pytest.raises((SystemExit, ValueError, KeyError)):
             _build_engine(model="fake-model", db_path=":memory:")
+
+
+# ---------------------------------------------------------------------------
+# CLI wiring for EPUB/PDF + provider selection (post-M4 CLI wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_source_type_for_maps_extensions() -> None:
+    """_source_type_for detects SRT/EPUB/PDF from the file extension (case-insensitive)."""
+    from borgesica.__main__ import _source_type_for
+    from borgesica.domain.models import SourceType
+
+    assert _source_type_for("subs.srt") == SourceType.SRT
+    assert _source_type_for("SUBS.SRT") == SourceType.SRT
+    assert _source_type_for("book.epub") == SourceType.EPUB
+    assert _source_type_for("/path/to/Doc.PDF") == SourceType.PDF
+
+
+def test_source_type_for_unknown_extension_raises() -> None:
+    """An unsupported extension raises UnsupportedFormatError with a clear message."""
+    from borgesica.__main__ import _source_type_for
+    from borgesica.domain.errors import UnsupportedFormatError
+
+    with pytest.raises(UnsupportedFormatError):
+        _source_type_for("notes.txt")
+
+
+def test_cli_create_epub_sets_epub_source_type() -> None:
+    """`create book.epub` builds a JobConfig with source_type=EPUB (not hardcoded SRT)."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import SourceType
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.create_job.return_value = MagicMock(id="job-epub-1")
+        mock_build.return_value = engine
+
+        code = main(
+            ["create", "book.epub", "--model", "deepseek-v4-flash", "--provider", "deepseek"]
+        )
+
+    assert code == 0
+    # create_job(path, config) — inspect the config that was passed.
+    passed_path, passed_config = engine.create_job.call_args.args
+    assert passed_path == "book.epub"
+    assert passed_config.source_type == SourceType.EPUB
+
+
+def test_build_engine_deepseek_requires_deepseek_key() -> None:
+    """provider=deepseek requires DEEPSEEK_API_KEY (not ANTHROPIC_API_KEY)."""
+    import os
+
+    from borgesica.__main__ import _build_engine
+
+    env = {k: v for k, v in os.environ.items() if k != "DEEPSEEK_API_KEY"}
+    with patch.dict(os.environ, env, clear=True):
+        with pytest.raises((SystemExit, ValueError, KeyError)):
+            _build_engine(provider="deepseek", model="deepseek-v4-flash", db_path=":memory:")
