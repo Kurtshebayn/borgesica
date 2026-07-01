@@ -365,24 +365,32 @@ class TranslationOrchestrator:
 
         # --- PRIMARY: tags-in-text attempts ---
         for attempt in range(_MAX_TAG_RETRIES + 1):  # 0, 1, 2
-            if config.quality_mode == "reflective":
-                unit, translated_text, call_cost = self._translate_reflective(
-                    system=system,
-                    user=user_prompt,
-                    config=config,
-                    in_price=in_price,
-                    out_price=out_price,
-                )
-                total_call_cost += call_cost
-            else:
-                result = self._provider.translate(
-                    system=system,
-                    user=user_prompt,
-                    model=config.model,
-                )
-                unit = result.unit
-                translated_text = result.unit.translation
-                total_call_cost += self._usage_cost(result.usage, in_price, out_price)
+            try:
+                if config.quality_mode == "reflective":
+                    unit, translated_text, call_cost = self._translate_reflective(
+                        system=system,
+                        user=user_prompt,
+                        config=config,
+                        in_price=in_price,
+                        out_price=out_price,
+                    )
+                    total_call_cost += call_cost
+                else:
+                    result = self._provider.translate(
+                        system=system,
+                        user=user_prompt,
+                        model=config.model,
+                    )
+                    unit = result.unit
+                    translated_text = result.unit.translation
+                    total_call_cost += self._usage_cost(result.usage, in_price, out_price)
+            except (MalformedOutput, ProviderError):
+                # The provider gave up on this attempt (after its own tiers/retries).
+                # Treat it as a failed attempt: retry, or fall through to the
+                # deterministic fallback after the last attempt. A single flaky
+                # chunk must NOT crash the whole run — worst case the chunk ends
+                # FAILED and the job PAUSED (resumable), never stranded RUNNING.
+                continue
 
             # Validate tag counts in the raw translation (tags-in-text path).
             if validate_tags(chunk.source_text, translated_text):

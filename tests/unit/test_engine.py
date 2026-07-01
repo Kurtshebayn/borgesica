@@ -288,6 +288,29 @@ def test_cancel_then_resume(tmp_path: Path) -> None:
     assert provider.call_count == 3
 
 
+def test_resume_recovers_crashed_running_job(tmp_path: Path) -> None:
+    """A job stuck in RUNNING (a prior run crashed) is resumable, not rejected.
+
+    Regression from a live run: a provider error left the job in RUNNING with no
+    terminal state, and resume_job rejected RUNNING → the job was unrecoverable.
+    """
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, provider, checkpoint = _make_engine()
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+
+    # Simulate a crashed run: persist the job as RUNNING with no terminal state.
+    crashed = checkpoint.load_job(job.id).model_copy(update={"status": JobStatus.RUNNING})
+    checkpoint.save_job(crashed)
+    assert engine.status(job.id).status == JobStatus.RUNNING
+
+    # resume_job must recover it (normalize RUNNING → PAUSED) and finish.
+    out_path = str(tmp_path / "out.srt")
+    final_job = engine.resume_job(job.id, out_path=out_path)
+    assert final_job.status == JobStatus.DONE
+
+
 # ---------------------------------------------------------------------------
 # M1-12 — Test 11: run_job on RUNNING job raises JobStateError
 # ---------------------------------------------------------------------------

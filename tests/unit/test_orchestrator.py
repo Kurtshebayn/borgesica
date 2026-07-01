@@ -190,36 +190,60 @@ def test_run_job_on_running_raises_state_error():
 # ===========================================================================
 
 
-def test_chunk_persisted_done_before_next_call(monkeypatch):
-    """Chunk 0 must be saved DONE before provider.translate is called for chunk 1."""
-    from borgesica.domain.errors import MalformedOutput
+def test_transient_provider_error_is_retried_and_job_completes():
+    """A transient provider failure on one chunk is RETRIED (not fatal): the job
+    completes and no exception propagates. Chunk 0 is persisted DONE before the
+    failing chunk is attempted.
 
+    Resilience contract (post-live-DeepSeek): a single flaky chunk must never
+    crash the whole run or strand the job in RUNNING.
+    """
     store = InMemoryCheckpointStore()
-    provider = FakeTranslationProvider(fail_on={1})  # call index 1 fails
+    provider = FakeTranslationProvider(fail_on={1})  # 2nd provider call raises once
     orch, _, _ = make_orchestrator(provider=provider, store=store)
 
     config = make_config()
     job = make_job(config, total=3)
-    chunks = make_chunks(3)
-    store.save_job(job)
-    for c in chunks:
-        store.save_chunk(job.id, c)
-    store.save_glossary(job.id, Glossary())
+    chunks = make_chunks(3)  # no tags → validate_tags always passes
 
-    with pytest.raises(Exception):  # MalformedOutput bubbles up after retries
-        orch.run(
-            job=job,
-            chunks=chunks,
-            glossary=Glossary(),
-            config=config,
-            on_progress=lambda p: None,
-            cancel_flag=threading.Event(),
-        )
+    result = run_job(orch, job, chunks, store=store)  # must NOT raise
 
+    assert result.status == JobStatus.DONE
     saved = {c.index: c for c in store.load_chunks(job.id)}
     assert saved[0].status == ChunkStatus.DONE
-    # chunks 1 and 2 may still be PENDING or FAILED depending on retry behaviour;
-    # the key invariant is that chunk 0 IS done.
+    assert saved[1].status == ChunkStatus.DONE  # transient failure healed by retry
+    # chunk0(call0) + chunk1 fail(call1)+retry(call2) + chunk2(call3) = 4 calls.
+    assert provider.call_count == 4
+
+
+def test_provider_error_exhausted_pauses_job_not_raises():
+    """When the provider fails ALL primary attempts AND the fallback call, the
+    chunk is FAILED and the job PAUSED (resumable) — never a raw exception that
+    would strand the job in RUNNING.
+    """
+    from borgesica.domain.errors import MalformedOutput
+
+    class AlwaysRaiseProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str):
+            self.call_log.append((system, user, model))
+            raise MalformedOutput(job_id="x", chunk_index=-1)
+
+    store = InMemoryCheckpointStore()
+    provider = AlwaysRaiseProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=2)
+    chunks = make_chunks(2)
+
+    result = run_job(orch, job, chunks, store=store)  # must NOT raise
+
+    assert result.status == JobStatus.PAUSED
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[1].status == ChunkStatus.PENDING  # never reached
+    # chunk 0: 3 primary attempts + 1 fallback call = 4, then stop.
+    assert provider.call_count == 4
 
 
 # ===========================================================================

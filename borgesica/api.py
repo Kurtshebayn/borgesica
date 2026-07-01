@@ -205,10 +205,15 @@ class TranslatorEngine:
         out_path: str,
         on_progress: ProgressCallback | None = None,
     ) -> Job:
-        """Resume a job from PAUSED or CANCELLED state.
+        """Resume a job from PAUSED, CANCELLED, or a crashed RUNNING state.
 
         Like run_job but explicitly accepts PAUSED and CANCELLED jobs.
         DONE chunks are skipped; their cost is NOT re-charged.
+
+        A job left in RUNNING (e.g. a previous run crashed or the process was
+        killed mid-translation) is treated as resumable: this is a single-user
+        engine, so a persisted RUNNING status at resume time means the prior run
+        did not finish. It is normalized to PAUSED and re-executed.
 
         Args:
             job_id:      ID of the job to resume.
@@ -219,13 +224,13 @@ class TranslatorEngine:
             Final Job.
 
         Raises:
-            JobStateError:   if the job is RUNNING (cannot resume).
             JobNotFoundError: if job_id is not found.
         """
         job = self._load_job_or_raise(job_id)
 
+        # A stuck RUNNING job means a prior run crashed — recover it as resumable.
         if job.status == JobStatus.RUNNING:
-            raise JobStateError(job_id=job_id, current_status=str(job.status))
+            job = job.model_copy(update={"status": JobStatus.PAUSED})
 
         return self._execute_job(job, out_path=out_path, on_progress=on_progress)
 
@@ -390,15 +395,28 @@ class TranslatorEngine:
             on_progress if on_progress is not None else (lambda p: None)
         )
 
-        # Run the translation loop
-        final_job = orchestrator.run(
-            job=job_for_orchestrator,
-            chunks=chunks,
-            glossary=glossary,
-            config=job.config,
-            on_progress=_on_progress,
-            cancel_flag=cancel_flag,
-        )
+        # Run the translation loop. If anything unexpected escapes the
+        # orchestrator, never leave the job stranded in RUNNING — persist a
+        # resumable PAUSED snapshot (checkpointed chunks are already saved) and
+        # re-raise so the caller sees the real error.
+        try:
+            final_job = orchestrator.run(
+                job=job_for_orchestrator,
+                chunks=chunks,
+                glossary=glossary,
+                config=job.config,
+                on_progress=_on_progress,
+                cancel_flag=cancel_flag,
+            )
+        except Exception:
+            latest = self._checkpoint.load_job(job.id)
+            if latest is not None and latest.status == JobStatus.RUNNING:
+                self._checkpoint.save_job(
+                    latest.model_copy(
+                        update={"status": JobStatus.PAUSED, "updated_at": datetime.now(UTC)}
+                    )
+                )
+            raise
 
         # Write output if job completed successfully
         if final_job.status == JobStatus.DONE:
