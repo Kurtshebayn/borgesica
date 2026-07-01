@@ -187,3 +187,41 @@ def test_build_engine_deepseek_requires_deepseek_key() -> None:
     with patch.dict(os.environ, env, clear=True):
         with pytest.raises((SystemExit, ValueError, KeyError)):
             _build_engine(provider="deepseek", model="deepseek-v4-flash", db_path=":memory:")
+
+
+def test_default_provider_resolution() -> None:
+    """_default_provider: explicit BORGESICA_PROVIDER wins, else auto-detect from keys."""
+    import os
+
+    from borgesica.__main__ import _default_provider
+
+    with patch.dict(os.environ, {"BORGESICA_PROVIDER": "ollama"}, clear=True):
+        assert _default_provider() == "ollama"
+    with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "x"}, clear=True):
+        assert _default_provider() == "deepseek"
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "x"}, clear=True):
+        assert _default_provider() == "anthropic"
+
+
+def test_estimate_resolves_provider_from_env_not_hardcoded_anthropic() -> None:
+    """`estimate <id>` with only DEEPSEEK_API_KEY set must NOT demand ANTHROPIC_API_KEY.
+
+    Regression: estimate/status/cancel/glossary previously defaulted to anthropic
+    and failed when the user only had a DeepSeek key.
+    """
+    import os
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with (
+        patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-x"}, clear=True),
+        patch("borgesica.__main__._build_engine") as mock_build,
+    ):
+        engine = MagicMock()
+        engine.estimate_cost.return_value = MagicMock(model_dump_json=lambda **k: "{}")
+        mock_build.return_value = engine
+        code = main(["estimate", "job-1"])
+
+    assert code == 0
+    assert mock_build.call_args.kwargs["provider"] == "deepseek"

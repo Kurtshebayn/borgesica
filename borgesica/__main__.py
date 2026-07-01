@@ -20,10 +20,15 @@ Subcommands:
     glossary show   <job_id>
     glossary update <job_id> <term> <translation> [--lock]
 
+Provider selection:
+    Pass --provider on any command, or let it auto-detect: BORGESICA_PROVIDER env
+    var if set, otherwise whichever key is present (anthropic → deepseek → ollama).
+
 Environment (per provider; only the selected provider's key is required):
-    ANTHROPIC_API_KEY  — for --provider anthropic (default)
+    ANTHROPIC_API_KEY  — for --provider anthropic
     DEEPSEEK_API_KEY   — for --provider deepseek
     OLLAMA_HOST        — for --provider ollama (optional; defaults to localhost:11434)
+    BORGESICA_PROVIDER — optional; sets the default provider when --provider is omitted
 """
 from __future__ import annotations
 
@@ -71,6 +76,25 @@ def _ext_for(source_type: SourceType) -> str:
 # Engine builder — the ONLY place concrete adapters are instantiated from CLI
 # Separated so tests can mock it cleanly.
 # ---------------------------------------------------------------------------
+
+
+def _default_provider() -> str:
+    """Resolve the provider when --provider is not given.
+
+    Precedence: explicit BORGESICA_PROVIDER env var → auto-detect from whichever
+    provider key is present (anthropic → deepseek → ollama) → 'anthropic' (which
+    then errors clearly about its missing key).
+    """
+    explicit = os.environ.get("BORGESICA_PROVIDER")
+    if explicit:
+        return explicit.lower()
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return "deepseek"
+    if os.environ.get("OLLAMA_HOST"):
+        return "ollama"
+    return "anthropic"
 
 
 def _require_env(var: str, provider: str) -> str:
@@ -324,6 +348,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     provider_choices = ["anthropic", "deepseek", "ollama"]
+    provider_help = (
+        "Provider: anthropic/deepseek/ollama. Default: auto-detect from "
+        "BORGESICA_PROVIDER env or whichever API key is set."
+    )
+
+    def _add_provider(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--provider", choices=provider_choices, default=None, help=provider_help)
 
     # create
     p_create = sub.add_parser(
@@ -333,12 +364,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "source_file", help="Path to the source file (.srt, .epub, or .pdf — format auto-detected)"
     )
     p_create.add_argument("--model", required=True, help="Model string (e.g. deepseek-v4-flash)")
-    p_create.add_argument(
-        "--provider",
-        choices=provider_choices,
-        default="anthropic",
-        help="Translation provider (default: anthropic)",
-    )
+    _add_provider(p_create)
     p_create.add_argument("--chunk-size", type=int, default=25, dest="chunk_size")
     p_create.add_argument("--budget", type=float, default=None, help="Budget in USD")
     p_create.add_argument(
@@ -351,32 +377,29 @@ def _build_parser() -> argparse.ArgumentParser:
     # estimate
     p_estimate = sub.add_parser("estimate", help="Estimate cost for a job's pending chunks")
     p_estimate.add_argument("job_id", help="Job ID")
+    _add_provider(p_estimate)  # estimate uses the provider's count_tokens + price
 
     # run
     p_run = sub.add_parser("run", help="Run (translate) a job")
     p_run.add_argument("job_id", help="Job ID")
     p_run.add_argument("--out", default=None, help="Output file path")
-    p_run.add_argument(
-        "--provider", choices=provider_choices, default="anthropic",
-        help="Provider to use for this run (must match what create used)",
-    )
+    _add_provider(p_run)
 
     # resume
     p_resume = sub.add_parser("resume", help="Resume a paused or cancelled job")
     p_resume.add_argument("job_id", help="Job ID")
     p_resume.add_argument("--out", default=None, help="Output file path")
-    p_resume.add_argument(
-        "--provider", choices=provider_choices, default="anthropic",
-        help="Provider to use for this run (must match what create used)",
-    )
+    _add_provider(p_resume)
 
     # status
     p_status = sub.add_parser("status", help="Show current job status as JSON")
     p_status.add_argument("job_id", help="Job ID")
+    _add_provider(p_status)
 
     # cancel
     p_cancel = sub.add_parser("cancel", help="Cancel a job (cooperative)")
     p_cancel.add_argument("job_id", help="Job ID")
+    _add_provider(p_cancel)
 
     # glossary (sub-sub-commands)
     p_glossary = sub.add_parser("glossary", help="Inspect or edit the job glossary")
@@ -384,12 +407,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_gshow = gsub.add_parser("show", help="Print glossary as JSON")
     p_gshow.add_argument("job_id")
+    _add_provider(p_gshow)
 
     p_gupdate = gsub.add_parser("update", help="Add or update a glossary entry")
     p_gupdate.add_argument("job_id")
     p_gupdate.add_argument("term")
     p_gupdate.add_argument("translation")
     p_gupdate.add_argument("--lock", action="store_true", default=False)
+    _add_provider(p_gupdate)
 
     return parser
 
@@ -436,9 +461,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 1
 
-    # For glossary commands, build engine lazily (tests mock _build_engine)
+    # Resolve provider: explicit --provider wins, else auto-detect (env / keys).
     engine = _build_engine(
-        provider=getattr(args, "provider", "anthropic"),
+        provider=getattr(args, "provider", None) or _default_provider(),
         model=getattr(args, "model", ""),
     )
 
