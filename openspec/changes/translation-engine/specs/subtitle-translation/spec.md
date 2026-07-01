@@ -87,7 +87,7 @@ Then the result SHALL be exactly 1 chunk containing that cue.
 
 The engine SHALL preserve inline SRT tags (`<i>`, `<b>`, `<u>`, and their closing forms) by keeping them IN the `source_text` sent to the provider and instructing the model — via the system prompt — to carry each tag with the word(s) it wraps, preserving tag count and nesting. The `markup` module SHALL validate the result with `markup.validate_tags` (tag count in output equals tag count in source). On mismatch the orchestrator SHALL retry the provider call (≤2 additional attempts). If validation still fails after retries, the engine SHALL fall back to the deterministic `markup.strip` → translate-plain → `markup.reinsert` path. Only if the deterministic fallback also fails validation SHALL the chunk be marked FAILED and the job PAUSED.
 
-Rationale: proportional `reinsert` placed tags by character fraction, which drifts across multi-cue chunks (a tag opened in one cue closed in the next — reproduced in the 2026-06-25 live test). Keeping tags in the text lets the model anchor them to the translated words. `strip`/`reinsert` is retained as a deterministic fallback for weak/local models; hardening that fallback's placement heuristic is tracked for M4.
+Rationale: proportional `reinsert` placed tags by character fraction, which drifts across multi-cue chunks (a tag opened in one cue closed in the next — reproduced in the 2026-06-25 live test). Keeping tags in the text lets the model anchor them to the translated words. `strip`/`reinsert` is retained as a deterministic fallback for weak/local models; its placement heuristic was hardened in M4-7 (#277) so a reinserted tag is snapped to the nearest word boundary and never splits a translated word.
 
 #### Scenario: tags travel with the translated words (primary path)
 
@@ -120,6 +120,14 @@ Given a chunk whose tag-count validation fails on all 3 provider attempts,
 When the retries are exhausted,
 
 Then the engine SHALL apply `markup.strip` → translate the plain text → `markup.reinsert`, and if the reinserted result passes `markup.validate_tags`, the chunk SHALL be completed as `DONE` using the fallback output.
+
+#### Scenario: fallback reinsert snaps tags to word boundaries (M4-7)
+
+Given a fallback where a tag's proportional character position falls inside a translated word,
+
+When `markup.reinsert` places the tag,
+
+Then the tag SHALL be moved to the nearest word boundary (opening tags to the start of the next word, closing tags to the end of the preceding word) so it never splits a word, while the total tag count is preserved.
 
 #### Scenario: fallback also fails — chunk fails, job pauses
 

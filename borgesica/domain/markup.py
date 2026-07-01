@@ -63,6 +63,44 @@ def strip(text: str) -> tuple[str, list[tuple[str, int]]]:
     return "".join(plain_parts), tags
 
 
+def _is_word_boundary(text: str, pos: int) -> bool:
+    """True iff inserting at *pos* would NOT split a word.
+
+    A boundary is the string start/end or any index adjacent to whitespace.
+    """
+    n = len(text)
+    if pos <= 0 or pos >= n:
+        return True
+    return text[pos - 1] == " " or text[pos] == " "
+
+
+def _snap_to_word_boundary(text: str, pos: int, prefer_right: bool) -> int:
+    """Move *pos* to the nearest word boundary in *text* (never mid-word).
+
+    On a tie, *prefer_right* breaks it: opening tags prefer the right boundary
+    (start of the next word), closing tags prefer the left (end of the word).
+    """
+    n = len(text)
+    pos = max(0, min(pos, n))
+    if _is_word_boundary(text, pos):
+        return pos
+
+    left = pos
+    while left > 0 and not _is_word_boundary(text, left):
+        left -= 1
+    right = pos
+    while right < n and not _is_word_boundary(text, right):
+        right += 1
+
+    dist_left = pos - left
+    dist_right = right - pos
+    if dist_left < dist_right:
+        return left
+    if dist_right < dist_left:
+        return right
+    return right if prefer_right else left
+
+
 def reinsert(
     plain_translation: str,
     tags: list[tuple[str, int]],
@@ -71,16 +109,18 @@ def reinsert(
     """Reinsert *tags* into *plain_translation*.
 
     Strategy: map each tag's position as a fraction of *original_plain* length,
-    then place it at the proportionally equivalent position in *plain_translation*.
-    Tags are inserted from right to left to avoid offset drift.
+    then snap that proportional position to the nearest WORD BOUNDARY in
+    *plain_translation* so a tag never splits a translated word (M4-7 / #277).
+    Opening tags prefer the start of the next word; closing tags prefer the end
+    of the preceding word. Tags are inserted right-to-left to avoid offset drift.
 
     # NOTE: As of M2-0, this function is FALLBACK-ONLY.
     # The primary translation path sends source text WITH inline tags to the provider
     # and instructs the model to carry them (see TranslationOrchestrator._translate_with_retry).
     # reinsert() is called only when all primary (tags-in-text) attempts fail validation.
-    # The proportional character-position heuristic used here can drift across multi-cue
-    # chunks; hardening this heuristic (e.g. token-alignment, word-anchor placement)
-    # is tracked for M4. See: sdd/translation-engine/todo-tag-placement.
+    # M4-7 hardened the placement: proportional position is snapped to a word boundary,
+    # which keeps tags off mid-word positions for weak/local-model fallbacks. It remains
+    # a positional heuristic (not token-alignment), but never fractures a word.
     """
     if not tags:
         return plain_translation
@@ -88,8 +128,7 @@ def reinsert(
     src_len = len(original_plain)
     tgt_len = len(plain_translation)
 
-    # Compute target insertion positions.
-    # Use integer rounding; clamp to [0, tgt_len].
+    # Compute target insertion positions, snapped to word boundaries.
     positioned: list[tuple[int, str]] = []
     for tag_str, src_pos in tags:
         if src_len == 0:
@@ -97,14 +136,15 @@ def reinsert(
         else:
             fraction = src_pos / src_len
         tgt_pos = min(round(fraction * tgt_len), tgt_len)
+        prefer_right = not tag_str.startswith("</")  # opening tags → next word
+        tgt_pos = _snap_to_word_boundary(plain_translation, tgt_pos, prefer_right)
         positioned.append((tgt_pos, tag_str))
 
-    # Sort by target position ascending, then insert right-to-left to preserve
-    # earlier offsets.
+    # Stable sort by target position (preserves original tag order on ties),
+    # then insert right-to-left so earlier offsets stay valid.
     positioned_sorted = sorted(positioned, key=lambda x: x[0])
 
     result = plain_translation
-    # Insert from right to left.
     for tgt_pos, tag_str in reversed(positioned_sorted):
         result = result[:tgt_pos] + tag_str + result[tgt_pos:]
 

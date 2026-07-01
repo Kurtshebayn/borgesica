@@ -1089,6 +1089,32 @@ purity green. No remaining `.translation` access on a raw `translate()` result (
 
 ---
 
+### M4-7 [x] — Harden fallback reinsert to word boundaries (debt #277)
+
+**Depends on**: M2-0 (markup fallback path)
+**Spec**: subtitle-translation/inline-tags-in-text (fallback placement)
+**par**
+
+**Context**: `markup.reinsert` (fallback-only since M2-0, used when the tags-in-text primary path
+fails for weak/local models) placed tags by proportional CHARACTER position, which could wedge a
+tag inside a translated word (e.g. `El v<i>eloz`).
+
+**Fix** (`borgesica/domain/markup.py`):
+- After computing the proportional target position, snap it to the nearest WORD boundary via
+  `_snap_to_word_boundary` (`_is_word_boundary` helper). A tag never splits a word.
+- Tie-break by tag kind: opening tags prefer the start of the next word; closing tags prefer the
+  end of the preceding word.
+- Tag count and relative order preserved (stable sort + right-to-left insertion unchanged).
+
+**TDD** (`tests/unit/test_markup.py`): `test_reinsert_snaps_opening_tag_to_word_boundary` and
+`test_reinsert_never_splits_a_word_multi_tag` — both confirmed RED (proportional split words like
+`El zo<b>rro`) then GREEN after the snap. Existing reinsert round-trip/count tests unchanged.
+
+**Note**: This is a positional heuristic (not token-alignment), but it no longer fractures a word.
+Deeper token-alignment is out of scope — the primary tags-in-text path handles capable models.
+
+---
+
 ## Cross-Cutting: Open Items Resolution
 
 These items are assigned to specific tasks above but explicitly documented here for traceability:

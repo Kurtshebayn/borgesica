@@ -140,6 +140,54 @@ def test_reinsert_preserves_tag_count() -> None:
 
 
 # ---------------------------------------------------------------------------
+# M4-7 (#277) — fallback reinsert snaps tags to WORD boundaries (never mid-word)
+# ---------------------------------------------------------------------------
+
+
+def _tag_is_at_word_boundary(result: str, tag: str) -> bool:
+    """True iff every occurrence of *tag* sits at a word boundary in *result*
+    (i.e. is not wedged between two non-space characters)."""
+    start = 0
+    while True:
+        idx = result.find(tag, start)
+        if idx == -1:
+            return True
+        before_ok = idx == 0 or result[idx - 1] == " "
+        after = idx + len(tag)
+        after_ok = after >= len(result) or result[after] == " "
+        # A boundary means at least one side is a space / string edge.
+        if not (before_ok or after_ok):
+            return False
+        start = idx + len(tag)
+
+
+def test_reinsert_snaps_opening_tag_to_word_boundary() -> None:
+    """M4-7: proportional position lands mid-word; reinsert must snap the opening
+    tag to a word boundary so it never splits a translated word.
+    Spec: subtitle-translation/inline-tags-in-text (fallback placement hardening).
+    """
+    # "<i>" opens before "quick" (src_pos 4 in "The quick brown fox").
+    # Proportional maps to char 4 of "El veloz zorro pardo" → inside "veloz".
+    _plain, tags = strip("The <i>quick</i> brown fox")
+    result = reinsert("El veloz zorro pardo", tags, "The quick brown fox")
+    # The <i> must not land inside a word (e.g. NOT "El v<i>eloz").
+    assert "v<i>eloz" not in result
+    assert _tag_is_at_word_boundary(result, "<i>")
+    # Count still preserved.
+    assert result.count("<i>") == 1 and result.count("</i>") == 1
+
+
+def test_reinsert_never_splits_a_word_multi_tag() -> None:
+    """M4-7: no reinserted tag may be wedged between two non-space characters."""
+    source = "The <b>quick</b> brown <i>lazy</i> fox jumps"
+    plain, tags = strip(source)
+    result = reinsert("El zorro perezoso marron salta rapido", tags, plain)
+    for tag in ("<b>", "</b>", "<i>", "</i>"):
+        assert _tag_is_at_word_boundary(result, tag), f"{tag} split a word in {result!r}"
+    assert validate_tags(source, result) is True
+
+
+# ---------------------------------------------------------------------------
 # validate_tags()
 # ---------------------------------------------------------------------------
 
