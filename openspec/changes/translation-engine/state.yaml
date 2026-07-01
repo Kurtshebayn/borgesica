@@ -9,12 +9,16 @@ milestones:
   M1: done            # SRT walking skeleton — verified (pass-with-warnings)
   M2: done            # EPUB support — verified (pass-with-warnings), fix-ups landed
   M3: done            # PDF support — PdfPlumberReader verified (pass-with-warnings), M3-FIX landed
-  M4: pending         # quality harness + provider breadth + deferred cost TODOs
-last_milestone_verified: M3
+  M4: done            # quality harness + provider breadth + M4-5 encoding + M4-6 cost + M4-7 markup; verified pass-with-warnings
+last_milestone_verified: M4
+# All milestones M0–M4 implemented + verified → change is ready for sdd-archive.
 deferred:
-  - "S-M2-2: non-UTF-8 EPUB chapter encoding → scheduled as task M4-4"
+  - "S-M2-2: non-UTF-8 EPUB chapter encoding → RESOLVED in M4-5 (1474732)"
+  - "#289 cost-accuracy (reflective×retry + failed-chunk + real usage/S-2) → RESOLVED in M4-6 (2e803f0)"
+  - "#277 markup.reinsert fallback placement → RESOLVED in M4-7 (0b9d912, word-boundary snap)"
   - "W-M2-3: chapter_index gaps on empty spine items (documented non-issue; leave as-is)"
-  - "W-M3-3: integration marker not gated by a conftest hook (pre-existing since M2)"
+  - "W-M3-3: integration marker not gated by a conftest hook (pre-existing; test-infra ticket)"
   - "W-M3-4: hyphen rejoin over-joins legitimate compounds (e.g. well-known) at line breaks"
-  - "M4/cost-accuracy: reflective×retry call multiplication + failed-chunk cost (engram #289); S-2 real response.usage"
-  - "M4: markup.reinsert fallback placement hardening for weak/local models (decision #277)"
+  - "W-M4-1: fallback-raises path can't accrue usage for a raised call (nil impact — no tokens knowable; primary costs preserved)"
+  - "S-M4-1/S-M4-2: advisory_gate boundary test + golden assert (optional test-quality nits)"
+  - "CLI: __main__.py still SRT-only — EPUB/PDF work via Python API, need CLI wiring + live smoke test"
