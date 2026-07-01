@@ -1,8 +1,10 @@
 change: translation-engine
-phase: verify
-status: pass-with-warnings
+phase: archive
+status: archived
 artifact_store: openspec
 execution_mode: interactive
+archived_at: 2026-07-01
+archive_path: openspec/changes/archive/2026-07-01-translation-engine/
 
 # Change spans M0–M4; archived only when the whole change (through M4) is done.
 milestones:
