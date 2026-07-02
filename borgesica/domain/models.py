@@ -154,6 +154,11 @@ class JobConfig(BaseModel):
     quality_mode: Literal["fast", "reflective"] = "fast"
     # EPUB/PDF prose token budget per chunk — distinct from chunk_size (SRT cue-batch control).
     prose_chunk_tokens: int = 800
+    # continue-on-error: when True (default), a chunk that exhausts all translation
+    # attempts is persisted FAILED and the run CONTINUES; the job still finishes
+    # DONE. When False (--strict), the prior contract holds: FAILED chunk pauses
+    # the job immediately.
+    continue_on_error: bool = True
 
 
 class Job(BaseModel):

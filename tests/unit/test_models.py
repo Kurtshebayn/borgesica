@@ -143,6 +143,22 @@ def test_job_config_prose_chunk_tokens_default() -> None:
     assert config.prose_chunk_tokens != config.chunk_size
 
 
+def test_job_config_continue_on_error_defaults_to_true() -> None:
+    """continue-on-error WU1-1: JobConfig.continue_on_error defaults to True."""
+    from borgesica.domain.models import JobConfig, SourceType
+
+    config = JobConfig(source_type=SourceType.SRT, model="x")
+    assert config.continue_on_error is True
+
+
+def test_job_config_continue_on_error_explicit_false() -> None:
+    """continue-on-error WU1-1: continue_on_error=False can be set explicitly."""
+    from borgesica.domain.models import JobConfig, SourceType
+
+    config = JobConfig(source_type=SourceType.SRT, model="x", continue_on_error=False)
+    assert config.continue_on_error is False
+
+
 # --- Job ---
 
 def test_job_accepts_all_required_fields() -> None:
