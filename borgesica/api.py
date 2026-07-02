@@ -20,6 +20,7 @@ from borgesica.domain.cost import CostEstimator
 from borgesica.domain.errors import JobNotFoundError, JobStateError
 from borgesica.domain.glossary import NullGlossaryExtractor
 from borgesica.domain.models import (
+    ChunkStatus,
     CostEstimate,
     Glossary,
     GlossaryEntry,
@@ -251,6 +252,30 @@ class TranslatorEngine:
             JobNotFoundError: if job_id is not found.
         """
         return self._load_job_or_raise(job_id)
+
+    # ------------------------------------------------------------------
+    # failed_chunk_indices
+    # ------------------------------------------------------------------
+
+    def failed_chunk_indices(self, job_id: str) -> list[int]:
+        """Return the sorted list of chunk indices currently in FAILED status.
+
+        Pure pass-through over per-chunk status already persisted by the
+        checkpoint store — no checkpoint schema change. Used by the CLI to
+        surface a skip report after a continue_on_error run.
+
+        Args:
+            job_id: ID of the job.
+
+        Returns:
+            Sorted (0-based) list of FAILED chunk indices. Empty if none.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        chunks = self._checkpoint.load_chunks(job_id)
+        return sorted(c.index for c in chunks if c.status == ChunkStatus.FAILED)
 
     # ------------------------------------------------------------------
     # get_glossary / update_glossary

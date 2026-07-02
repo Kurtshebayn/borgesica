@@ -42,6 +42,7 @@ def _make_config(
     chunk_size: int = 25,
     quality_mode: str = "fast",
     budget_usd: float | None = None,
+    continue_on_error: bool = True,
 ) -> JobConfig:
     return JobConfig(
         source_type=source_type,
@@ -49,6 +50,7 @@ def _make_config(
         chunk_size=chunk_size,
         quality_mode=quality_mode,  # type: ignore[arg-type]
         budget_usd=budget_usd,
+        continue_on_error=continue_on_error,
     )
 
 
@@ -380,3 +382,65 @@ def test_on_progress_callback_receives_progress(tmp_path: Path) -> None:
         assert prog.cost_usd >= 0.0
     # Later callbacks have higher or equal cost
     assert progress_list[2].cost_usd >= progress_list[1].cost_usd >= progress_list[0].cost_usd
+
+
+# ---------------------------------------------------------------------------
+# continue-on-error WU3-1 — TranslatorEngine.failed_chunk_indices(job_id)
+# Spec: job-lifecycle/"skip report surfaces FAILED chunk indices at end of run"
+# ---------------------------------------------------------------------------
+
+
+def test_failed_chunk_indices_empty_for_job_with_no_failures(tmp_path: Path) -> None:
+    """failed_chunk_indices returns [] for a job with zero FAILED chunks."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    engine, _, _ = _make_engine()
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    out_path = str(tmp_path / "out.srt")
+    engine.run_job(job.id, out_path=out_path)
+
+    assert engine.failed_chunk_indices(job.id) == []
+
+
+def test_failed_chunk_indices_returns_sorted_failed_indices(tmp_path: Path) -> None:
+    """After a continue_on_error=True run where chunks 2 and 5 end FAILED,
+    failed_chunk_indices returns [2, 5] (sorted, 0-based)."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=6)
+
+    class MismatchOn25Provider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str):
+            self.call_log.append((system, user, model))
+            if "Cue 3 " in user or "Cue 6 " in user:  # chunk indices 2 and 5 (1-based cues 3, 6)
+                unit = TranslationUnit(
+                    translation="<i>Always mismatched</i>",
+                    summary_update="Summary.",
+                )
+            else:
+                unit = TranslationUnit(
+                    translation=f"[translated] {user}",
+                    summary_update="Summary.",
+                )
+            from borgesica.domain.models import TranslationResult, Usage
+
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = MismatchOn25Provider()
+    engine, _, _ = _make_engine(provider=provider)
+    config = _make_config(chunk_size=1, continue_on_error=True)
+
+    job = engine.create_job(srt_path, config)
+    out_path = str(tmp_path / "out.srt")
+    final_job = engine.run_job(job.id, out_path=out_path)
+
+    assert final_job.status == JobStatus.DONE
+    assert engine.failed_chunk_indices(job.id) == [2, 5]
+
+
+def test_failed_chunk_indices_raises_for_unknown_job_id() -> None:
+    """failed_chunk_indices raises JobNotFoundError for an unknown job_id."""
+    engine, _, _ = _make_engine()
+    with pytest.raises(JobNotFoundError):
+        engine.failed_chunk_indices("unknown-id")
