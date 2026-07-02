@@ -58,6 +58,17 @@ from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
 MAX_5XX_RETRIES = 3
 MAX_TIER3_RETRIES = 2  # Tier-3 is retried at most 2 times (2 HTTP calls)
 
+# Output token cap sent to the API for all three tiers. Must comfortably fit
+# the structured JSON output (translation + summary + glossary) for chunks up
+# to ~800 source tokens. The previous value of 1024 truncated real chunks
+# mid-JSON (a real 2677-char chunk hit finish_reason='length' with usage at
+# the 1024 cap, corrupting the structured output and causing a deterministic
+# MalformedOutput across every retry, all tiers). 8192 gives enough headroom
+# for translation output that can run longer than the source text plus the
+# summary/glossary fields. OllamaProvider subclasses this provider and
+# inherits the constant/fix without overriding it.
+_MAX_OUTPUT_TOKENS = 8192
+
 # Tool / function definition sent for Tier-1 structured output.
 _TOOL_NAME = "submit_translation"
 _TRANSLATION_TOOLS: list[dict[str, Any]] = [
@@ -323,7 +334,7 @@ class OpenAICompatibleProvider:
             ],
             tools=_TRANSLATION_TOOLS,
             tool_choice="auto",
-            max_tokens=1024,
+            max_tokens=_MAX_OUTPUT_TOKENS,
         )
         choice = response.choices[0]
         message = choice.message
@@ -363,7 +374,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             response_format={"type": "json_object"},
-            max_tokens=1024,
+            max_tokens=_MAX_OUTPUT_TOKENS,
         )
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""
@@ -400,7 +411,7 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user + json_instruction},
             ],
-            max_tokens=1024,
+            max_tokens=_MAX_OUTPUT_TOKENS,
         )
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""

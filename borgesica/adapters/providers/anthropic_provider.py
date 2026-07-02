@@ -55,6 +55,15 @@ if TYPE_CHECKING:
 
 MAX_RETRIES = 3
 
+# Output token cap sent to the API. Must comfortably fit the structured JSON
+# output (translation + summary + glossary) for chunks up to ~800 source
+# tokens. The previous value of 1024 truncated real chunks mid-JSON (a real
+# 2677-char chunk hit stop_reason='max_tokens' with usage.output_tokens==1024,
+# corrupting the tool_use input and causing a deterministic MalformedOutput
+# across every retry). 8192 gives enough headroom for translation output that
+# can run longer than the source text plus the summary/glossary fields.
+_MAX_OUTPUT_TOKENS = 8192
+
 # APPROXIMATE prices — (input_usd_per_mtok, output_usd_per_mtok). NOT verified.
 # Used ONLY for pre-flight cost ESTIMATES, never for billing. Both prices and model
 # IDs go stale; any unknown model falls back to _DEFAULT_PRICE, so a stale table
@@ -147,7 +156,7 @@ class AnthropicProvider:
             try:
                 response = self._client.messages.create(
                     model=model,
-                    max_tokens=1024,
+                    max_tokens=_MAX_OUTPUT_TOKENS,
                     system=system,
                     messages=[{"role": "user", "content": user}],
                     tools=_TRANSLATION_TOOL,

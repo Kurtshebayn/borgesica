@@ -25,6 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from borgesica.adapters.providers.openai_compatible_provider import (
+    _MAX_OUTPUT_TOKENS,
     OpenAICompatibleProvider,
 )
 from borgesica.domain.errors import MalformedOutput, ProviderError
@@ -312,6 +313,36 @@ class TestTier2EmptyContentFallsToTier3:
         assert result.unit.translation == "Hola mundo"
         # Tier-1 (1) + Tier-2 (1) + Tier-3 attempt 1 (1) = 3
         assert fake_client._call_index == 3
+
+
+# ---------------------------------------------------------------------------
+# Test 4b: max_tokens must be large enough to avoid mid-JSON truncation, in
+# ALL THREE tiers.
+#
+# Regression test: a real 2677-char chunk hit finish_reason='length' with the
+# old hardcoded max_tokens=1024, truncating structured output mid-key and
+# causing a deterministic ValidationError (MalformedOutput) across all retries.
+# ---------------------------------------------------------------------------
+
+
+class TestMaxOutputTokens:
+    def test_all_three_tiers_request_max_output_tokens_constant(self):
+        """The `max_tokens` sent to the SDK must equal _MAX_OUTPUT_TOKENS (8192)
+        on Tier-1, Tier-2, and Tier-3 calls — not the old truncating value of 1024.
+        """
+        provider, fake_client = _make_provider([
+            _NO_TOOL_CALL_RESPONSE,      # Tier-1: no tool_calls
+            _EMPTY_CONTENT_RESPONSE,      # Tier-2: empty content (DeepSeek quirk)
+            _TIER3_VALID_JSON_RESPONSE,   # Tier-3: valid JSON in content
+        ])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert len(fake_client.call_log) == 3
+        for call_kwargs in fake_client.call_log:
+            assert call_kwargs["max_tokens"] == _MAX_OUTPUT_TOKENS
+        assert _MAX_OUTPUT_TOKENS == 8192
 
 
 # ---------------------------------------------------------------------------

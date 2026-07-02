@@ -13,7 +13,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from borgesica.adapters.providers.anthropic_provider import AnthropicProvider
+from borgesica.adapters.providers.anthropic_provider import (
+    _MAX_OUTPUT_TOKENS,
+    AnthropicProvider,
+)
 from borgesica.domain.errors import MalformedOutput, ProviderError
 from borgesica.domain.models import TranslationResult, TranslationUnit
 from borgesica.domain.ports import TranslationProvider
@@ -157,6 +160,30 @@ class TestGracefulDegradation:
         assert result.usage.input_tokens >= 0, "usage.input_tokens must be non-negative"
         assert result.usage.output_tokens >= 0, "usage.output_tokens must be non-negative"
         assert client.messages.create.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 2b: max_tokens must be large enough to avoid mid-JSON truncation.
+#
+# Regression test: a real 2677-char chunk hit stop_reason='max_tokens' with the
+# old hardcoded max_tokens=1024, truncating the tool_use input mid-key and
+# causing a deterministic ValidationError (MalformedOutput) across all retries.
+# ---------------------------------------------------------------------------
+
+
+class TestMaxOutputTokens:
+    def test_translate_requests_max_output_tokens_constant(self):
+        """The `max_tokens` sent to the SDK must equal the module's _MAX_OUTPUT_TOKENS
+        constant (8192), not the old truncating value of 1024.
+        """
+        responses = [_valid_tool_use_response("Buenos días")]
+        client = make_fake_client(responses)
+        provider = AnthropicProvider(client=client)
+        provider.translate("system", "Good morning", "claude-3-5-haiku-20241022")
+
+        _, kwargs = client.messages.create.call_args
+        assert kwargs["max_tokens"] == _MAX_OUTPUT_TOKENS
+        assert _MAX_OUTPUT_TOKENS == 8192
 
 
 # ---------------------------------------------------------------------------
