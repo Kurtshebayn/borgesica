@@ -10,12 +10,19 @@ Usage:
 
 Subcommands:
     create  <source_file> --model <model> [--provider anthropic|deepseek|ollama]
-             [--chunk-size N] [--budget USD] [--quality-mode fast|reflective]
+             [--chunk-size N] [--budget USD] [--quality-mode fast|reflective] [--strict]
              (source format auto-detected from .srt/.epub/.pdf extension)
+             By default (no --strict), a chunk that exhausts all translation
+             attempts is skipped (FAILED) and the run continues; the job still
+             finishes DONE. Pass --strict to restore the pre-continue-on-error
+             contract: the job PAUSES immediately on the first FAILED chunk.
     estimate <job_id>
     run     <job_id> [--out <path>] [--provider ...]
+             Prints a skip-summary line if any chunks ended FAILED.
     resume  <job_id> [--out <path>] [--provider ...]
+             Prints a skip-summary line if any chunks ended FAILED.
     status  <job_id>
+             Lists FAILED chunk indices (if any) after the JSON job dump.
     cancel  <job_id>
     glossary show   <job_id>
     glossary update <job_id> <term> <translation> [--lock]
@@ -236,6 +243,7 @@ def _cmd_create(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         chunk_size=getattr(args, "chunk_size", 25),
         budget_usd=getattr(args, "budget", None),
         quality_mode=getattr(args, "quality_mode", "fast"),  # type: ignore[arg-type]
+        continue_on_error=not getattr(args, "strict", False),
     )
     job = engine.create_job(args.source_file, config)
     print(job.id)
@@ -260,12 +268,21 @@ def _resolve_out(args: argparse.Namespace, engine: TranslatorEngine) -> str:
     return _default_out(args.job_id, job.config.source_type)
 
 
+def _print_skip_summary(args: argparse.Namespace, engine: TranslatorEngine) -> None:
+    """Print a skip-summary line naming the count and indices of FAILED chunks,
+    if any. No output when there are none (continue-on-error skip report)."""
+    failed = engine.failed_chunk_indices(args.job_id)
+    if failed:
+        print(f"WARNING: {len(failed)} chunk(s) failed and were skipped: {failed}")
+
+
 def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         out_path = _resolve_out(args, engine)
         print(f"Running job {args.job_id} → {out_path}")
         final_job = engine.run_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
+        _print_skip_summary(args, engine)
         return 0
     except BorgésicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -278,6 +295,7 @@ def _cmd_resume(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         print(f"Resuming job {args.job_id} → {out_path}")
         final_job = engine.resume_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
+        _print_skip_summary(args, engine)
         return 0
     except BorgésicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -288,6 +306,9 @@ def _cmd_status(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         job = engine.status(args.job_id)
         print(job.model_dump_json(indent=2))
+        failed = engine.failed_chunk_indices(args.job_id)
+        if failed:
+            print(f"Failed chunks: {failed}")
         return 0
     except JobNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -372,6 +393,15 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["fast", "reflective"],
         default="fast",
         dest="quality_mode",
+    )
+    p_create.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help=(
+            "Pause the job on the first FAILED chunk instead of continuing "
+            "(restores the pre-continue-on-error contract)."
+        ),
     )
 
     # estimate

@@ -225,3 +225,161 @@ def test_estimate_resolves_provider_from_env_not_hardcoded_anthropic() -> None:
 
     assert code == 0
     assert mock_build.call_args.kwargs["provider"] == "deepseek"
+
+
+# ---------------------------------------------------------------------------
+# continue-on-error WU4-1 — `--strict` flag on `create`
+# Spec: job-lifecycle/"JobConfig.continue_on_error gates chunk-failure
+# handling, default ON" (scenario: --strict flag sets continue_on_error=False)
+# ---------------------------------------------------------------------------
+
+
+def test_strict_flag_defaults_to_false() -> None:
+    """--strict is absent by default → args.strict is False."""
+    from borgesica.__main__ import _build_parser
+
+    args = _build_parser().parse_args(["create", "book.epub", "--model", "x"])
+    assert args.strict is False
+
+
+def test_strict_flag_parses_true_when_given() -> None:
+    """--strict sets args.strict to True."""
+    from borgesica.__main__ import _build_parser
+
+    args = _build_parser().parse_args(["create", "book.epub", "--model", "x", "--strict"])
+    assert args.strict is True
+
+
+def test_cmd_create_strict_sets_continue_on_error_false() -> None:
+    """`create --strict` builds a JobConfig with continue_on_error=False."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.create_job.return_value = MagicMock(id="job-strict-1")
+        mock_build.return_value = engine
+
+        code = main(["create", "book.epub", "--model", "x", "--strict"])
+
+    assert code == 0
+    _, passed_config = engine.create_job.call_args.args
+    assert passed_config.continue_on_error is False
+
+
+def test_cmd_create_without_strict_sets_continue_on_error_true() -> None:
+    """`create` without --strict builds a JobConfig with continue_on_error=True."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.create_job.return_value = MagicMock(id="job-default-1")
+        mock_build.return_value = engine
+
+        code = main(["create", "book.epub", "--model", "x"])
+
+    assert code == 0
+    _, passed_config = engine.create_job.call_args.args
+    assert passed_config.continue_on_error is True
+
+
+# ---------------------------------------------------------------------------
+# continue-on-error WU4-2 — `run` prints a skip-summary line when chunks failed
+# Spec: job-lifecycle/"skip report surfaces FAILED chunk indices at end of run"
+# (scenario: CLI run prints a skip-summary line when chunks failed)
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_run_prints_skip_summary_when_chunks_failed(capsys: pytest.CaptureFixture) -> None:
+    """run prints a WARNING line naming the count and indices of FAILED chunks."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import JobStatus
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.status.return_value = MagicMock(config=MagicMock(source_type="SRT"))
+        done_job = MagicMock(status=JobStatus.DONE, cost_usd=0.001)
+        engine.run_job.return_value = done_job
+        engine.failed_chunk_indices.return_value = [2, 5]
+        mock_build.return_value = engine
+
+        code = main(["run", "job-1", "--out", "out.srt"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert "2" in out
+    assert "[2, 5]" in out
+
+
+def test_cmd_run_no_skip_summary_when_no_failures(capsys: pytest.CaptureFixture) -> None:
+    """run prints no skip-summary line when failed_chunk_indices returns []."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import JobStatus
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        done_job = MagicMock(status=JobStatus.DONE, cost_usd=0.001)
+        engine.run_job.return_value = done_job
+        engine.failed_chunk_indices.return_value = []
+        mock_build.return_value = engine
+
+        code = main(["run", "job-1", "--out", "out.srt"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert "WARNING" not in out
+    assert "Done. Status=" in out
+
+
+# ---------------------------------------------------------------------------
+# continue-on-error WU4-3 — `status` lists FAILED chunk indices when present
+# Spec: job-lifecycle/"skip report surfaces FAILED chunk indices at end of run"
+# (scenario: CLI status lists no failed chunks when none exist)
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_status_lists_failed_chunks_when_present(capsys: pytest.CaptureFixture) -> None:
+    """status prints a line listing FAILED chunk index 3 when present."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.status.return_value = MagicMock(model_dump_json=lambda **k: "{}")
+        engine.failed_chunk_indices.return_value = [3]
+        mock_build.return_value = engine
+
+        code = main(["status", "job-1"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert "3" in out
+    assert "Failed chunks" in out
+
+
+def test_cmd_status_no_failed_chunk_line_when_none(capsys: pytest.CaptureFixture) -> None:
+    """status output is exactly the JSON dump when no chunks are FAILED."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.status.return_value = MagicMock(model_dump_json=lambda **k: "{}")
+        engine.failed_chunk_indices.return_value = []
+        mock_build.return_value = engine
+
+        code = main(["status", "job-1"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert out.strip() == "{}"
+    assert "Failed chunks" not in out
