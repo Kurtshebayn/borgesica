@@ -274,18 +274,33 @@ class TranslationOrchestrator:
             running_cost += call_cost
 
             if final_unit is None:
-                # All retries exhausted — chunk FAILED, job PAUSED.
+                # All retries exhausted — chunk FAILED. Whether the job PAUSES
+                # is gated by JobConfig.continue_on_error.
                 failed_chunk = chunk.model_copy(update={"status": ChunkStatus.FAILED})
                 self._checkpoint.save_chunk(job.id, failed_chunk)
-                paused_job = job.model_copy(
-                    update={
-                        "status": JobStatus.PAUSED,
-                        "cost_usd": running_cost,
-                        "updated_at": datetime.now(UTC),
-                    }
+                if not config.continue_on_error:
+                    paused_job = job.model_copy(
+                        update={
+                            "status": JobStatus.PAUSED,
+                            "cost_usd": running_cost,
+                            "updated_at": datetime.now(UTC),
+                        }
+                    )
+                    self._checkpoint.save_job(paused_job)
+                    return paused_job
+                # continue_on_error=True: do NOT pause — proceed to the next chunk.
+                # Rolling summary is intentionally NOT updated for a FAILED chunk
+                # (no summary_update available); next chunk reuses current_summary.
+                on_progress(
+                    Progress(
+                        job_id=job.id,
+                        chunk_index=chunk.index,
+                        total_chunks=len(ordered_chunks),
+                        cost_usd=running_cost,
+                        status=JobStatus.RUNNING,
+                    )
                 )
-                self._checkpoint.save_job(paused_job)
-                return paused_job
+                continue
 
             # Persist chunk as DONE (idempotent upsert).
             done_chunk = chunk.model_copy(

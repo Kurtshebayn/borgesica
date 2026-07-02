@@ -50,12 +50,14 @@ from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
 def make_config(
     quality_mode: str = "fast",
     budget_usd: float | None = None,
+    continue_on_error: bool = True,
 ) -> JobConfig:
     return JobConfig(
         source_type=SourceType.SRT,
         model="claude-test",
         quality_mode=quality_mode,  # type: ignore[arg-type]
         budget_usd=budget_usd,
+        continue_on_error=continue_on_error,
     )
 
 
@@ -219,7 +221,9 @@ def test_transient_provider_error_is_retried_and_job_completes():
 def test_provider_error_exhausted_pauses_job_not_raises():
     """When the provider fails ALL primary attempts AND the fallback call, the
     chunk is FAILED and the job PAUSED (resumable) — never a raw exception that
-    would strand the job in RUNNING.
+    would strand the job in RUNNING. Uses continue_on_error=False (strict) —
+    this test exercises the pre-continue-on-error PAUSE contract specifically;
+    the continue-on-error=True gate behavior is covered separately.
     """
     from borgesica.domain.errors import MalformedOutput
 
@@ -232,7 +236,7 @@ def test_provider_error_exhausted_pauses_job_not_raises():
     provider = AlwaysRaiseProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
 
-    config = make_config()
+    config = make_config(continue_on_error=False)
     job = make_job(config, total=2)
     chunks = make_chunks(2)
 
@@ -714,29 +718,43 @@ def test_tag_mismatch_retry_succeeds_on_second():
 
 
 # ===========================================================================
-# 17. Tag mismatch all 3 attempts → chunk FAILED, job PAUSED
+# 17. Tag mismatch all 3 attempts → chunk FAILED; job PAUSED (strict) or
+#     CONTINUES (default) depending on JobConfig.continue_on_error.
+# Spec: job-lifecycle/"run_job applies the continue_on_error gate on chunk
+# failure" — parametrized across both flag values (continue-on-error WU2-2).
 # ===========================================================================
 
 
-def test_tag_mismatch_all_retries_fail_chunk_failed_job_paused():
-    store = InMemoryCheckpointStore()
+class _AlwaysMismatchProvider(FakeTranslationProvider):
+    """First chunk always returns a tag-mismatched translation (source has no
+    tags, translation always has one). Any subsequent chunk is translated
+    normally via a canned success response."""
 
-    class AlwaysMismatchProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationResult:
-            self.call_log.append((system, user, model))
-            # Always return extra tags — source has no tags
+    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+        self.call_log.append((system, user, model))
+        if user == "No tags here.":
+            # Always return extra tags — source has no tags → mismatch forever.
             unit = TranslationUnit(
                 translation="<i>Always mismatched</i>",
                 summary_update="Summary.",
             )
-            in_tok = self.count_tokens(system + " " + user, model)
-            out_tok = self.count_tokens(unit.translation, model)
-            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+        else:
+            unit = TranslationUnit(
+                translation=f"[translated] {user}",
+                summary_update="Summary.",
+            )
+        in_tok = self.count_tokens(system + " " + user, model)
+        out_tok = self.count_tokens(unit.translation, model)
+        return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
-    provider = AlwaysMismatchProvider()
+
+@pytest.mark.parametrize("continue_on_error", [True, False])
+def test_tag_mismatch_all_retries_fail_chunk_failed_job_paused(continue_on_error: bool):
+    store = InMemoryCheckpointStore()
+    provider = _AlwaysMismatchProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
 
-    config = make_config()
+    config = make_config(continue_on_error=continue_on_error)
     job = make_job(config, total=2)
     chunks = [
         Chunk(index=0, source_text="No tags here."),
@@ -757,12 +775,170 @@ def test_tag_mismatch_all_retries_fail_chunk_failed_job_paused():
         cancel_flag=threading.Event(),
     )
 
-    # M2-0: 3 primary (tags-in-text) attempts + 1 fallback (strip→translate→reinsert) call
-    # = 4 total provider calls before chunk is marked FAILED.
-    assert provider.call_count == 4
     saved = {c.index: c for c in store.load_chunks(job.id)}
     assert saved[0].status == ChunkStatus.FAILED
+    assert saved[0].translated_text is None
+
+    if continue_on_error is False:
+        # Strict path (unchanged prior contract): job PAUSES immediately,
+        # chunk 1 is never attempted (stays PENDING).
+        # 3 primary (tags-in-text) attempts + 1 fallback (strip→translate→reinsert)
+        # = 4 total provider calls before chunk 0 is marked FAILED.
+        assert provider.call_count == 4
+        assert result.status == JobStatus.PAUSED
+        assert saved[1].status == ChunkStatus.PENDING
+    else:
+        # Continue path (default): loop proceeds past the FAILED chunk;
+        # chunk 1 is translated normally and the job still finishes DONE.
+        assert saved[1].status == ChunkStatus.DONE
+        assert result.status == JobStatus.DONE
+
+
+# ===========================================================================
+# continue-on-error WU2-3: additional gate scenarios beyond the parametrized
+# M1-8 test above.
+# Spec: job-lifecycle/"run_job applies the continue_on_error gate on chunk
+# failure" (all scenarios), job-lifecycle/"job finishes DONE with a FAILED
+# chunk present" + "job pauses on first FAILED chunk".
+# ===========================================================================
+
+
+def _always_mismatch_except(failing_texts: set[str]) -> type[FakeTranslationProvider]:
+    """Build a provider class where any chunk whose source_text is in
+    *failing_texts* always returns a tag-mismatched translation (forcing
+    FAILED); every other chunk translates successfully."""
+
+    class _Provider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            self.call_log.append((system, user, model))
+            if user in failing_texts:
+                unit = TranslationUnit(
+                    translation="<i>Always mismatched</i>",
+                    summary_update="Summary.",
+                )
+            else:
+                unit = TranslationUnit(
+                    translation=f"[translated] {user}",
+                    summary_update="Summary.",
+                )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    return _Provider
+
+
+def test_continue_on_error_true_5_chunks_one_failure_job_finishes_done():
+    """5-chunk job, continue_on_error=True, chunk 2 exhausts all attempts →
+    chunks 0,1,3,4 DONE, chunk 2 FAILED, job finishes DONE."""
+    store = InMemoryCheckpointStore()
+    chunks = [Chunk(index=i, source_text=f"Chunk {i} text.") for i in range(5)]
+    provider = _always_mismatch_except({"Chunk 2 text."})()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=5)
+
+    result = run_job(orch, job, chunks, store=store)
+
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    for i in (0, 1, 3, 4):
+        assert saved[i].status == ChunkStatus.DONE
+    assert saved[2].status == ChunkStatus.FAILED
+    assert result.status == JobStatus.DONE
+
+
+def test_continue_on_error_true_all_chunks_fail_job_still_done():
+    """3-chunk job, continue_on_error=True, ALL chunks fail → all 3 FAILED with
+    translated_text=None, job finishes DONE (not PAUSED)."""
+    store = InMemoryCheckpointStore()
+    chunks = [Chunk(index=i, source_text=f"Chunk {i} text.") for i in range(3)]
+    provider = _always_mismatch_except({c.source_text for c in chunks})()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=3)
+
+    result = run_job(orch, job, chunks, store=store)
+
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    for i in range(3):
+        assert saved[i].status == ChunkStatus.FAILED
+        assert saved[i].translated_text is None
+    assert result.status == JobStatus.DONE
+
+
+def test_continue_on_error_false_5_chunks_remaining_untouched():
+    """5-chunk job, continue_on_error=False, chunk 2 exhausts → chunks 3,4
+    remain PENDING (untouched, never attempted)."""
+    store = InMemoryCheckpointStore()
+    chunks = [Chunk(index=i, source_text=f"Chunk {i} text.") for i in range(5)]
+    provider = _always_mismatch_except({"Chunk 2 text."})()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=False)
+    job = make_job(config, total=5)
+
+    result = run_job(orch, job, chunks, store=store)
+
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[1].status == ChunkStatus.DONE
+    assert saved[2].status == ChunkStatus.FAILED
+    assert saved[3].status == ChunkStatus.PENDING
+    assert saved[4].status == ChunkStatus.PENDING
     assert result.status == JobStatus.PAUSED
+
+
+def test_budget_exceeded_still_pauses_regardless_of_continue_on_error_true():
+    """Budget-exceeded still PAUSES the job even when continue_on_error=True —
+    money exhaustion is unaffected by the continue-on-error gate."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(budget_usd=1.00, continue_on_error=True)
+    job = make_job(config, total=9)
+    job = job.model_copy(update={"cost_usd": 0.93})
+
+    chunks = []
+    for i in range(8):
+        chunks.append(
+            Chunk(
+                index=i,
+                source_text="x " * 100,
+                status=ChunkStatus.DONE,
+                translated_text="done",
+            )
+        )
+    chunks.append(
+        Chunk(
+            index=8,
+            source_text="word " * 80000,
+            status=ChunkStatus.PENDING,
+        )
+    )
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        orch.run(
+            job=job,
+            chunks=chunks,
+            glossary=Glossary(),
+            config=config,
+            on_progress=lambda p: None,
+            cancel_flag=threading.Event(),
+        )
+
+    exc = exc_info.value
+    assert provider.call_count == 0
+    assert exc.cost_so_far == pytest.approx(0.93)
+    saved_job = store.load_job(job.id)
+    assert saved_job.status == JobStatus.PAUSED
 
 
 # ===========================================================================
@@ -1153,8 +1329,10 @@ def test_all_tags_in_text_fail_falls_back_to_strip_reinsert():
 
 def test_both_tags_in_text_and_fallback_fail_chunk_failed_job_paused():
     """When all 3 tags-in-text attempts AND the strip/reinsert fallback all fail
-    validate_tags, chunk is FAILED and job is PAUSED.
-    Spec: subtitle-translation/inline-tags-in-text scenario 'fallback also fails'.
+    validate_tags, chunk is FAILED and job is PAUSED (continue_on_error=False).
+    Spec: book-translation/"inline EPUB tags are preserved..." scenario
+    'fallback exhaustion with continue_on_error=False — chunk FAILED, job
+    PAUSED (unchanged prior contract)'.
     """
     store = InMemoryCheckpointStore()
 
@@ -1201,7 +1379,7 @@ def test_both_tags_in_text_and_fallback_fail_chunk_failed_job_paused():
     provider = AlwaysMismatchProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
 
-    config = make_config()
+    config = make_config(continue_on_error=False)
     job = make_job(config, total=2)
     chunks = [
         Chunk(index=0, source_text="The <i>quick</i> fox."),
@@ -1522,7 +1700,12 @@ def test_failed_chunk_cost_is_nonzero():
     provider = AlwaysMismatchProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
 
-    config = make_config()
+    # continue_on_error=False: this test's job-status assertion (PAUSED) is
+    # about the pre-continue-on-error contract; it captures the failed-chunk
+    # cost snapshot on the PAUSED job. The BUG-2 cost-accrual fix itself is
+    # orthogonal to continue_on_error (cost is accrued the same way on both
+    # the PAUSED and the continue-past-FAILED paths).
+    config = make_config(continue_on_error=False)
     job = make_job(config, total=1)
     # Plain text source (no tags) — provider returns tags → tag mismatch for all 3+1 calls
     chunks = [Chunk(index=0, source_text="No tags here.")]
