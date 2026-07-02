@@ -83,6 +83,17 @@ def _chapter_xhtml_with_em(pre: str, em_text: str, post: str) -> bytes:
     ).encode("utf-8")
 
 
+def _chapter_xhtml_plain(text: str) -> bytes:
+    """Build a minimal XHTML chapter with one plain <p> (no inline tags)."""
+    return (
+        "<?xml version='1.0' encoding='utf-8'?>"
+        "<html xmlns='http://www.w3.org/1999/xhtml'>"
+        "<head><title>Chapter</title></head>"
+        f"<body><p>{text}</p></body>"
+        "</html>"
+    ).encode("utf-8")
+
+
 def _make_epub_bytes(
     chapters: list[tuple[str, bytes]],
     *,
@@ -500,6 +511,89 @@ def test_em_tag_round_trips_as_real_element() -> None:
                 "Expected real <em>…</em> tags in output XHTML, "
                 "but found only escaped text or no em at all. "
                 f"Content files searched: {content_files}"
+            )
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+# ---------------------------------------------------------------------------
+# Test 6b: namespaced attribute (e.g. epub:type) in a reinserted fragment must
+# not crash the writer.
+#
+# Regression test: exporting a real book, a translated fragment re-parsed with
+# lxml's HTMLParser kept the literal prefixed attribute name "epub:type" (the
+# HTML parser does not resolve namespaces — it leaves the colon in the raw
+# attribute string). _copy_element_no_ns then called new_el.set("epub:type",
+# ...), and lxml's XML .set() rejects any name containing ":" that isn't a
+# real Clark-notation namespace, raising:
+#   ValueError: Invalid attribute name 'epub:type'
+# Full traceback path: write -> _do_write -> _patch_entry ->
+# _patch_xhtml_document -> _set_element_content -> _copy_element_no_ns.
+#
+# Chosen behavior (documented here): the namespace prefix is stripped and only
+# the local attribute name survives (epub:type -> type). This mirrors how
+# _local_tag already strips namespaces from element tag names — attributes
+# get the same treatment for consistency. A true xmlns:* declaration (e.g.
+# xmlns:epub) is dropped entirely, never copied as a literal attribute.
+# ---------------------------------------------------------------------------
+
+
+def test_namespaced_attribute_in_fragment_does_not_crash_writer() -> None:
+    """A reinserted fragment containing epub:type=... must not raise ValueError.
+
+    Reproduces the live crash: translated_text contains a <span epub:type="...">
+    fragment (as produced when lxml's HTMLParser re-parses reinserted content
+    without resolving the epub: namespace). The writer must survive and the
+    attribute must land as its local name ("type"), not crash on ':'.
+    """
+    chapters = [("ch1.xhtml", _chapter_xhtml_plain("Hello, world!"))]
+    src_bytes = _make_epub_bytes(chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        assert node_chunks, "Expected at least one chunk from plain chapter"
+
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+
+        # Fake translation: inject a namespaced attribute exactly like the
+        # live crash — a fragment with epub:type on a span-like element.
+        translated_chunks = []
+        for chunk in chunks:
+            segments = chunk.source_text.split("\n\n")
+            translated_segments = [
+                f'[ES] <aside epub:type="footnote">nota</aside> {seg}' for seg in segments
+            ]
+            translated_chunks.append(
+                chunk.model_copy(
+                    update={
+                        "translated_text": "\n\n".join(translated_segments),
+                        "status": ChunkStatus.DONE,
+                    }
+                )
+            )
+
+        writer = EpubWriter()
+        # Must NOT raise ValueError: Invalid attribute name 'epub:type'
+        writer.write(translated_chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            xhtml_files = [n for n in zf.namelist() if n.endswith(".xhtml") or n.endswith(".html")]
+            content_files = [n for n in xhtml_files if "nav" not in n.lower()]
+            assert content_files, f"No content XHTML files found; got: {xhtml_files}"
+
+            raw = zf.read(content_files[0]).decode("utf-8", errors="replace")
+            assert "epub:type" not in raw, (
+                "Namespace prefix must be stripped from the attribute name; "
+                f"found literal 'epub:type' in output: {raw}"
+            )
+            assert "<aside" in raw and 'type="footnote"' in raw, (
+                f"Expected local attribute name 'type' to survive; got: {raw}"
             )
     finally:
         os.unlink(src_path)

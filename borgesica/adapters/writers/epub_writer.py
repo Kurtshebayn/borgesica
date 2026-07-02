@@ -168,14 +168,33 @@ def _copy_element_no_ns(
     (``http://www.w3.org/1999/xhtml``) which can produce ugly output.  We
     strip the namespace from the local tag name so that the output XHTML
     contains plain ``<em>`` rather than ``<ns0:em xmlns:ns0="..."/>``.
+
+    Attribute names get the same treatment. lxml's HTMLParser does NOT
+    resolve namespace prefixes on attributes the way it does for element
+    tags — a prefixed attribute like ``epub:type`` survives parsing as the
+    literal string ``"epub:type"`` (no Clark-notation ``{uri}`` wrapping).
+    XML's ``Element.set()`` rejects any name containing ``:`` that is not a
+    real Clark-notation namespace, so passing it through as-is raises
+    ``ValueError: Invalid attribute name 'epub:type'``.  We therefore strip
+    BOTH forms: a Clark-notation ``{uri}`` prefix (if lxml ever does resolve
+    it) and a literal ``prefix:`` prefix (the common case for HTML-parsed
+    fragments). ``xmlns*`` declarations are dropped entirely — they are
+    namespace declarations, not real content attributes, and are already
+    implied by the document's root namespace.
     """
     local = _local_tag(src)
     # Re-create the element without namespace
     new_el = etree.SubElement(parent, local)
 
-    # Copy attributes (skip xmlns-style)
+    # Copy attributes (skip xmlns-style; strip Clark-notation or literal
+    # "prefix:" namespace prefixes from the remaining attribute names).
     for attr, val in src.attrib.items():
-        local_attr = attr.split("}")[-1] if "}" in attr else attr
+        if "}" in attr:
+            local_attr = attr.split("}", 1)[1]
+        elif ":" in attr:
+            local_attr = attr.split(":", 1)[1]
+        else:
+            local_attr = attr
         if not local_attr.startswith("xmlns"):
             new_el.set(local_attr, val)
 
