@@ -1555,3 +1555,73 @@ def test_failed_chunk_cost_is_nonzero():
         f"Failed chunk cost {result.cost_usd:.8f} must equal total of all call costs "
         f"{expected_total:.8f} ({len(accumulated_call_costs)} calls made)."
     )
+
+
+# ===========================================================================
+# continue-on-error WU2-1: prose guard — zero-alphabetic chunks pass through
+# with 0 provider calls.
+# Spec: job-lifecycle/"prose guard skips provider calls for chunks with no
+# alphabetic content" (all 3 scenarios).
+# ===========================================================================
+
+
+def test_prose_guard_empty_after_strip_skips_provider_zero_cost():
+    """A chunk that strips to an empty string (a bare inline-tag pair with no
+    text content — the markup-only shape of a non-prose node such as an EPUB
+    cover placeholder) is passed through as DONE with zero provider calls and
+    zero cost. `markup.strip` recognizes <i>/<b>/<u>/<em>/<strong>/<span>/<a>;
+    it does not strip void HTML elements like <img> (those never reach the
+    orchestrator as chunks — EpubReader filters them out at read time)."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text='<span></span>')]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 0
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == chunks[0].source_text
+    assert result.cost_usd == 0.0
+
+
+def test_prose_guard_whitespace_only_skips_provider_zero_cost():
+    """A whitespace-only chunk is passed through as DONE with zero provider calls."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="   \n\t  ")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 0
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == chunks[0].source_text
+    assert result.cost_usd == 0.0
+
+
+def test_prose_guard_does_not_catch_watermark_with_letters():
+    """A watermark-style chunk whose stripped text contains letters (e.g.
+    'OceanofPDF.com') is NOT caught by the guard — the provider IS called."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text='<a href="x">OceanofPDF.com</a>')]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 1
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+    assert result.status == JobStatus.DONE

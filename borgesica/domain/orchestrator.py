@@ -3,28 +3,42 @@
 Dependency rule: only stdlib + pydantic + domain models/ports/helpers.
 No I/O, no adapter imports.
 
-Design (M2-0 tag-rework — replaces M1-8 per-chunk flow):
+Design (continue-on-error — replaces M2-0 per-chunk flow):
   TranslationOrchestrator.run(job, chunks, glossary, config, on_progress, cancel_flag)
     For each PENDING chunk (in index order):
       1. Check cancel_flag BEFORE the chunk (cooperative, not mid-chunk).
-      2. Budget check: if cost_so_far + projected_cost > budget_usd → raise BudgetExceeded.
-      3. Build system prompt via ContextManager (using current glossary + last summary).
-      4. PRIMARY (tags-in-text): send source_text WITH inline tags to the provider.
+      2. Budget check: if cost_so_far + projected_cost > budget_usd → raise BudgetExceeded
+         (PAUSES the job unconditionally — unaffected by continue_on_error).
+      3. Prose guard: strip(source_text); if the stripped result is empty/whitespace-only
+         OR contains no alphabetic characters, persist the chunk DONE with
+         translated_text = source_text (pass-through), make ZERO provider calls, and
+         move to the next chunk. Applies identically regardless of continue_on_error.
+      4. Build system prompt via ContextManager (using current glossary + last summary).
+      5. PRIMARY (tags-in-text): send source_text WITH inline tags to the provider.
          After translate, validate_tags(source, translated):
            - pass → chunk DONE.
            - mismatch → retry (≤2 additional, 3 total).
-      5. If quality_mode="reflective": critique + revise on the tagged user prompt.
+      6. If quality_mode="reflective": critique + revise on the tagged user prompt.
          Persisted text = REVISE step output.
-      6. FALLBACK (only after 3 tags-in-text attempts all fail validation):
+      7. FALLBACK (only after 3 tags-in-text attempts all fail validation):
          strip(source) → translate plain text (fresh provider call) → reinsert(tags)
          → validate_tags:
            - pass → chunk DONE using fallback output.
-           - fail (or provider raises) → chunk FAILED, job PAUSED, stop.
-      7. checkpoint.save_chunk(DONE) — idempotent.
-      8. summary = unit.summary_update; checkpoint.save_summary(N).
-      9. Merge glossary_additions (locked wins; new terms added as unlocked).
-     10. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
-    After loop: job.status = DONE (if all completed normally).
+           - fail (or provider raises) → chunk FAILED. Whether the job PAUSES is
+             gated by JobConfig.continue_on_error:
+               - continue_on_error=True (default): job does NOT pause — proceed
+                 to the next chunk; the job still finishes DONE with this chunk
+                 FAILED (translated_text=None; writers fall back to source_text).
+               - continue_on_error=False (--strict): job PAUSES immediately, stop.
+      8. checkpoint.save_chunk(DONE or FAILED) — idempotent.
+      9. summary = unit.summary_update; checkpoint.save_summary(N) — skipped for
+         a FAILED chunk (no summary_update available); the next chunk reuses the
+         current rolling summary.
+     10. Merge glossary_additions (locked wins; new terms added as unlocked).
+     11. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
+    After loop: job.status = DONE — even if one or more chunks ended FAILED (only
+    reached when continue_on_error=True or no chunk failed; a strict-mode PAUSE
+    returns early and never reaches this point).
 
 Resume semantics:
   - DONE chunks are skipped (0 provider calls for them).
@@ -209,6 +223,33 @@ class TranslationOrchestrator:
                     )
                     self._checkpoint.save_job(paused_job)
                     raise BudgetExceeded(job_id=job.id, cost_so_far=running_cost)
+
+            # Prose guard: chunks with no translatable prose (empty/whitespace-only
+            # after stripping inline tags, or containing no alphabetic characters at
+            # all) pass through verbatim with ZERO provider calls and ZERO cost.
+            # This is deliberately conservative — no real prose has zero alphabetic
+            # characters, so this guard has zero false positives (never silently
+            # skips a translatable sentence). Applies identically regardless of
+            # continue_on_error.
+            stripped_text, _ = strip(chunk.source_text)
+            if stripped_text.strip() == "" or not any(c.isalpha() for c in stripped_text):
+                passthrough_chunk = chunk.model_copy(
+                    update={
+                        "status": ChunkStatus.DONE,
+                        "translated_text": chunk.source_text,
+                    }
+                )
+                self._checkpoint.save_chunk(job.id, passthrough_chunk)
+                on_progress(
+                    Progress(
+                        job_id=job.id,
+                        chunk_index=chunk.index,
+                        total_chunks=len(ordered_chunks),
+                        cost_usd=running_cost,
+                        status=JobStatus.RUNNING,
+                    )
+                )
+                continue
 
             # Build system prompt for this chunk.
             system_prompt = self._ctx.build_system_prompt(config, live_glossary, current_summary)
