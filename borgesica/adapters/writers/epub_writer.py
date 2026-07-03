@@ -411,13 +411,15 @@ class EpubWriter:
 
         if patches_for_entry is None:
             # Try matching on the trailing component (epub_item_href may be
-            # relative to the content root rather than the ZIP root)
+            # relative to the content root rather than the ZIP root, or vice
+            # versa). Suffix matches are only valid at a "/" path boundary in
+            # BOTH directions: a bare suffix check made 'content-toc.xhtml'
+            # match 'toc.xhtml', misdirecting a real book's TOC patches at the
+            # EPUB3 nav doc.
             for href, node_patches in flat_patches.items():
-                if zip_entry_name.endswith(href) or zip_entry_name.endswith("/" + href):
-                    patches_for_entry = node_patches
-                    break
-                # Also try the reverse: href ends with zip_entry_name's basename
-                if href.endswith(os.path.basename(zip_entry_name)):
+                if zip_entry_name.endswith("/" + href) or href.endswith(
+                    "/" + zip_entry_name
+                ):
                     patches_for_entry = node_patches
                     break
 

@@ -602,6 +602,79 @@ def test_namespaced_attribute_in_fragment_does_not_crash_writer() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 6c: _patch_entry filename matching must respect path boundaries.
+#
+# Regression tests: translating a real book, the EPUB3 nav doc "toc.xhtml"
+# received the patches destined for "content-toc.xhtml" because the reverse
+# fuzzy match used a bare suffix check:
+#   'content-toc.xhtml'.endswith(os.path.basename('toc.xhtml'))  → True
+# producing 15 misdirected "skipping patch" warnings per run (and, had the
+# node paths existed in the nav doc, silently overwritten navigation labels).
+# The forward direction had the same latent bug:
+#   'OEBPS/content-toc.xhtml'.endswith('toc.xhtml')  → True
+#
+# Chosen behavior: a suffix match is only valid at a "/" path boundary, in
+# BOTH directions. Exact matches and prefix-directory matches keep working.
+# ---------------------------------------------------------------------------
+
+_PATCH_ENTRY_XHTML = (
+    "<?xml version='1.0' encoding='utf-8'?>"
+    "<html xmlns='http://www.w3.org/1999/xhtml'>"
+    "<head><title>Doc</title></head>"
+    "<body><p>Original paragraph.</p></body>"
+    "</html>"
+).encode("utf-8")
+
+
+def test_patch_entry_reverse_suffix_does_not_misdirect() -> None:
+    """Patches for 'content-toc.xhtml' must NOT be applied to 'toc.xhtml'."""
+    writer = EpubWriter()
+    flat_patches = {"content-toc.xhtml": {"/p[0]": "ÍNDICE"}}
+    result = writer._patch_entry("toc.xhtml", _PATCH_ENTRY_XHTML, flat_patches)
+    assert result == _PATCH_ENTRY_XHTML, (
+        "toc.xhtml was modified by patches destined for content-toc.xhtml "
+        "(reverse bare-suffix match misdirected the patch)"
+    )
+
+
+def test_patch_entry_forward_suffix_requires_path_boundary() -> None:
+    """Patches for 'toc.xhtml' must NOT be applied to 'OEBPS/content-toc.xhtml'."""
+    writer = EpubWriter()
+    flat_patches = {"toc.xhtml": {"/p[0]": "ÍNDICE"}}
+    result = writer._patch_entry(
+        "OEBPS/content-toc.xhtml", _PATCH_ENTRY_XHTML, flat_patches
+    )
+    assert result == _PATCH_ENTRY_XHTML, (
+        "content-toc.xhtml was modified by patches destined for toc.xhtml "
+        "(forward bare-suffix match misdirected the patch)"
+    )
+
+
+def test_patch_entry_exact_match_patches() -> None:
+    """Exact href == zip entry name must keep patching."""
+    writer = EpubWriter()
+    flat_patches = {"toc.xhtml": {"/p[0]": "ÍNDICE"}}
+    result = writer._patch_entry("toc.xhtml", _PATCH_ENTRY_XHTML, flat_patches)
+    assert "ÍNDICE".encode("utf-8") in result
+
+
+def test_patch_entry_prefixed_zip_entry_patches() -> None:
+    """href 'ch1.xhtml' must match zip entry 'OEBPS/ch1.xhtml' (boundary '/')."""
+    writer = EpubWriter()
+    flat_patches = {"ch1.xhtml": {"/p[0]": "Hola mundo"}}
+    result = writer._patch_entry("OEBPS/ch1.xhtml", _PATCH_ENTRY_XHTML, flat_patches)
+    assert b"Hola mundo" in result
+
+
+def test_patch_entry_prefixed_href_patches() -> None:
+    """href 'OEBPS/ch1.xhtml' must match zip entry 'ch1.xhtml' (boundary '/')."""
+    writer = EpubWriter()
+    flat_patches = {"OEBPS/ch1.xhtml": {"/p[0]": "Hola mundo"}}
+    result = writer._patch_entry("ch1.xhtml", _PATCH_ENTRY_XHTML, flat_patches)
+    assert b"Hola mundo" in result
+
+
+# ---------------------------------------------------------------------------
 # Test 7: End-to-end provenance round-trip
 #   reader → chunker → fake translate → writer → reader
 #   Assert: translated text landed in the correct nodes
