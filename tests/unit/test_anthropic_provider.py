@@ -448,6 +448,20 @@ class TestPrice:
         result = provider.price("some-future-model-xyz")
         assert result == (3.0, 15.0)
 
+    def test_price_haiku_4_5_matches_current_published_rate(self):
+        """Haiku 4.5 is billed at ($1.00, $5.00)/Mtok (current Anthropic rate).
+        The table previously carried a stale ($0.80, $4.00) — verify the fix.
+        """
+        provider = AnthropicProvider(api_key="fake-key")
+        assert provider.price("claude-haiku-4-5-20251001") == (1.00, 5.00)
+
+    def test_price_opus_4_8_matches_current_published_rate(self):
+        """Opus 4.8 is billed at ($5.00, $25.00)/Mtok (current Anthropic rate).
+        The table previously carried a stale ($15.00, $75.00) — verify the fix.
+        """
+        provider = AnthropicProvider(api_key="fake-key")
+        assert provider.price("claude-opus-4-8") == (5.00, 25.00)
+
 
 # ---------------------------------------------------------------------------
 # Test 8: Domain purity — anthropic import ONLY in adapters/providers/

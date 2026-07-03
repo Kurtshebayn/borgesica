@@ -72,9 +72,9 @@ _MAX_OUTPUT_TOKENS = 8192
 #   published Anthropic pricing. See engram: sdd/translation-engine/todo-pricing.
 _PRICE_TABLE: dict[str, tuple[float, float]] = {
     # Claude 4 family (current model IDs)
-    "claude-opus-4-8": (15.0, 75.0),
+    "claude-opus-4-8": (5.0, 25.0),
     "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-haiku-4-5-20251001": (0.80, 4.0),
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
     # Claude 3.7
     "claude-3-7-sonnet-20250219": (3.0, 15.0),
     # Claude 3.5 family
