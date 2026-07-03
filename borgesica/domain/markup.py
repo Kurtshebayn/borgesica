@@ -156,3 +156,17 @@ def validate_tags(original: str, translated: str) -> bool:
     orig_tags = _TAG_PATTERN.findall(original)
     tran_tags = _TAG_PATTERN.findall(translated)
     return len(orig_tags) == len(tran_tags)
+
+
+def validate_segments(original: str, translated: str) -> bool:
+    """Return True iff *original* and *translated* have the same number of
+    ``\\n\\n``-separated segments.
+
+    The segment count is part of the model output contract: readers join block
+    nodes with ``\\n\\n`` and writers split translated text on ``\\n\\n`` to map
+    segments back to document nodes positionally, so a merged or split
+    paragraph desynchronizes every node after the divergence point. Counts are
+    taken on the raw strings — no strip()/normalization — because that is
+    exactly how the writers split.
+    """
+    return len(original.split("\n\n")) == len(translated.split("\n\n"))

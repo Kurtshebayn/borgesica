@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from borgesica.domain.markup import reinsert, strip, validate_tags
+from borgesica.domain.markup import reinsert, strip, validate_segments, validate_tags
 
 
 # ---------------------------------------------------------------------------
@@ -250,3 +250,34 @@ def test_m2_0_strip_reinsert_validate_roundtrip_unchanged() -> None:
     assert validate_tags(source, reinserted) is True, (
         "Fallback path: reinsert must produce same tag count as source"
     )
+
+
+# ---------------------------------------------------------------------------
+# validate_segments()
+#
+# The "\n\n" segment count is part of the model output contract: readers join
+# block nodes with "\n\n" and writers split translated_text on "\n\n" to map
+# segments back positionally. A merged or split paragraph desynchronizes
+# every node after the divergence point. No strip()/normalization: the
+# validator must count segments EXACTLY as the writers split them.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_segments_equal_counts() -> None:
+    """Same number of \n\n segments on both sides passes."""
+    assert validate_segments("Uno.\n\nDos.", "One.\n\nTwo.") is True
+
+
+def test_validate_segments_detects_merge() -> None:
+    """Two source paragraphs merged into one translated segment fails."""
+    assert validate_segments("Uno.\n\nDos.", "One. Two.") is False
+
+
+def test_validate_segments_detects_split() -> None:
+    """One source paragraph split into two translated segments fails."""
+    assert validate_segments("Uno. Dos.", "One.\n\nTwo.") is False
+
+
+def test_validate_segments_single_segment() -> None:
+    """Single-paragraph chunks trivially pass."""
+    assert validate_segments("Uno.", "One.") is True

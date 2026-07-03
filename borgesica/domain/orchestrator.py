@@ -49,6 +49,7 @@ Resume semantics:
 """
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import UTC, datetime
 
@@ -61,7 +62,7 @@ from borgesica.domain.errors import (
     ProviderError,
 )
 from borgesica.domain.glossary import merge_additions
-from borgesica.domain.markup import reinsert, strip, validate_tags
+from borgesica.domain.markup import reinsert, strip, validate_segments, validate_tags
 from borgesica.domain.models import (
     Chunk,
     ChunkStatus,
@@ -75,6 +76,8 @@ from borgesica.domain.models import (
     Usage,
 )
 from borgesica.domain.ports import CheckpointStore, ProgressCallback, TranslationProvider
+
+logger = logging.getLogger(__name__)
 
 # Maximum retries for tag-mismatch (initial attempt + 2 retries = 3 total)
 _MAX_TAG_RETRIES = 2
@@ -402,6 +405,12 @@ class TranslationOrchestrator:
         PRIMARY (tags-in-text):
           - Send chunk.source_text WITH inline tags as the user prompt.
           - validate_tags(source, translated_text) on the raw output.
+          - validate_segments(source, translated_text): the "\\n\\n" segment
+            count must match the source (writers map segments to document
+            nodes positionally). Mismatch retries like a tag mismatch, but if
+            every attempt is tag-valid and only segment-mismatched, the LAST
+            such attempt is accepted (never FAILED, no fallback call) — the
+            writer's defensive mapping absorbs it.
           - Retry up to _MAX_TAG_RETRIES times (3 total attempts) on mismatch.
 
         FALLBACK (strip/reinsert deterministic path):
@@ -418,6 +427,10 @@ class TranslationOrchestrator:
         """
         user_prompt = chunk.source_text  # PRIMARY: send WITH tags
         total_call_cost = 0.0
+
+        # Last tag-valid attempt whose "\n\n" segment count diverged from the
+        # source — accepted after the loop if no compliant output arrives.
+        best_effort: tuple[TranslationUnit, str] | None = None
 
         # --- PRIMARY: tags-in-text attempts ---
         for attempt in range(_MAX_TAG_RETRIES + 1):  # 0, 1, 2
@@ -454,9 +467,30 @@ class TranslationOrchestrator:
 
             # Validate tag counts in the raw translation (tags-in-text path).
             if validate_tags(chunk.source_text, translated_text):
-                return unit, translated_text, total_call_cost
+                if validate_segments(chunk.source_text, translated_text):
+                    return unit, translated_text, total_call_cost
+                # Segment-count mismatch (model merged/split "\n\n" paragraphs,
+                # which desynchronizes the writer's positional node mapping):
+                # keep this tag-valid attempt and retry for a compliant one.
+                best_effort = (unit, translated_text)
+                continue
 
             # Tag mismatch — retry unless this was the last attempt.
+
+        # All attempts exhausted with at least one tag-valid but
+        # segment-mismatched output: accept the last one. The writer's
+        # defensive mapping absorbs the mismatch; the strip/reinsert fallback
+        # below exists for TAG failures and would cost another call without
+        # fixing segmentation. A chunk must never end FAILED over this.
+        if best_effort is not None:
+            logger.warning(
+                "Chunk %d: segment-count mismatch persisted after %d attempts — "
+                "accepting best effort (writer applies defensive mapping)",
+                chunk.index,
+                _MAX_TAG_RETRIES + 1,
+            )
+            best_unit, best_text = best_effort
+            return best_unit, best_text, total_call_cost
 
         # --- FALLBACK: strip → translate plain → reinsert ---
         # All primary (tags-in-text) attempts exhausted.

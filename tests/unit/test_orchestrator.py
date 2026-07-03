@@ -587,7 +587,14 @@ def test_fast_mode_one_call_per_chunk():
 
 
 def test_reflective_mode_three_calls_per_chunk():
-    orch, provider, store = make_orchestrator()
+    # Canned single-segment output: the default echo fake would return the
+    # composite critique/revise PROMPT as the translation, violating the
+    # "\n\n" segment contract and triggering retries — an artifact no real
+    # model exhibits (a real translation mirrors the source's segments).
+    canned = FakeTranslationProvider(
+        canned_unit=TranslationUnit(translation="Texto traducido.", summary_update="Summary.")
+    )
+    orch, provider, store = make_orchestrator(provider=canned)
     config = make_config(quality_mode="reflective")
     job = make_job(config, total=3)
     chunks = make_chunks(3)
@@ -714,6 +721,119 @@ def test_tag_mismatch_retry_succeeds_on_second():
     assert provider.call_count == 2
     saved = store.load_chunks(job.id)
     assert saved[0].status == ChunkStatus.DONE
+    assert result.status == JobStatus.DONE
+
+
+# ===========================================================================
+# 16b. Segment-count mismatch: the model merged/split "\n\n" paragraphs.
+#
+# The "\n\n" segment count is part of the output contract: writers map
+# segments back to document nodes positionally, so a merged paragraph
+# desynchronizes every node after the divergence point (observed live:
+# DeepSeek chunks 0/8/11/13/15, one real paragraph-join in human review).
+#
+# Contract: retry for a compliant output; if every attempt is tag-valid but
+# segment-mismatched, ACCEPT the last attempt (the writer's defensive mapping
+# is the safety net) — the chunk must NOT fail and the strip/reinsert
+# fallback (which exists for TAG failures) must NOT be invoked.
+# ===========================================================================
+
+
+def test_segment_mismatch_retry_succeeds_on_second():
+    """Provider merges paragraphs on 1st call, respects "\n\n" on 2nd."""
+    store = InMemoryCheckpointStore()
+
+    class SegmentMergeOnceProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            if n == 0:
+                # First call: two source paragraphs merged into ONE segment
+                unit = TranslationUnit(
+                    translation="Párrafo uno. Párrafo dos.",
+                    summary_update="Summary.",
+                )
+            else:
+                # Second call: segment count matches the source (2)
+                unit = TranslationUnit(
+                    translation="Párrafo uno.\n\nPárrafo dos.",
+                    summary_update="Summary.",
+                )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = SegmentMergeOnceProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    assert provider.call_count == 2
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "Párrafo uno.\n\nPárrafo dos."
+    assert result.status == JobStatus.DONE
+
+
+def test_segment_mismatch_all_attempts_accepts_best_effort():
+    """Provider ALWAYS merges paragraphs: after 3 tag-valid attempts the last
+    one is accepted — chunk DONE (not FAILED), no strip/reinsert fallback call."""
+    store = InMemoryCheckpointStore()
+
+    class AlwaysMergeProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="Párrafo uno. Párrafo dos.",
+                summary_update="Summary.",
+            )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = AlwaysMergeProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    # 3 primary attempts (all tag-valid, all segment-mismatched) and NOTHING
+    # else: accepting best effort must not trigger the strip/reinsert fallback.
+    assert provider.call_count == 3
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "Párrafo uno. Párrafo dos."
     assert result.status == JobStatus.DONE
 
 
@@ -1644,7 +1764,10 @@ def test_reflective_mode_cost_reflects_three_calls_per_chunk():
             elif step == 1:
                 text = "critique notes"
             else:
-                text = f"[revised] {user}"
+                # Single-segment revise output: echoing the composite revise
+                # PROMPT would violate the "\n\n" segment contract and trigger
+                # retries (the revise output is what gets validated).
+                text = "[revised] chunk translation."
             unit = TranslationUnit(translation=text, summary_update="Summary.")
             in_tok = self.count_tokens(system + " " + user, model)
             out_tok = self.count_tokens(text, model)
