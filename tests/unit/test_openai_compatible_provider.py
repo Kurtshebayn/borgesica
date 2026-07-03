@@ -148,6 +148,25 @@ _TIER3_INVALID_JSON_RESPONSE = {
 }
 
 
+def _with_usage(response: dict, prompt_tokens: int, completion_tokens: int) -> dict:
+    """Return a copy of `response` with a `usage` block attached (billed usage)."""
+    import copy
+
+    out = copy.deepcopy(response)
+    out["usage"] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+    }
+    return out
+
+
+_NO_TOOL_CALL_RESPONSE_BILLED = _with_usage(_NO_TOOL_CALL_RESPONSE, 100, 50)
+_EMPTY_CONTENT_RESPONSE_BILLED = _with_usage(_EMPTY_CONTENT_RESPONSE, 90, 45)
+_TIER3_INVALID_JSON_RESPONSE_BILLED_1 = _with_usage(_TIER3_INVALID_JSON_RESPONSE, 10, 5)
+_TIER3_INVALID_JSON_RESPONSE_BILLED_2 = _with_usage(_TIER3_INVALID_JSON_RESPONSE, 20, 10)
+_TIER3_VALID_JSON_RESPONSE_BILLED = _with_usage(_TIER3_VALID_JSON_RESPONSE, 70, 35)
+
+
 def _make_http_error(status_code: int, retry_after: int | None = None):
     """Build an openai.APIStatusError-like exception for testing."""
     import httpx
@@ -366,6 +385,74 @@ class TestAllTiersExhausted:
 
         # 1 (Tier-1) + 1 (Tier-2) + 2 (Tier-3 retries) = 4
         assert fake_client._call_index == 4
+
+
+# ---------------------------------------------------------------------------
+# Test 5b: Billed-but-failed usage accrual (budget guard regression).
+#
+# When a tier obtains a response (billed by the provider) but that tier's
+# parse fails / falls through, its usage must be accrued into a running total
+# so the eventual TranslationResult (or raised MalformedOutput) reflects the
+# true billed cost — not just the final successful (or zero) usage.
+# ---------------------------------------------------------------------------
+
+
+class TestBilledUsageAccrualAcrossTiers:
+    def test_summed_usage_tier1_fallthrough_tier2_fallthrough_tier3_success(self):
+        """Tier-1 gets a billed response (100, 50) but no tool_call → falls through.
+        Tier-2 gets a billed response (90, 45) but empty content (DeepSeek quirk) →
+        falls through. Tier-3 succeeds with usage (70, 35).
+        Final usage must be the SUM across all three billed tiers: (260, 130).
+        """
+        provider, fake_client = _make_provider([
+            _NO_TOOL_CALL_RESPONSE_BILLED,
+            _EMPTY_CONTENT_RESPONSE_BILLED,
+            _TIER3_VALID_JSON_RESPONSE_BILLED,
+        ])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            result = provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert isinstance(result, TranslationResult)
+        assert result.usage.input_tokens == 260
+        assert result.usage.output_tokens == 130
+
+    def test_malformed_output_carries_summed_billed_usage_across_all_tiers(self):
+        """All tiers exhausted (Tier-1 fallthrough, Tier-2 fallthrough, Tier-3
+        fails twice) but each obtained a billed response → the raised
+        MalformedOutput.usage must sum every billed attempt's usage.
+        """
+        provider, fake_client = _make_provider([
+            _NO_TOOL_CALL_RESPONSE_BILLED,           # Tier-1: billed (100, 50), no tool_call
+            _EMPTY_CONTENT_RESPONSE_BILLED,           # Tier-2: billed (90, 45), empty content
+            _TIER3_INVALID_JSON_RESPONSE_BILLED_1,    # Tier-3 attempt 1: billed (10, 5)
+            _TIER3_INVALID_JSON_RESPONSE_BILLED_2,    # Tier-3 attempt 2: billed (20, 10)
+        ])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            with pytest.raises(MalformedOutput) as exc_info:
+                provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        # sum: (100+90+10+20, 50+45+5+10) = (220, 110)
+        assert exc_info.value.usage.input_tokens == 220
+        assert exc_info.value.usage.output_tokens == 110
+
+    def test_rate_limit_and_5xx_contribute_zero_usage(self):
+        """429/5xx paths never obtain a billed response — ProviderError raised
+        after 5xx exhaustion must carry zero usage."""
+        server_err = _make_http_error(500)
+        provider, fake_client = _make_provider([
+            server_err,
+            server_err,
+            server_err,
+        ])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep", lambda s: None):
+            with pytest.raises(ProviderError) as exc_info:
+                provider.translate("system", "Hello", "deepseek-v4-flash")
+
+        assert exc_info.value.usage.input_tokens == 0
+        assert exc_info.value.usage.output_tokens == 0
 
 
 # ---------------------------------------------------------------------------

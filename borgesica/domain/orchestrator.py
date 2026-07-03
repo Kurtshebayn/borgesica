@@ -440,12 +440,16 @@ class TranslationOrchestrator:
                     unit = result.unit
                     translated_text = result.unit.translation
                     total_call_cost += self._usage_cost(result.usage, in_price, out_price)
-            except (MalformedOutput, ProviderError):
+            except (MalformedOutput, ProviderError) as exc:
                 # The provider gave up on this attempt (after its own tiers/retries).
                 # Treat it as a failed attempt: retry, or fall through to the
                 # deterministic fallback after the last attempt. A single flaky
                 # chunk must NOT crash the whole run — worst case the chunk ends
                 # FAILED and the job PAUSED (resumable), never stranded RUNNING.
+                # Cost fix: the provider's internal billed-but-failed calls carry
+                # real usage on the exception — accrue it so the budget guard sees
+                # the true spend of failed chunks (previously charged $0).
+                total_call_cost += self._usage_cost(exc.usage, in_price, out_price)
                 continue
 
             # Validate tag counts in the raw translation (tags-in-text path).
@@ -469,12 +473,14 @@ class TranslationOrchestrator:
             fallback_text = reinsert(fallback_unit.translation, tags, plain_source)
             if validate_tags(chunk.source_text, fallback_text):
                 return fallback_unit, fallback_text, total_call_cost
-        except (MalformedOutput, ProviderError):
+        except (MalformedOutput, ProviderError) as exc:
             # Provider failed during the fallback call — treat as total failure
             # (chunk FAILED, job PAUSED). Any OTHER exception (a real bug in
             # strip/reinsert, etc.) is intentionally NOT caught here so it surfaces
             # instead of being silently mislabeled as a tag failure.
-            pass
+            # Cost fix: accrue the billed-but-failed usage carried on the exception
+            # so the fallback call's real cost is not dropped.
+            total_call_cost += self._usage_cost(exc.usage, in_price, out_price)
 
         # Both primary and fallback failed.
         return None, None, total_call_cost

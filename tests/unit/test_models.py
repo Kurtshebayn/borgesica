@@ -215,6 +215,29 @@ def test_malformed_output_carries_expected_attrs() -> None:
     assert err.chunk_index == 3
 
 
+def test_malformed_output_defaults_to_zero_usage() -> None:
+    """MalformedOutput without an explicit usage kwarg carries a zero Usage
+    (billed-but-failed accrual fix): callers that don't pass usage (e.g. test
+    fakes, or paths with no billed response) must not crash and must see zero."""
+    from borgesica.domain.errors import MalformedOutput
+    from borgesica.domain.models import Usage
+
+    err = MalformedOutput(job_id="job-1", chunk_index=3)
+    assert err.usage == Usage(input_tokens=0, output_tokens=0)
+
+
+def test_malformed_output_carries_explicit_usage() -> None:
+    """MalformedOutput accepts an explicit usage kwarg carrying the accumulated
+    billed-but-wasted usage across all failed attempts."""
+    from borgesica.domain.errors import MalformedOutput
+    from borgesica.domain.models import Usage
+
+    err = MalformedOutput(
+        job_id="job-1", chunk_index=3, usage=Usage(input_tokens=180, output_tokens=90)
+    )
+    assert err.usage == Usage(input_tokens=180, output_tokens=90)
+
+
 def test_job_not_found_error() -> None:
     from borgesica.domain.errors import JobNotFoundError, BorgésicaError
 
@@ -253,6 +276,24 @@ def test_provider_error_status_code_can_be_none() -> None:
 
     err = ProviderError(status_code=None)
     assert err.status_code is None
+
+
+def test_provider_error_defaults_to_zero_usage() -> None:
+    """ProviderError without an explicit usage kwarg carries a zero Usage —
+    e.g. a 5xx/429 ProviderError has no billed response to accrue."""
+    from borgesica.domain.errors import ProviderError
+    from borgesica.domain.models import Usage
+
+    err = ProviderError(status_code=500)
+    assert err.usage == Usage(input_tokens=0, output_tokens=0)
+
+
+def test_provider_error_carries_explicit_usage() -> None:
+    from borgesica.domain.errors import ProviderError
+    from borgesica.domain.models import Usage
+
+    err = ProviderError(status_code=500, usage=Usage(input_tokens=10, output_tokens=5))
+    assert err.usage == Usage(input_tokens=10, output_tokens=5)
 
 
 # ---------------------------------------------------------------------------

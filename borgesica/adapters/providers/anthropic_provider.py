@@ -145,12 +145,18 @@ class AnthropicProvider:
           4. Retry up to self._max_retries on transient/malformed failures.
           5. Exhausted retries → raise MalformedOutput (malformed) or ProviderError (5xx).
 
-        Usage is populated from response.usage.input_tokens / output_tokens on
-        every successful response.  On retry, only the last (successful) response's
-        usage is returned — callers that need per-call granularity should not retry
-        internally; that is the orchestrator's responsibility.
+        Usage accounting (cost-accuracy fix): a response is BILLED by Anthropic
+        whenever the HTTP call returns 200, EVEN IF its content then fails to
+        parse/validate. This method accumulates the real usage of every such
+        billed attempt across all retries. On eventual SUCCESS it returns the SUM
+        of every billed attempt (the wasted retries PLUS the successful one). On
+        eventual FAILURE it raises MalformedOutput carrying the accumulated
+        wasted usage, so the orchestrator can accrue the real cost of billed
+        calls that produced no usable translation. Transport failures (429 / 5xx)
+        are NOT billed and contribute nothing.
         """
         last_error: Exception | None = None
+        wasted = Usage()  # accumulated usage of billed-but-failed attempts
 
         for attempt in range(self._max_retries):
             try:
@@ -162,11 +168,13 @@ class AnthropicProvider:
                     tools=_TRANSLATION_TOOL,
                     tool_choice={"type": "auto"},
                 )
+                # HTTP 200: this response WAS billed regardless of parse outcome.
+                usage = self._extract_usage(response)
                 unit = self._parse_response(response)
                 if unit is not None:
-                    usage = self._extract_usage(response)
-                    return TranslationResult(unit=unit, usage=usage)
-                # Malformed but no exception — retry with a more explicit prompt
+                    return TranslationResult(unit=unit, usage=_sum_usage(wasted, usage))
+                # Malformed but billed — accrue its usage and retry.
+                wasted = _sum_usage(wasted, usage)
                 last_error = ValueError("No valid TranslationUnit in response")
 
             except anthropic.RateLimitError as exc:
@@ -178,24 +186,24 @@ class AnthropicProvider:
             except anthropic.InternalServerError as exc:
                 time.sleep(_backoff(attempt))
                 last_error = exc
-                # Raise ProviderError after max retries for 5xx
+                # Raise ProviderError after max retries for 5xx (not billed).
                 if attempt == self._max_retries - 1:
-                    raise ProviderError(status_code=exc.status_code) from exc
+                    raise ProviderError(status_code=exc.status_code, usage=wasted) from exc
 
             except anthropic.APIStatusError as exc:
                 if exc.status_code >= 500:
                     time.sleep(_backoff(attempt))
                     last_error = exc
                     if attempt == self._max_retries - 1:
-                        raise ProviderError(status_code=exc.status_code) from exc
+                        raise ProviderError(status_code=exc.status_code, usage=wasted) from exc
                 else:
-                    raise ProviderError(status_code=exc.status_code) from exc
+                    raise ProviderError(status_code=exc.status_code, usage=wasted) from exc
 
             except (ValidationError, json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
 
-        # All retries exhausted with malformed output
-        raise MalformedOutput(job_id="unknown", chunk_index=-1) from last_error
+        # All retries exhausted with malformed output — carry the billed waste.
+        raise MalformedOutput(job_id="unknown", chunk_index=-1, usage=wasted) from last_error
 
     def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
         """Count tokens using the Anthropic token-counting API, with word-count fallback."""
@@ -269,6 +277,14 @@ class AnthropicProvider:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _sum_usage(a: Usage, b: Usage) -> Usage:
+    """Return a new Usage that is the element-wise sum of two Usage values."""
+    return Usage(
+        input_tokens=a.input_tokens + b.input_tokens,
+        output_tokens=a.output_tokens + b.output_tokens,
+    )
 
 
 def _get_retry_after(exc: Any) -> float | None:

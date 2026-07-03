@@ -27,7 +27,11 @@ from borgesica.domain.ports import TranslationProvider
 # ---------------------------------------------------------------------------
 
 
-def _valid_tool_use_response(translation: str = "Hola mundo") -> object:
+def _valid_tool_use_response(
+    translation: str = "Hola mundo",
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> object:
     """Build a fake Anthropic message response with a tool_use content block."""
     import json
 
@@ -44,10 +48,18 @@ def _valid_tool_use_response(translation: str = "Hola mundo") -> object:
     msg = MagicMock()
     msg.content = [content_block]
     msg.stop_reason = "tool_use"
+    if input_tokens is not None or output_tokens is not None:
+        msg.usage = MagicMock(
+            input_tokens=input_tokens or 0, output_tokens=output_tokens or 0
+        )
     return msg
 
 
-def _text_response(text: str) -> object:
+def _text_response(
+    text: str,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> object:
     """Build a fake Anthropic message with a plain text content block (fallback path)."""
     import json
 
@@ -58,6 +70,10 @@ def _text_response(text: str) -> object:
     msg = MagicMock()
     msg.content = [content_block]
     msg.stop_reason = "end_turn"
+    if input_tokens is not None or output_tokens is not None:
+        msg.usage = MagicMock(
+            input_tokens=input_tokens or 0, output_tokens=output_tokens or 0
+        )
     return msg
 
 
@@ -160,6 +176,130 @@ class TestGracefulDegradation:
         assert result.usage.input_tokens >= 0, "usage.input_tokens must be non-negative"
         assert result.usage.output_tokens >= 0, "usage.output_tokens must be non-negative"
         assert client.messages.create.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 2c: Billed-but-failed usage accrual (budget guard regression).
+#
+# A real book run billed $1.68 on Anthropic's console but Borgésica recorded
+# $0.196: when a call returns HTTP 200 with unparseable content, Anthropic
+# bills the call, but the old code discarded that attempt's usage entirely.
+# The FIX: translate() must SUM usage across every attempt that obtained a
+# response (billed), whether or not that attempt's parse succeeded.
+# ---------------------------------------------------------------------------
+
+
+class TestBilledUsageAccrual:
+    def test_summed_usage_across_malformed_then_success(self):
+        """Attempt 1: HTTP 200, billed usage (100, 50), but unparseable content
+        (malformed tool_use → falls through as None-unit, no exception).
+        Attempt 2: succeeds with usage (80, 40).
+        Final TranslationResult.usage must be the SUM: (180, 90), not just the
+        final attempt's (80, 40) alone.
+        """
+        responses = [
+            _text_response("not valid json", input_tokens=100, output_tokens=50),
+            _valid_tool_use_response("Hola", input_tokens=80, output_tokens=40),
+        ]
+        client = make_fake_client(responses)
+        provider = AnthropicProvider(client=client)
+        result = provider.translate("system", "Hello", "claude-3-5-haiku-20241022")
+
+        assert isinstance(result, TranslationResult)
+        assert result.usage.input_tokens == 180
+        assert result.usage.output_tokens == 90
+
+    def test_summed_usage_across_validation_error_then_success(self):
+        """Attempt 1: tool_use block present but its input fails TranslationUnit
+        validation (ValidationError path inside _parse_response) — response.usage
+        must still be accrued because the HTTP call succeeded (billed).
+        Attempt 2: succeeds. Final usage = sum of both.
+        """
+        bad_content_block = MagicMock()
+        bad_content_block.type = "tool_use"
+        bad_content_block.input = {"translation": None}  # fails TranslationUnit validation
+
+        bad_msg = MagicMock()
+        bad_msg.content = [bad_content_block]
+        bad_msg.stop_reason = "tool_use"
+        bad_msg.usage = MagicMock(input_tokens=120, output_tokens=60)
+
+        responses = [
+            bad_msg,
+            _valid_tool_use_response("Hola", input_tokens=70, output_tokens=35),
+        ]
+        client = make_fake_client(responses)
+        provider = AnthropicProvider(client=client)
+        result = provider.translate("system", "Hello", "claude-3-5-haiku-20241022")
+
+        assert result.usage.input_tokens == 190
+        assert result.usage.output_tokens == 95
+
+    def test_malformed_output_carries_summed_billed_usage_on_total_failure(self):
+        """All attempts malformed but billed (each has response.usage) → the
+        raised MalformedOutput.usage must equal the SUM of all billed attempts'
+        usage, not zero.
+        """
+        responses = [
+            _text_response("bad json 1", input_tokens=10, output_tokens=5),
+            _text_response("bad json 2", input_tokens=20, output_tokens=10),
+            _text_response("bad json 3", input_tokens=30, output_tokens=15),
+        ]
+        client = make_fake_client(responses)
+        provider = AnthropicProvider(client=client)
+
+        with pytest.raises(MalformedOutput) as exc_info:
+            provider.translate("system", "Hello world", "claude-3-5-haiku-20241022")
+
+        assert exc_info.value.usage.input_tokens == 60
+        assert exc_info.value.usage.output_tokens == 30
+
+    def test_rate_limit_exhausted_raises_zero_usage_provider_error(self):
+        """429s that exhaust retries never obtain a billed response — no usage
+        should be accrued. RateLimitError itself is not raised as ProviderError
+        by the current design (it retries until max_retries, then falls through
+        to MalformedOutput with last_error=RateLimitError) — assert MalformedOutput
+        carries zero usage in that case, since no response.usage was ever read.
+        """
+        import anthropic
+
+        rate_limit_err = _make_api_error(anthropic.RateLimitError, 429, retry_after=0)
+        client = MagicMock()
+        client.messages.create.side_effect = rate_limit_err
+        client.messages.count_tokens = MagicMock(return_value=MagicMock(input_tokens=50))
+
+        provider = AnthropicProvider(client=client)
+
+        with patch("borgesica.adapters.providers.anthropic_provider.time.sleep", lambda s: None):
+            with pytest.raises(MalformedOutput) as exc_info:
+                provider.translate("system", "Hello", "claude-3-5-haiku-20241022")
+
+        assert exc_info.value.usage.input_tokens == 0
+        assert exc_info.value.usage.output_tokens == 0
+
+    def test_5xx_exhausted_raises_zero_usage_provider_error(self):
+        """3x 5xx exhausts retries → ProviderError.usage must be zero (no billed
+        response was ever obtained on any 5xx attempt)."""
+        import anthropic
+
+        call_count = [0]
+
+        def _create(**kwargs):
+            call_count[0] += 1
+            raise _make_api_error(anthropic.InternalServerError, 500)
+
+        client = MagicMock()
+        client.messages.create.side_effect = _create
+        client.messages.count_tokens = MagicMock(return_value=MagicMock(input_tokens=50))
+
+        provider = AnthropicProvider(client=client)
+
+        with patch("borgesica.adapters.providers.anthropic_provider.time.sleep", lambda s: None):
+            with pytest.raises(ProviderError) as exc_info:
+                provider.translate("system", "Hello", "claude-3-5-haiku-20241022")
+
+        assert exc_info.value.usage.input_tokens == 0
+        assert exc_info.value.usage.output_tokens == 0
 
 
 # ---------------------------------------------------------------------------

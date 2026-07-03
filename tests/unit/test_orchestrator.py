@@ -1807,4 +1807,107 @@ def test_prose_guard_does_not_catch_watermark_with_letters():
     assert provider.call_count == 1
     saved = {c.index: c for c in store.load_chunks(job.id)}
     assert saved[0].status == ChunkStatus.DONE
-    assert result.status == JobStatus.DONE
+
+
+# ===========================================================================
+# Billed-usage accrual on failed provider calls (budget guard regression).
+#
+# Root cause: a real book run billed $1.68 on Anthropic's console but
+# Borgésica recorded $0.196 — 13 failed chunks x up to 12 billed calls each
+# had their usage silently dropped because `except (MalformedOutput,
+# ProviderError): continue` / `pass` discarded the exception (and its usage)
+# without adding anything to total_call_cost. Both MalformedOutput and
+# ProviderError now carry a `usage` field; the orchestrator must add
+# `_usage_cost(exc.usage, in_price, out_price)` to total_call_cost in both the
+# PRIMARY-loop except and the FALLBACK except.
+# ===========================================================================
+
+
+def test_primary_loop_exception_usage_is_accrued_into_cost():
+    """PRIMARY loop: every attempt raises MalformedOutput carrying non-zero
+    billed usage. Even though every attempt "fails" (continue's past it), the
+    orchestrator must accrue each attempt's usage cost — previously this cost
+    was silently dropped (except: continue, no cost added).
+
+    FakeTranslationProvider.price() = (1.0, 5.0) — $1/Mtok in, $5/Mtok out.
+    """
+    from borgesica.domain.errors import MalformedOutput
+    from borgesica.domain.models import Usage
+
+    class AlwaysRaiseWithUsageProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str):
+            self.call_log.append((system, user, model))
+            raise MalformedOutput(
+                job_id="x", chunk_index=-1, usage=Usage(input_tokens=1000, output_tokens=500)
+            )
+
+    store = InMemoryCheckpointStore()
+    provider = AlwaysRaiseWithUsageProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=False)
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert result.status == JobStatus.PAUSED
+    # 3 primary attempts + 1 fallback attempt = 4 calls, each billed
+    # (1000 in, 500 out) tokens at ($1/Mtok, $5/Mtok):
+    # per-call cost = (1000/1e6)*1.0 + (500/1e6)*5.0 = 0.001 + 0.0025 = 0.0035
+    # 4 calls => 0.014
+    assert provider.call_count == 4
+    expected_cost = 4 * ((1000 / 1_000_000) * 1.0 + (500 / 1_000_000) * 5.0)
+    assert result.cost_usd == pytest.approx(expected_cost, rel=1e-6), (
+        f"Expected accrued cost {expected_cost:.6f} from billed-but-failed usage, "
+        f"got {result.cost_usd:.6f}. Regression: exceptions' usage was silently "
+        f"dropped (except: continue with no cost accrual)."
+    )
+    assert result.cost_usd > 0.0
+
+
+def test_fallback_exception_usage_is_accrued_into_cost():
+    """FALLBACK except path: the fallback call raises MalformedOutput carrying
+    non-zero billed usage after all PRIMARY attempts also raised with billed
+    usage. Total accrued cost must equal the sum of all 4 calls' usage costs
+    (3 primary + 1 fallback), not zero.
+    """
+    from borgesica.domain.errors import MalformedOutput
+    from borgesica.domain.models import Usage
+
+    class PrimaryFreeFallbackBilledProvider(FakeTranslationProvider):
+        """PRIMARY attempts raise MalformedOutput with zero usage (default);
+        the FALLBACK call (4th) raises MalformedOutput with non-zero usage —
+        isolates the FALLBACK except-block accrual path specifically."""
+
+        def translate(self, system: str, user: str, model: str):
+            call_index = len(self.call_log)
+            self.call_log.append((system, user, model))
+            if call_index < 3:
+                # PRIMARY attempts: billed but zero usage (default Usage()).
+                raise MalformedOutput(job_id="x", chunk_index=-1)
+            # FALLBACK call (4th, index 3): billed with real usage.
+            raise MalformedOutput(
+                job_id="x", chunk_index=-1, usage=Usage(input_tokens=2000, output_tokens=800)
+            )
+
+    store = InMemoryCheckpointStore()
+    provider = PrimaryFreeFallbackBilledProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=False)
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert result.status == JobStatus.PAUSED
+    assert provider.call_count == 4
+    # Only the fallback call (index 3) carries non-zero usage.
+    expected_cost = (2000 / 1_000_000) * 1.0 + (800 / 1_000_000) * 5.0
+    assert result.cost_usd == pytest.approx(expected_cost, rel=1e-6), (
+        f"Expected accrued cost {expected_cost:.6f} from the fallback call's billed "
+        f"usage, got {result.cost_usd:.6f}. Regression: the FALLBACK except-block "
+        f"dropped exc.usage entirely (except: pass with no cost accrual)."
+    )
+    assert result.cost_usd > 0.0

@@ -187,11 +187,17 @@ class OpenAICompatibleProvider:
         5xx errors share a global counter; ProviderError after MAX_5XX_RETRIES.
         All tiers exhausted → MalformedOutput.
 
-        Usage is extracted from response.usage.prompt_tokens / completion_tokens
-        (OpenAI-compatible wire format) on the successful response.
+        Usage accounting (cost-accuracy fix): every tier that receives an HTTP
+        200 is BILLED, even when its content then fails to parse/validate. This
+        method accumulates the real usage of every billed-but-failed tier across
+        the whole 3-tier chain. On eventual SUCCESS it returns the SUM of all
+        wasted tiers PLUS the successful one. On eventual FAILURE it raises
+        MalformedOutput carrying the accumulated wasted usage. Transport failures
+        (429 / 5xx) are NOT billed and contribute nothing.
         """
         server_err_count = 0
         last_error: Exception | None = None
+        wasted = Usage()  # accumulated usage of billed-but-failed tiers
 
         # ---- TIER-1: tool/function calling (with inline 429 retry) ----
         t1 = self._call_with_retry(
@@ -203,8 +209,12 @@ class OpenAICompatibleProvider:
             last_error = t1.last_error
         elif t1 is not None:
             unit, raw_response = t1
-            return TranslationResult(unit=unit, usage=self._extract_usage(raw_response))
-        # t1 is None → Tier-1 returned no tool_call → fall through to Tier-2
+            if unit is not None:
+                return TranslationResult(
+                    unit=unit, usage=_sum_usage(wasted, self._extract_usage(raw_response))
+                )
+            # Billed but no valid tool_call → accrue usage, fall through to Tier-2.
+            wasted = _sum_usage(wasted, self._extract_usage(raw_response))
 
         # ---- TIER-2: JSON mode ----
         t2 = self._call_with_retry(
@@ -217,8 +227,11 @@ class OpenAICompatibleProvider:
         elif t2 is not None:
             tier2_unit, empty_content, t2_response = t2  # type: ignore[misc]
             if tier2_unit is not None:
-                return TranslationResult(unit=tier2_unit, usage=self._extract_usage(t2_response))
-            # None + empty_content → DeepSeek quirk → fall through to Tier-3
+                return TranslationResult(
+                    unit=tier2_unit, usage=_sum_usage(wasted, self._extract_usage(t2_response))
+                )
+            # Billed but empty/invalid content → accrue usage, fall through to Tier-3.
+            wasted = _sum_usage(wasted, self._extract_usage(t2_response))
 
         # ---- TIER-3: prompt-and-parse fallback (up to MAX_TIER3_RETRIES calls) ----
         for attempt in range(MAX_TIER3_RETRIES):
@@ -232,11 +245,17 @@ class OpenAICompatibleProvider:
                 last_error = t3.last_error
             elif t3 is not None:
                 t3_unit, t3_response = t3  # type: ignore[misc]
-                return TranslationResult(unit=t3_unit, usage=self._extract_usage(t3_response))
+                if t3_unit is not None:
+                    return TranslationResult(
+                        unit=t3_unit, usage=_sum_usage(wasted, self._extract_usage(t3_response))
+                    )
+                # Billed but invalid → accrue usage and retry the next Tier-3 attempt.
+                wasted = _sum_usage(wasted, self._extract_usage(t3_response))
+                last_error = ValueError("Tier-3: no valid JSON in response")
             else:
                 last_error = ValueError("Tier-3: no valid JSON in response")
 
-        raise MalformedOutput(job_id="unknown", chunk_index=-1) from last_error
+        raise MalformedOutput(job_id="unknown", chunk_index=-1, usage=wasted) from last_error
 
     # ------------------------------------------------------------------
     # Internal call wrapper (429 + 5xx handling)
@@ -319,12 +338,14 @@ class OpenAICompatibleProvider:
 
     def _tier1_tool_call(
         self, system: str, user: str, model: str
-    ) -> tuple[TranslationUnit, Any] | None:
+    ) -> tuple[TranslationUnit | None, Any]:
         """TIER-1: function/tool-calling.
 
-        Returns (TranslationUnit, raw_response) if the response contains a valid
-        tool_call, None otherwise (caller falls through to Tier-2).
-        The raw response is returned so the caller can extract real Usage.
+        Always returns (unit_or_None, raw_response): the unit when the response
+        contains a valid tool_call, None otherwise (caller falls through to
+        Tier-2). The raw response is ALWAYS returned so the caller can extract
+        real Usage — this response was billed even when the tool_call is
+        missing/invalid.
         """
         response = self._client.chat.completions.create(
             model=model,
@@ -352,8 +373,8 @@ class OpenAICompatibleProvider:
                         unit = TranslationUnit.model_validate(data)
                         return unit, response
                     except (json.JSONDecodeError, ValidationError):
-                        return None
-        return None
+                        return None, response
+        return None, response
 
     def _tier2_json_mode(
         self, system: str, user: str, model: str
@@ -390,12 +411,14 @@ class OpenAICompatibleProvider:
 
     def _tier3_prompt_parse(
         self, system: str, user: str, model: str, attempt: int
-    ) -> tuple[TranslationUnit, Any] | None:
+    ) -> tuple[TranslationUnit | None, Any]:
         """TIER-3: prompt-and-parse fallback.
 
         Instructs the model to output JSON in the user prompt and parses the
         text response.  Called up to MAX_TIER3_RETRIES times.
-        Returns (TranslationUnit, raw_response) on success, None on parse failure.
+        Always returns (unit_or_None, raw_response): the unit on success, None on
+        parse failure. The raw response is ALWAYS returned so the caller can
+        accrue real Usage — this response was billed even when parsing failed.
         """
         json_instruction = (
             "\n\nYou MUST respond ONLY with a valid JSON object matching this schema:\n"
@@ -425,7 +448,7 @@ class OpenAICompatibleProvider:
             unit = TranslationUnit.model_validate(data)
             return unit, response
         except (json.JSONDecodeError, ValidationError):
-            return None
+            return None, response
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +469,14 @@ class _Propagate:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _sum_usage(a: Usage, b: Usage) -> Usage:
+    """Return a new Usage that is the element-wise sum of two Usage values."""
+    return Usage(
+        input_tokens=a.input_tokens + b.input_tokens,
+        output_tokens=a.output_tokens + b.output_tokens,
+    )
 
 
 def _get_status(exc: Any) -> int | None:
