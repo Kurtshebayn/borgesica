@@ -321,7 +321,7 @@ Deliverable: `pytest tests/integration/test_epub_writer.py -k ncx` → all pass 
 
 ## WU-7 — Writer v2: defensive fallback paths (D4 empty-lookup / unmatched / no-nav-doc)
 
-### WU7-1 [T] — Unmatched navPoint, empty lookup, ncx-only book — no crash, no regression
+### WU7-1 [T] — Unmatched navPoint, empty lookup, ncx-only book — no crash, no regression [x]
 
 **Depends on**: WU6-2
 **Spec**: book-translation/"EPUB writer copies translated nav labels into toc.ncx..." — scenarios
@@ -351,6 +351,12 @@ that those defensive paths actually hold — if any assertion fails, fix the min
 Deliverable: `pytest tests/integration/test_epub_writer.py` → all pass (full writer test file green).
 
 **Commit**: `test(writer): confirm ncx-copy defensive paths — unmatched navPoint, empty lookup, ncx-only-book no-op`
+
+**Note (apply-time deviation)**: these 3 defensive tests were written in the same TDD pass as
+WU6-1/WU6-2 (all confirmed passing GREEN at the WU6-2 commit boundary — the defensive branches
+were built correctly on the first pass, per the design's explicit prediction). No separate diff
+exists for a standalone WU7-1 commit; the tests are already part of commit `0fc5841`. Marked `[x]`
+here to reflect completion, not a new commit.
 
 ---
 
