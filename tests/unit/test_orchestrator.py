@@ -1875,9 +1875,7 @@ def test_prose_guard_empty_after_strip_skips_provider_zero_cost():
     """A chunk that strips to an empty string (a bare inline-tag pair with no
     text content — the markup-only shape of a non-prose node such as an EPUB
     cover placeholder) is passed through as DONE with zero provider calls and
-    zero cost. `markup.strip` recognizes <i>/<b>/<u>/<em>/<strong>/<span>/<a>;
-    it does not strip void HTML elements like <img> (those never reach the
-    orchestrator as chunks — EpubReader filters them out at read time)."""
+    zero cost."""
     store = InMemoryCheckpointStore()
     provider = FakeTranslationProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -1924,6 +1922,85 @@ def test_prose_guard_does_not_catch_watermark_with_letters():
     config = make_config()
     job = make_job(config, total=1)
     chunks = [Chunk(index=0, source_text='<a href="x">OceanofPDF.com</a>')]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 1
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+
+
+# ===========================================================================
+# Guard miss on nested <img> (backlog obs #318, WARNING-2 of continue-on-error
+# verify): EpubReader skips <img> only as a standalone structural node; nested
+# in <p>/<figcaption> it serializes INTO source_text. markup.strip() only
+# knows i/b/u/em/strong/span/a, so '<img src="images/cover.jpg"/>' keeps its
+# alphabetic attribute characters and the guard never fires — a real cover
+# burned provider calls (up to 4: 3 primary + fallback) translating a tag.
+#
+# Contract: the guard's alphabetic check must ignore ALL markup (known inline
+# tags, void tags, unknown tags). A tags-only chunk passes through verbatim
+# (bit-perfect <img> preservation, 0 calls, $0). A chunk with an <img> AND
+# real prose must still be translated.
+# ===========================================================================
+
+
+def test_prose_guard_skips_img_only_chunk_zero_calls():
+    """A chunk whose source is ONLY a nested-<img> serialization (real cover
+    shape) passes through verbatim with ZERO provider calls and zero cost."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [
+        Chunk(index=0, source_text='<img src="images/cover.jpg" alt="Cover art"/>')
+    ]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 0
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == chunks[0].source_text
+    assert result.cost_usd == 0.0
+
+
+def test_prose_guard_skips_figure_wrapped_img_zero_calls():
+    """Unknown wrapper tags (<figure>/<figcaption> shells) around an <img>
+    with no text content must also pass through with zero calls."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [
+        Chunk(index=0, source_text='<figure><img src="cover.png"/></figure>')
+    ]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 0
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == chunks[0].source_text
+    assert result.cost_usd == 0.0
+
+
+def test_prose_guard_does_not_catch_img_with_prose():
+    """An <img> accompanied by real prose must NOT be skipped — the provider
+    IS called (zero-false-positives contract of the guard)."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [
+        Chunk(index=0, source_text='<img src="map.png"/> The journey begins here.')
+    ]
 
     result = run_job(orch, job, chunks, store=store)
 

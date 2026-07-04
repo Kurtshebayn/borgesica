@@ -6,7 +6,13 @@ from __future__ import annotations
 
 import pytest
 
-from borgesica.domain.markup import reinsert, strip, validate_segments, validate_tags
+from borgesica.domain.markup import (
+    reinsert,
+    strip,
+    strip_all_tags,
+    validate_segments,
+    validate_tags,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -281,3 +287,37 @@ def test_validate_segments_detects_split() -> None:
 def test_validate_segments_single_segment() -> None:
     """Single-paragraph chunks trivially pass."""
     assert validate_segments("Uno.", "One.") is True
+
+
+# ---------------------------------------------------------------------------
+# strip_all_tags()
+#
+# GUARD-ONLY helper: removes ALL markup tags (known inline, void, unknown)
+# so the prose guard can decide whether any translatable prose remains.
+# Unlike strip(), it is destructive (no positions) — never used for the
+# strip/reinsert round-trip.
+# ---------------------------------------------------------------------------
+
+
+def test_strip_all_tags_removes_self_closing_img() -> None:
+    """The nested-cover shape: an <img> with letter-bearing attributes."""
+    assert strip_all_tags('<img src="images/cover.jpg" alt="Cover art"/>').strip() == ""
+
+
+def test_strip_all_tags_removes_unknown_wrapper_tags() -> None:
+    """Tags outside strip()'s known set (figure/figcaption) are removed too."""
+    assert strip_all_tags("<figure><figcaption></figcaption></figure>").strip() == ""
+
+
+def test_strip_all_tags_keeps_text_content() -> None:
+    """Only markup goes away — prose between tags survives."""
+    assert strip_all_tags('<img src="map.png"/> The journey begins.').strip() == "The journey begins."
+
+
+def test_strip_all_tags_no_tags_returns_unchanged() -> None:
+    assert strip_all_tags("Plain prose, no markup.") == "Plain prose, no markup."
+
+
+def test_strip_all_tags_does_not_eat_escaped_angle_brackets() -> None:
+    """Real prose with a literal < arrives entity-escaped from the reader."""
+    assert strip_all_tags("a &lt;b&gt; c") == "a &lt;b&gt; c"

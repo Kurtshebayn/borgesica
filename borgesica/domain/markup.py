@@ -35,6 +35,13 @@ _TAG_PATTERN = re.compile(
     r")>"
 )
 
+# Any markup tag whatsoever: opening, closing, self-closing, known or unknown
+# (<img .../>, <figure>, </figcaption>, ...). Requires a letter after "<" (or
+# "</") so entity-escaped brackets and stray "<" in prose never match.
+# Used ONLY by strip_all_tags (prose-guard decisions) — the round-trip
+# machinery stays on the conservative _TAG_PATTERN above.
+_ANY_TAG_PATTERN = re.compile(r"</?[A-Za-z][^>]*>")
+
 
 def strip(text: str) -> tuple[str, list[tuple[str, int]]]:
     """Strip inline tags from *text* and return (plain_text, tags).
@@ -156,6 +163,21 @@ def validate_tags(original: str, translated: str) -> bool:
     orig_tags = _TAG_PATTERN.findall(original)
     tran_tags = _TAG_PATTERN.findall(translated)
     return len(orig_tags) == len(tran_tags)
+
+
+def strip_all_tags(text: str) -> str:
+    """Remove ALL markup tags — known inline tags, void tags (``<img/>``),
+    and unknown wrappers (``<figure>``) alike.
+
+    GUARD-ONLY helper: the orchestrator's prose guard uses it to decide
+    whether a chunk contains any translatable prose at all (an ``<img>``
+    nested in a ``<p>`` serializes into source_text, and its src/alt
+    attribute characters must not count as prose). Unlike :func:`strip`,
+    this is destructive — it records no positions — so it must NEVER be
+    used for the strip/reinsert round-trip. Entity-escaped brackets in real
+    prose (``&lt;``) are untouched.
+    """
+    return _ANY_TAG_PATTERN.sub("", text)
 
 
 def validate_segments(original: str, translated: str) -> bool:
