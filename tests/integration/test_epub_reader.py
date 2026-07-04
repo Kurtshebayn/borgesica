@@ -122,6 +122,26 @@ def _write_temp_epub(content: bytes) -> str:
         return f.name
 
 
+def _replace_zip_entry(epub_bytes: bytes, entry_name: str, new_content: bytes) -> bytes:
+    """Return a copy of ``epub_bytes`` with ``entry_name``'s content replaced.
+
+    Used to inject a hand-built nav doc (with landmarks/page-list/heading/
+    unlinked-span shapes ebooklib's public API cannot easily produce) into an
+    otherwise-normal ebooklib-generated EPUB — mirrors the existing raw-ZIP
+    injection pattern used for the DRM and ISO-8859-1 fixtures in this file.
+    """
+    buf_in = io.BytesIO(epub_bytes)
+    buf_out = io.BytesIO()
+    with (
+        zipfile.ZipFile(buf_in, "r") as zin,
+        zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
+        for item in zin.infolist():
+            data = new_content if item.filename == entry_name else zin.read(item.filename)
+            zout.writestr(item, data)
+    return buf_out.getvalue()
+
+
 def _simple_chapter(text: str, file_name: str = "ch.xhtml") -> tuple[str, bytes]:
     """Return a (file_name, xhtml_bytes) tuple for a chapter with one paragraph."""
     content = (
@@ -647,13 +667,15 @@ def test_nav_doc_without_nav_substring_is_recognized_and_excluded() -> None:
     whose ``epub_item_href`` is the nav doc itself.
 
     RED (before fix): a chunk exists with ``epub_item_href == "contents.xhtml"``
-    (the general body-chapter path ran for the nav doc) and/or the real
-    chapter's ``chapter_index`` is shifted to 1 instead of 0 because the nav
-    doc consumed slot 0.
+    that is NOT a nav-label chunk (the general body-chapter path ran for the
+    nav doc) and/or the real chapter's ``chapter_index`` is shifted to 1
+    instead of 0 because the nav doc consumed slot 0.
     GREEN (after fix): isinstance(item, epub.EpubNav) alone identifies and
     excludes the item from the general body-chapter traversal, regardless of
-    filename — the real chapter keeps ``chapter_index == 0`` and no chunk
-    carries ``epub_item_href == "contents.xhtml"``.
+    filename — the real chapter keeps ``chapter_index == 0``, and any chunk
+    carrying ``epub_item_href == "contents.xhtml"`` is exclusively a
+    nav-label chunk (``meta["kind"] == "nav-label"``) produced by the
+    dedicated nav walk, never the general body-chapter path.
     """
     chapters = [_simple_chapter("Chapter one text.", "ch1.xhtml")]
     epub_bytes = _make_epub(
@@ -666,15 +688,16 @@ def test_nav_doc_without_nav_substring_is_recognized_and_excluded() -> None:
         reader = EpubReader()
         chunks = reader.read(path, _config())
 
-        # No chunk from the general body-chapter traversal may originate from
-        # the nav item's href (contents.xhtml) — at this stage (WU2-1 only
-        # fixes the gate; the dedicated nav walk lands in WU2-2), the branch
-        # still `continue`s, so contents.xhtml must produce ZERO chunks.
+        # Any chunk carrying the nav item's href must come EXCLUSIVELY from
+        # the dedicated nav walk (kind == "nav-label"), never from the
+        # general body-chapter traversal.
         nav_href_chunks = [
             c for c in chunks if c.meta.get("epub_item_href") == "contents.xhtml"
         ]
-        assert not nav_href_chunks, (
-            f"Expected no chunks from contents.xhtml (nav doc), got: {nav_href_chunks}"
+        non_nav_label = [c for c in nav_href_chunks if c.meta.get("kind") != "nav-label"]
+        assert not non_nav_label, (
+            f"Expected no body-traversal chunks from contents.xhtml (nav doc), "
+            f"got: {non_nav_label}"
         )
 
         # The real chapter must be the FIRST body chapter (chapter_index=0) —
@@ -692,7 +715,8 @@ def test_nav_doc_without_nav_substring_is_recognized_and_excluded() -> None:
 def test_nav_doc_named_nav_xhtml_still_skipped_regression() -> None:
     """Regression: a nav doc named ``nav.xhtml`` (contains "nav") must still
     be correctly skipped from the general body-chunk traversal after the
-    gate simplification to isinstance-only.
+    gate simplification to isinstance-only — any chunk carrying its href
+    must come exclusively from the dedicated nav walk (kind == "nav-label").
     """
     chapters = [_simple_chapter("Chapter one text.", "ch1.xhtml")]
     epub_bytes = _make_epub(
@@ -707,8 +731,263 @@ def test_nav_doc_named_nav_xhtml_still_skipped_regression() -> None:
         nav_href_chunks = [
             c for c in chunks if c.meta.get("epub_item_href") == "nav.xhtml"
         ]
-        assert not nav_href_chunks, (
-            f"Expected no chunks from nav.xhtml (nav doc), got: {nav_href_chunks}"
+        non_nav_label = [c for c in nav_href_chunks if c.meta.get("kind") != "nav-label"]
+        assert not non_nav_label, (
+            f"Expected no body-traversal chunks from nav.xhtml (nav doc), "
+            f"got: {non_nav_label}"
         )
+    finally:
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Tests WU2-2: nav walk emits <a>/<span>/heading chunks with provenance (D1)
+# ---------------------------------------------------------------------------
+
+
+def test_nav_a_labels_emitted_as_chunks_with_node_path_and_nav_href() -> None:
+    """nav <a> labels are emitted as Chunks: source_text=label, node_path at
+    the <a>, nav_href=the <a>'s href.
+    """
+    chapters = [
+        _simple_chapter("Chapter one text.", "ch1.xhtml"),
+        _simple_chapter("Chapter two text.", "ch2.xhtml"),
+    ]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[
+            ("ch1.xhtml", "Chapter One", "ch1"),
+            ("ch2.xhtml", "Chapter Two", "ch2"),
+        ],
+    )
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        nav_chunks = [c for c in chunks if c.meta.get("nav_href")]
+        labels = {c.source_text: c.meta["nav_href"] for c in nav_chunks}
+        assert labels.get("Chapter One") == "ch1.xhtml"
+        assert labels.get("Chapter Two") == "ch2.xhtml"
+
+        for c in nav_chunks:
+            assert c.meta["node_path"], f"Expected non-empty node_path, got {c.meta}"
+            assert c.meta["node_path"].endswith("/a[0]") or "/a[" in c.meta["node_path"], (
+                f"Expected node_path to point at an <a>, got {c.meta['node_path']!r}"
+            )
+    finally:
+        os.unlink(path)
+
+
+def test_nav_heading_is_emitted_with_nav_href_none() -> None:
+    """The nav's own <h1>/<h2> section heading is emitted as a Chunk with
+    nav_href=None.
+    """
+    chapters = [_simple_chapter("Chapter one text.", "ch1.xhtml")]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[("ch1.xhtml", "Chapter One", "ch1")],
+    )
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        heading_chunks = [
+            c for c in chunks
+            if c.source_text == "Test Book" and c.meta.get("nav_href") is None
+        ]
+        assert heading_chunks, (
+            f"Expected a heading chunk with nav_href=None; got chunks: "
+            f"{[(c.source_text, c.meta) for c in chunks]}"
+        )
+        assert "node_path" in heading_chunks[0].meta
+    finally:
+        os.unlink(path)
+
+
+_LANDMARKS_PAGELIST_NAV_XHTML = (
+    b"<?xml version='1.0' encoding='utf-8'?>"
+    b'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+    b"<head><title>Nav</title></head>"
+    b"<body>"
+    b'<nav epub:type="landmarks">'
+    b"<h2>Guide</h2>"
+    b"<ol><li><a href=\"ch1.xhtml\">Cover</a></li></ol>"
+    b"</nav>"
+    b'<nav epub:type="toc" id="id" role="doc-toc">'
+    b"<h2>Contents</h2>"
+    b'<ol><li><a href="ch1.xhtml">Chapter One</a></li></ol>'
+    b"</nav>"
+    b'<nav epub:type="page-list" hidden="hidden">'
+    b"<h2>Pages</h2>"
+    b'<ol><li><a href="ch1.xhtml#page1">1</a></li></ol>'
+    b"</nav>"
+    b"</body>"
+    b"</html>"
+)
+
+
+def test_landmarks_are_emitted_page_list_is_excluded() -> None:
+    """landmarks <a> labels are emitted; NO chunk is emitted for page-list <a>s."""
+    chapters = [_simple_chapter("Chapter one text.", "ch1.xhtml")]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[("ch1.xhtml", "Chapter One", "ch1")],
+    )
+    epub_bytes = _replace_zip_entry(epub_bytes, "EPUB/nav.xhtml", _LANDMARKS_PAGELIST_NAV_XHTML)
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        nav_chunks = [c for c in chunks if c.meta.get("epub_item_href") == "nav.xhtml"]
+        labels = [c.source_text for c in nav_chunks]
+
+        assert "Cover" in labels, f"Expected landmarks label 'Cover', got: {labels}"
+        assert "Chapter One" in labels, f"Expected toc label 'Chapter One', got: {labels}"
+        assert "1" not in labels, f"page-list label '1' must be excluded, got: {labels}"
+
+        # No chunk may carry the page-list <a>'s href (fragment-bearing page ref)
+        page_list_hrefs = [c.meta.get("nav_href") for c in nav_chunks]
+        assert "ch1.xhtml#page1" not in page_list_hrefs, (
+            f"page-list href must not appear in any nav chunk's nav_href, got: {page_list_hrefs}"
+        )
+    finally:
+        os.unlink(path)
+
+
+def test_nav_label_chunks_isolated_into_own_chapter_index_bucket() -> None:
+    """All nav-label chunks share chapter_index == max(body chapter_index)+1."""
+    chapters = [
+        _simple_chapter("Chapter one text.", "ch1.xhtml"),
+        _simple_chapter("Chapter two text.", "ch2.xhtml"),
+        _simple_chapter("Chapter three text.", "ch3.xhtml"),
+    ]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[
+            ("ch1.xhtml", "Chapter One", "ch1"),
+            ("ch2.xhtml", "Chapter Two", "ch2"),
+            ("ch3.xhtml", "Chapter Three", "ch3"),
+        ],
+    )
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        body_indices = {
+            c.meta["chapter_index"]
+            for c in chunks
+            if c.meta.get("epub_item_href") != "nav.xhtml"
+        }
+        assert body_indices == {0, 1, 2}, f"Expected body chapter_index {{0,1,2}}, got {body_indices}"
+
+        nav_chunks = [c for c in chunks if c.meta.get("epub_item_href") == "nav.xhtml"]
+        assert nav_chunks, "Expected at least one nav-label chunk"
+        nav_indices = {c.meta["chapter_index"] for c in nav_chunks}
+        assert nav_indices == {3}, f"Expected all nav chunks to share chapter_index=3, got {nav_indices}"
+    finally:
+        os.unlink(path)
+
+
+def test_book_without_nav_document_is_unaffected() -> None:
+    """A book with no EpubNav item: no nav-label chunks, body extraction unaffected."""
+    # Build EPUB2-style manually (no EpubNav item) reusing the latin1 helper's
+    # manual-ZIP pattern would be excessive; instead assert via a book built
+    # with _make_epub but whose nav item is removed post-hoc is impractical
+    # with ebooklib's spine wiring — use the ncx-only manual fixture instead.
+    epub_bytes = _make_epub_ncx_only_no_nav()
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        assert chunks, "Expected body chunks despite no nav document"
+        nav_chunks = [c for c in chunks if c.meta.get("nav_href") is not None or c.meta.get("kind") == "nav-label"]
+        assert not nav_chunks, f"Expected no nav-label chunks, got: {nav_chunks}"
+    finally:
+        os.unlink(path)
+
+
+def _make_epub_ncx_only_no_nav() -> bytes:
+    """Build a minimal EPUB2-style book with toc.ncx but NO EpubNav item."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip")
+        zf.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?>'
+            '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+            "<rootfiles>"
+            '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+            "</rootfiles>"
+            "</container>",
+        )
+        zf.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<package xmlns="http://www.idpf.org/2007/opf" version="2.0"'
+            ' unique-identifier="uid">'
+            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            "<dc:identifier id=\"uid\">ncx-only-test</dc:identifier>"
+            "<dc:title>NCX Only Test</dc:title>"
+            "<dc:language>en</dc:language>"
+            "</metadata>"
+            "<manifest>"
+            '<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+            "</manifest>"
+            '<spine toc="ncx">'
+            '<itemref idref="ch1"/>'
+            "</spine>"
+            "</package>",
+        )
+        zf.writestr(
+            "OEBPS/toc.ncx",
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"'
+            ' "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">'
+            '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
+            "<head><meta name=\"dtb:uid\" content=\"ncx-only-test\"/></head>"
+            "<docTitle><text>NCX Only Test</text></docTitle>"
+            "<navMap>"
+            '<navPoint id="np1" playOrder="1">'
+            "<navLabel><text>Chapter 1</text></navLabel>"
+            '<content src="ch1.xhtml"/>'
+            "</navPoint>"
+            "</navMap>"
+            "</ncx>",
+        )
+        zf.writestr(
+            "OEBPS/ch1.xhtml",
+            "<?xml version='1.0' encoding='utf-8'?>"
+            "<html xmlns='http://www.w3.org/1999/xhtml'>"
+            "<head><title>Ch1</title></head>"
+            "<body><p>Chapter one paragraph.</p></body>"
+            "</html>",
+        )
+    return buf.getvalue()
+
+
+def test_nav_label_chunk_kind_marker_set() -> None:
+    """Every emitted nav-label chunk's meta['kind'] == 'nav-label'."""
+    chapters = [_simple_chapter("Chapter one text.", "ch1.xhtml")]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[("ch1.xhtml", "Chapter One", "ch1")],
+    )
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        nav_chunks = [c for c in chunks if c.meta.get("epub_item_href") == "nav.xhtml"]
+        assert nav_chunks, "Expected at least one nav-label chunk"
+        for c in nav_chunks:
+            assert c.meta.get("kind") == "nav-label", (
+                f"Expected meta['kind']=='nav-label', got: {c.meta}"
+            )
     finally:
         os.unlink(path)
