@@ -100,8 +100,17 @@ def _make_epub_bytes(
     include_png: bool = False,
     include_jpeg: bool = False,
     include_css: bool = False,
+    toc_links: list[tuple[str, str, str]] | None = None,
 ) -> bytes:
-    """Build a minimal valid EPUB in memory using ebooklib."""
+    """Build a minimal valid EPUB in memory using ebooklib.
+
+    Args:
+        toc_links: optional list of (href, title, uid) tuples. When provided,
+            populates ``book.toc`` so ebooklib emits real ``<a href>`` entries
+            in the generated nav doc and matching ``navPoint`` entries in the
+            ncx. Additive only — omitting this parameter keeps the default
+            (empty ``book.toc``) behavior of every existing test.
+    """
     book = epub.EpubBook()
     book.set_identifier("test-writer-001")
     book.set_title("Writer Test Book")
@@ -114,6 +123,9 @@ def _make_epub_bytes(
         item.content = content
         book.add_item(item)
         epub_items.append(item)
+
+    if toc_links:
+        book.toc = [epub.Link(href, title, uid) for href, title, uid in toc_links]
 
     if include_png:
         img = epub.EpubImage()

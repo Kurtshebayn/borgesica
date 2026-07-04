@@ -28,6 +28,7 @@ def _make_epub(
     *,
     include_encryption_xml: bool = False,
     extra_image: bool = False,
+    toc_links: list[tuple[str, str, str]] | None = None,
 ) -> bytes:
     """Build a minimal valid EPUB in memory using ebooklib.
 
@@ -35,6 +36,11 @@ def _make_epub(
         chapters: list of (file_name, xhtml_bytes) tuples in spine order.
         include_encryption_xml: if True, inject META-INF/encryption.xml to simulate DRM.
         extra_image: if True, add a PNG image item to the EPUB.
+        toc_links: optional list of (href, title, uid) tuples. When provided,
+            populates ``book.toc`` so ebooklib emits real ``<a href>`` entries
+            in the generated nav doc's ``<ol>`` and matching ``navPoint``
+            entries in the ncx. Additive only — omitting this parameter keeps
+            the default (empty ``book.toc``) behavior of every existing test.
 
     Returns:
         Raw bytes of the .epub file.
@@ -51,6 +57,9 @@ def _make_epub(
         item.content = content
         book.add_item(item)
         epub_items.append(item)
+
+    if toc_links:
+        book.toc = [epub.Link(href, title, uid) for href, title, uid in toc_links]
 
     if extra_image:
         img_item = epub.EpubImage()
