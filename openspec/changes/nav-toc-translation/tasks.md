@@ -246,7 +246,7 @@ Deliverable: `pytest tests/integration/test_epub_writer.py -k nav` → all 3 pas
 Corresponds to design U6. This is the dense unit — new lookup construction plumbed through
 `_do_write`, plus the new `.ncx` branch in `_patch_entry`.
 
-### WU6-1 [T] — `nav_label_lookup` construction + `_normalize_ncx_href` helper
+### WU6-1 [T] — `nav_label_lookup` construction + `_normalize_ncx_href` helper [x]
 
 **Depends on**: WU5-1 (writer v1 nav patch confirmed correct — v2 builds its lookup from the same
 per-node loop), WU1-1 (needs `book.toc`-populated ncx fixture)
@@ -285,7 +285,7 @@ Deliverable: `pytest tests/integration/test_epub_writer.py -k ncx` → 2 pass.
 
 ---
 
-### WU6-2 [T] — `.ncx` patch branch in `_patch_entry`
+### WU6-2 [T] — `.ncx` patch branch in `_patch_entry` [x]
 
 **Depends on**: WU6-1
 **Spec**: book-translation/"EPUB writer copies translated nav labels into toc.ncx by href match,

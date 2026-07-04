@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 import zipfile
 from collections import defaultdict
 
@@ -273,6 +274,116 @@ def _patch_xhtml_document(
 
 
 # ---------------------------------------------------------------------------
+# ncx-copy: href normalization + navMap patcher (D4 / WU6-1, WU6-2)
+# ---------------------------------------------------------------------------
+
+_NCX_NS = "http://www.daisy.org/z3986/2005/ncx/"
+
+
+def _normalize_ncx_href(href: str) -> str:
+    """Normalize an href/content-src for cross-document (nav vs ncx) matching.
+
+    The ncx ``content src`` and the nav ``<a href>`` may have DIFFERENT bases
+    (nav href is relativized to the nav doc's own directory; ncx src is the
+    item's ``file_name`` from the content root). Rules, applied to BOTH sides
+    before matching:
+      - strip any fragment identifier (``ch1.xhtml#sec2`` -> ``ch1.xhtml``);
+      - normalize path separators and collapse ``.``/``..`` via
+        ``posixpath.normpath`` (EPUB paths are always ``/``-separated);
+      - the caller keys on the resulting BASENAME as the primary match.
+
+    Returns the normalized basename (this IS the lookup key — see
+    ``EpubWriter._do_write``'s Step 1b and ``_patch_ncx_document``).
+    """
+    if not href:
+        return ""
+    without_fragment = href.split("#", 1)[0]
+    normalized = posixpath.normpath(without_fragment)
+    return posixpath.basename(normalized)
+
+
+def _patch_ncx_document(
+    raw_bytes: bytes,
+    nav_label_lookup: dict[str, str],
+) -> bytes:
+    """Patch ``toc.ncx``'s ``navMap`` by href match against *nav_label_lookup*.
+
+    Walks ``navMap`` recursively (nested ``navPoint``s). For each
+    ``navPoint``: reads its child ``<content src="...">``, normalizes it via
+    ``_normalize_ncx_href``, and looks it up in *nav_label_lookup*. On a hit,
+    the sibling ``<navLabel><text>``'s text content is replaced with the
+    translated label — ``src`` and all other attributes untouched. On a
+    miss, that navPoint is left with its original (untranslated) label —
+    no error, no crash.
+
+    Empty *nav_label_lookup* is a no-op: returns *raw_bytes* unchanged
+    (guarantees zero regression for books without a nav doc, D4).
+
+    Returns the original bytes unchanged if the document cannot be parsed
+    or re-serialized (defensive, mirrors ``_patch_xhtml_document``).
+    """
+    if not nav_label_lookup:
+        return raw_bytes
+
+    try:
+        parser = etree.XMLParser(recover=True)
+        tree = etree.fromstring(raw_bytes, parser=parser)
+    except Exception:  # noqa: BLE001
+        logger.warning("EpubWriter: failed to parse ncx document — leaving untouched")
+        return raw_bytes
+
+    if tree is None:
+        return raw_bytes
+
+    nav_map = tree.find(f"{{{_NCX_NS}}}navMap")
+    if nav_map is None:
+        nav_map = tree.find(".//navMap")
+    if nav_map is None:
+        return raw_bytes
+
+    def _local(el: etree._Element) -> str:  # type: ignore[type-arg]
+        return _local_tag(el)
+
+    def _walk(nav_point: etree._Element) -> None:  # type: ignore[type-arg]
+        content_el = None
+        nav_label_el = None
+        for child in nav_point:
+            local = _local(child)
+            if local == "content" and content_el is None:
+                content_el = child
+            elif local == "navLabel" and nav_label_el is None:
+                nav_label_el = child
+
+        if content_el is not None and nav_label_el is not None:
+            src = content_el.get("src", "")
+            key = _normalize_ncx_href(src)
+            translated = nav_label_lookup.get(key)
+            if translated is not None:
+                text_el = None
+                for sub in nav_label_el:
+                    if _local(sub) == "text":
+                        text_el = sub
+                        break
+                if text_el is not None:
+                    text_el.text = translated
+
+        # Recurse into nested navPoints.
+        for child in nav_point:
+            if _local(child) == "navPoint":
+                _walk(child)
+
+    for nav_point in nav_map:
+        if _local(nav_point) == "navPoint":
+            _walk(nav_point)
+
+    try:
+        return etree.tostring(tree, encoding="utf-8", xml_declaration=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("EpubWriter: failed to serialize patched ncx — returning original")
+        return raw_bytes
+
+
+# ---------------------------------------------------------------------------
 # Public EpubWriter
 # ---------------------------------------------------------------------------
 
@@ -326,6 +437,15 @@ class EpubWriter:
         # in the chunk (which mirrors the original document order).
         patches: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
 
+        # Step 1b (D4): build the nav_href -> translated_label lookup used by
+        # the ncx-copy step, from the SAME per-node loop that builds
+        # flat_patches — BEFORE the ZIP-copy loop below. This is the
+        # "lookup-before-loop" ordering invariant: ncx patching does not
+        # depend on nav.xhtml appearing before toc.ncx in ZIP iteration
+        # order, because the lookup is already fully built by the time the
+        # loop starts.
+        nav_label_lookup: dict[str, str] = {}
+
         for chunk in chunks:
             prose_nodes = chunk.meta.get("prose_nodes")
             if not prose_nodes:
@@ -370,6 +490,10 @@ class EpubWriter:
                 seg = segments[i] if i < len(segments) else ""
                 patches[href][np].append(seg)
 
+                nav_href = node_info.get("nav_href")
+                if nav_href:
+                    nav_label_lookup[_normalize_ncx_href(nav_href)] = seg
+
         # Flatten: join multi-segment (hard-split) fragments back into one string
         flat_patches: dict[str, dict[str, str]] = {}
         for href, node_patches in patches.items():
@@ -390,7 +514,9 @@ class EpubWriter:
                     # Check if this file has patches
                     # epub_item_href values are relative paths without leading slash
                     # The ZIP entry name may include "OEBPS/" or "EPUB/" prefix
-                    patched_data = self._patch_entry(info.filename, original_data, flat_patches)
+                    patched_data = self._patch_entry(
+                        info.filename, original_data, flat_patches, nav_label_lookup
+                    )
                     out_zip.writestr(info, patched_data)
 
     def _patch_entry(
@@ -398,8 +524,18 @@ class EpubWriter:
         zip_entry_name: str,
         original_data: bytes,
         flat_patches: dict[str, dict[str, str]],
+        nav_label_lookup: dict[str, str] | None = None,
     ) -> bytes:
-        """Return patched data for *zip_entry_name*, or *original_data* if no patch."""
+        """Return patched data for *zip_entry_name*, or *original_data* if no patch.
+
+        *nav_label_lookup* (D4, WU6-2) is consulted ONLY for ``.ncx`` entries
+        — it is independent of *flat_patches* (an ncx-only book with no nav
+        doc has an empty lookup and no-ops; a nav-doc-only book with no ncx
+        entry never reaches this branch at all).
+        """
+        if zip_entry_name.endswith(".ncx"):
+            return _patch_ncx_document(original_data, nav_label_lookup or {})
+
         if not flat_patches:
             return original_data
 

@@ -1078,3 +1078,430 @@ def test_nav_ol_li_nesting_and_epub_type_survive_patching() -> None:
         os.unlink(src_path)
         if os.path.exists(out_path):
             os.unlink(out_path)
+
+
+# ---------------------------------------------------------------------------
+# WU6-1 / WU6-2: ncx-copy lookup + patch branch, href match (D4).
+#
+# The nav_label_lookup is built (per D4) from the SAME per-node loop that
+# builds flat_patches, BEFORE the ZIP-copy loop — so ncx-copy does not depend
+# on nav.xhtml appearing before toc.ncx in ZIP iteration order.
+# ---------------------------------------------------------------------------
+
+
+def _make_nav_and_ncx_epub_bytes(
+    nav_xhtml: bytes,
+    ncx_xml: bytes,
+    chapters: list[tuple[str, bytes]],
+) -> bytes:
+    """Build an ebooklib EPUB, then swap in BOTH a hand-built nav doc and ncx.
+
+    Mirrors ``_make_nav_epub_bytes`` but also replaces the ``toc.ncx`` entry
+    so the fixture can express fragment-bearing ``content src`` and
+    unmatched ``navPoint`` shapes the ebooklib API cannot produce directly.
+    """
+    toc_links = [(fname, f"Label for {fname}", f"uid-{i}") for i, (fname, _) in enumerate(chapters)]
+    src_bytes = _make_epub_bytes(chapters, toc_links=toc_links)
+    src_bytes = _replace_zip_entry(src_bytes, "EPUB/nav.xhtml", nav_xhtml)
+    src_bytes = _replace_zip_entry(src_bytes, "EPUB/toc.ncx", ncx_xml)
+    return src_bytes
+
+
+def _find_ncx_entry(zf: zipfile.ZipFile) -> str:
+    names = [n for n in zf.namelist() if n.endswith(".ncx")]
+    assert names, f"toc.ncx not found in output; got: {zf.namelist()}"
+    return names[0]
+
+
+def _translate_nav_label(
+    chunks: list[Chunk],
+    nav_node_path: str,
+    nav_item_href: str,
+    source_label: str,
+    translated_label: str,
+) -> list[Chunk]:
+    """Translate only the batch containing the nav-label node at nav_node_path;
+    fall back to the ordinary `_fake_translate` prefix for every other chunk.
+    """
+    translated_chunks: list[Chunk] = []
+    for chunk in chunks:
+        prose_nodes = chunk.meta.get("prose_nodes", [])
+        is_target_batch = any(
+            pn.get("node_path") == nav_node_path and pn.get("epub_item_href") == nav_item_href
+            for pn in prose_nodes
+        )
+        if is_target_batch:
+            segments = chunk.source_text.split("\n\n")
+            translated_segments = [
+                translated_label if seg == source_label else "[ES] " + seg
+                for seg in segments
+            ]
+            translated_chunks.append(
+                chunk.model_copy(
+                    update={
+                        "translated_text": "\n\n".join(translated_segments),
+                        "status": ChunkStatus.DONE,
+                    }
+                )
+            )
+        else:
+            translated_chunks.extend(_fake_translate([chunk]))
+    return translated_chunks
+
+
+_NCX_SIMPLE = (
+    b"<?xml version='1.0' encoding='utf-8'?>"
+    b'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
+    b"<head><meta name=\"dtb:uid\" content=\"t\"/></head>"
+    b"<docTitle><text>T</text></docTitle>"
+    b"<navMap>"
+    b'<navPoint id="np1" playOrder="1">'
+    b"<navLabel><text>Chapter One</text></navLabel>"
+    b'<content src="ch1.xhtml"/>'
+    b"</navPoint>"
+    b"</navMap>"
+    b"</ncx>"
+)
+
+_NCX_FRAGMENT = (
+    b"<?xml version='1.0' encoding='utf-8'?>"
+    b'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
+    b"<head><meta name=\"dtb:uid\" content=\"t\"/></head>"
+    b"<docTitle><text>T</text></docTitle>"
+    b"<navMap>"
+    b'<navPoint id="np1" playOrder="1">'
+    b"<navLabel><text>Chapter One</text></navLabel>"
+    b'<content src="ch1.xhtml#sec2"/>'
+    b"</navPoint>"
+    b"</navMap>"
+    b"</ncx>"
+)
+
+
+def test_ncx_navlabel_replaced_by_href_match_no_provider_call() -> None:
+    """ncx navLabel text is replaced by href match; content src untouched; no extra translate call."""
+    chapters = [("ch1.xhtml", _chapter_xhtml("Chapter one body text."))]
+    src_bytes = _make_nav_and_ncx_epub_bytes(_NAV_XHTML_SIMPLE, _NCX_SIMPLE, chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        nav_label_chunk = next(
+            c for c in node_chunks
+            if c.meta.get("nav_href") == "ch1.xhtml" and c.source_text == "Chapter One"
+        )
+
+        class _CountingProvider(_FakeProvider):
+            def __init__(self) -> None:
+                self.translate_calls = 0
+
+            def translate(self, system: str, user: str, model: str):  # noqa: ARG002
+                self.translate_calls += 1
+                raise NotImplementedError("not used — writer never calls translate directly")
+
+        provider = _CountingProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+
+        translated_chunks = _translate_nav_label(
+            chunks,
+            nav_label_chunk.meta["node_path"],
+            nav_label_chunk.meta["epub_item_href"],
+            "Chapter One",
+            "Capítulo Uno",
+        )
+
+        writer = EpubWriter()
+        writer.write(translated_chunks, src_path, out_path)
+
+        # The writer must NEVER call provider.translate (it only reinserts
+        # already-translated text) — assert zero additional calls were made
+        # for the ncx-copy step specifically (the writer takes no provider
+        # argument at all, so this also proves no such call is even possible).
+        assert provider.translate_calls == 0, (
+            "EpubWriter must not call TranslationProvider.translate for ncx-copy"
+        )
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            ncx_name = _find_ncx_entry(zf)
+            raw = zf.read(ncx_name).decode("utf-8", errors="replace")
+
+        assert "Capítulo Uno" in raw, f"Expected translated ncx navLabel, got: {raw}"
+        assert "Chapter One" not in raw, (
+            f"Expected original label replaced, not left alongside translation: {raw}"
+        )
+        assert 'src="ch1.xhtml"' in raw, f"Expected content src unchanged, got: {raw}"
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def test_ncx_fragment_bearing_href_matches_fragment_less_nav_href() -> None:
+    """content src='ch1.xhtml#sec2' normalizes and matches nav_href='ch1.xhtml'."""
+    chapters = [("ch1.xhtml", _chapter_xhtml("Chapter one body text."))]
+    src_bytes = _make_nav_and_ncx_epub_bytes(_NAV_XHTML_SIMPLE, _NCX_FRAGMENT, chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        nav_label_chunk = next(
+            c for c in node_chunks
+            if c.meta.get("nav_href") == "ch1.xhtml" and c.source_text == "Chapter One"
+        )
+
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+        translated_chunks = _translate_nav_label(
+            chunks,
+            nav_label_chunk.meta["node_path"],
+            nav_label_chunk.meta["epub_item_href"],
+            "Chapter One",
+            "Capítulo Uno",
+        )
+
+        writer = EpubWriter()
+        writer.write(translated_chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            ncx_name = _find_ncx_entry(zf)
+            raw = zf.read(ncx_name).decode("utf-8", errors="replace")
+
+        assert "Capítulo Uno" in raw, (
+            f"Expected fragment-bearing content src to match fragment-less nav_href, got: {raw}"
+        )
+        assert 'src="ch1.xhtml#sec2"' in raw, f"Expected content src unchanged, got: {raw}"
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+# ---------------------------------------------------------------------------
+# WU7-1: ncx-copy defensive fallback paths — unmatched navPoint, empty
+# lookup, ncx-only-book no-op (D4).
+# ---------------------------------------------------------------------------
+
+_NCX_UNMATCHED = (
+    b"<?xml version='1.0' encoding='utf-8'?>"
+    b'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
+    b"<head><meta name=\"dtb:uid\" content=\"t\"/></head>"
+    b"<docTitle><text>T</text></docTitle>"
+    b"<navMap>"
+    b'<navPoint id="np1" playOrder="1">'
+    b"<navLabel><text>Appendix</text></navLabel>"
+    b'<content src="appendix.xhtml"/>'
+    b"</navPoint>"
+    b"</navMap>"
+    b"</ncx>"
+)
+
+
+def test_ncx_unmatched_navpoint_left_untranslated_no_crash() -> None:
+    """A navPoint whose content src has no lookup entry keeps its source label."""
+    chapters = [("ch1.xhtml", _chapter_xhtml("Chapter one body text."))]
+    src_bytes = _make_nav_and_ncx_epub_bytes(_NAV_XHTML_SIMPLE, _NCX_UNMATCHED, chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+        translated_chunks = _fake_translate(chunks)
+
+        writer = EpubWriter()
+        # Must not raise.
+        writer.write(translated_chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            ncx_name = _find_ncx_entry(zf)
+            raw = zf.read(ncx_name).decode("utf-8", errors="replace")
+
+        assert "Appendix" in raw, (
+            f"Expected unmatched navPoint's original label preserved, got: {raw}"
+        )
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def test_book_with_no_ncx_item_is_unaffected() -> None:
+    """An EPUB with no .ncx entry: ncx-copy step no-ops, nav translation proceeds."""
+    chapters = [("ch1.xhtml", _chapter_xhtml("Chapter one body text."))]
+    src_bytes = _make_nav_epub_bytes(_NAV_XHTML_SIMPLE, chapters)
+
+    # Remove the .ncx entry AND its OPF manifest/spine references entirely,
+    # to simulate an EPUB3-only, nav-doc-only book (ebooklib's read_epub
+    # raises if the manifest references a ZIP entry that doesn't exist).
+    buf_in = io.BytesIO(src_bytes)
+    buf_out = io.BytesIO()
+    with (
+        zipfile.ZipFile(buf_in, "r") as zin,
+        zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
+        for item in zin.infolist():
+            if item.filename.endswith(".ncx"):
+                continue
+            data = zin.read(item.filename)
+            if item.filename.endswith("content.opf"):
+                text = data.decode("utf-8")
+                text = text.replace(
+                    '<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>',
+                    "",
+                )
+                text = text.replace(' toc="ncx"', "")
+                data = text.encode("utf-8")
+            zout.writestr(item, data)
+    src_bytes = buf_out.getvalue()
+
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        nav_label_chunk = next(
+            c for c in node_chunks
+            if c.meta.get("nav_href") == "ch1.xhtml" and c.source_text == "Chapter One"
+        )
+
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+        translated_chunks = _translate_nav_label(
+            chunks,
+            nav_label_chunk.meta["node_path"],
+            nav_label_chunk.meta["epub_item_href"],
+            "Chapter One",
+            "Capítulo Uno",
+        )
+
+        writer = EpubWriter()
+        # Must not raise despite no .ncx entry present.
+        writer.write(translated_chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            names = zf.namelist()
+            assert not any(n.endswith(".ncx") for n in names), (
+                f"Expected no .ncx entry in output, got: {names}"
+            )
+            nav_name = _find_nav_entry(zf)
+            raw = zf.read(nav_name).decode("utf-8", errors="replace")
+
+        assert "Capítulo Uno" in raw, (
+            f"Expected nav-doc translation to proceed even without a .ncx entry, got: {raw}"
+        )
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def test_ncx_but_no_nav_doc_left_untranslated_no_crash() -> None:
+    """EPUB2-style book: toc.ncx present, no EpubNav item — ncx stays untranslated."""
+    epub_bytes = _make_epub_ncx_only_no_nav_writer()
+    src_path = _write_temp_epub(epub_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        nav_label_chunks = [
+            c for c in node_chunks
+            if c.meta.get("kind") == "nav-label" or c.meta.get("nav_href") is not None
+        ]
+        assert not nav_label_chunks, (
+            f"Expected no nav-label chunks (no EpubNav item), got: {nav_label_chunks}"
+        )
+
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+        translated_chunks = _fake_translate(chunks)
+
+        writer = EpubWriter()
+        # Must not raise.
+        writer.write(translated_chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            ncx_name = _find_ncx_entry(zf)
+            raw = zf.read(ncx_name).decode("utf-8", errors="replace")
+
+        assert "Chapter 1" in raw, (
+            f"Expected ncx label to remain untranslated (no nav doc to copy from), got: {raw}"
+        )
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def _make_epub_ncx_only_no_nav_writer() -> bytes:
+    """Build a minimal EPUB2-style book with toc.ncx but NO EpubNav item.
+
+    Mirrors ``tests/integration/test_epub_reader.py``'s
+    ``_make_epub_ncx_only_no_nav`` (same manual-ZIP construction — reused
+    here rather than imported to keep this test module import-independent
+    of the reader test module, matching the existing convention where both
+    test files build their own fixtures).
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip")
+        zf.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?>'
+            '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+            "<rootfiles>"
+            '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+            "</rootfiles>"
+            "</container>",
+        )
+        zf.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<package xmlns="http://www.idpf.org/2007/opf" version="2.0"'
+            ' unique-identifier="uid">'
+            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            "<dc:identifier id=\"uid\">ncx-only-writer-test</dc:identifier>"
+            "<dc:title>NCX Only Writer Test</dc:title>"
+            "<dc:language>en</dc:language>"
+            "</metadata>"
+            "<manifest>"
+            '<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+            "</manifest>"
+            '<spine toc="ncx">'
+            '<itemref idref="ch1"/>'
+            "</spine>"
+            "</package>",
+        )
+        zf.writestr(
+            "OEBPS/toc.ncx",
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"'
+            ' "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">'
+            '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
+            "<head><meta name=\"dtb:uid\" content=\"ncx-only-writer-test\"/></head>"
+            "<docTitle><text>NCX Only Writer Test</text></docTitle>"
+            "<navMap>"
+            '<navPoint id="np1" playOrder="1">'
+            "<navLabel><text>Chapter 1</text></navLabel>"
+            '<content src="ch1.xhtml"/>'
+            "</navPoint>"
+            "</navMap>"
+            "</ncx>",
+        )
+        zf.writestr(
+            "OEBPS/ch1.xhtml",
+            "<?xml version='1.0' encoding='utf-8'?>"
+            "<html xmlns='http://www.w3.org/1999/xhtml'>"
+            "<head><title>Ch1</title></head>"
+            "<body><p>Chapter one paragraph.</p></body>"
+            "</html>",
+        )
+    return buf.getvalue()
