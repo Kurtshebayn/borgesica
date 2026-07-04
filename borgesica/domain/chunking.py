@@ -178,12 +178,18 @@ def chunk_prose(
             if not texts:
                 return
             source_text = "\n\n".join(texts)
+            meta: dict[str, Any] = {"prose_nodes": nodes}
+            # D3a: lift kind="nav-label" to the batch's top-level meta when ALL
+            # nodes in the batch agree (isolated bucket guarantees "all or none";
+            # defensive `all(...)` keeps this correct even if that ever breaks).
+            if nodes and all(n.get("kind") == "nav-label" for n in nodes):
+                meta["kind"] = "nav-label"
             chunks.append(
                 Chunk(
                     index=chunk_index,
                     source_text=source_text,
                     status=ChunkStatus.PENDING,
-                    meta={"prose_nodes": nodes},
+                    meta=meta,
                 )
             )
             chunk_index += 1

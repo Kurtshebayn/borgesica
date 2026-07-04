@@ -314,3 +314,89 @@ def test_empty_and_whitespace_nodes_are_skipped() -> None:
     # prose_nodes should only reference the real node
     assert len(chunks[0].meta["prose_nodes"]) == 1
     assert chunks[0].meta["prose_nodes"][0]["node_path"] == "/p[2]"
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — nav-label batch lifts kind="nav-label" to top-level chunk.meta (WU3-1, D3a)
+# ---------------------------------------------------------------------------
+
+
+def _make_nav_node(
+    index: int,
+    text: str,
+    chapter_index: int,
+    node_path: str,
+    kind: str | None = "nav-label",
+) -> Chunk:
+    """Build a nav-label node Chunk as EpubReader's _extract_nav_chunks would produce.
+
+    Carries the per-node "kind" meta key set by the reader (WU2-2), distinct
+    from ordinary body nodes (_make_node) which never set "kind".
+    """
+    meta: dict[str, object] = {
+        "epub_item_href": "nav.xhtml",
+        "node_path": node_path,
+        "chapter_index": chapter_index,
+        "nav_href": f"{node_path}.xhtml",
+    }
+    if kind is not None:
+        meta["kind"] = kind
+    return Chunk(index=index, source_text=text, status=ChunkStatus.PENDING, meta=meta)
+
+
+def test_nav_label_batch_lifts_kind_to_top_level_meta() -> None:
+    """A batch whose nodes ALL carry kind=='nav-label' → output chunk.meta['kind']=='nav-label'."""
+    from borgesica.domain.chunking import chunk_prose
+
+    provider = FakeTranslationProvider()
+    config = JobConfig(source_type=SourceType.EPUB, model="fake-model", prose_chunk_tokens=800)
+
+    nav_a = _make_nav_node(0, "Chapter One", chapter_index=3, node_path="/nav[0]/a[0]")
+    nav_b = _make_nav_node(1, "Chapter Two", chapter_index=3, node_path="/nav[0]/a[1]")
+
+    chunks = chunk_prose([nav_a, nav_b], config, provider)
+
+    assert len(chunks) == 1, f"Expected 1 output chunk for the isolated nav bucket, got {len(chunks)}"
+    assert chunks[0].meta.get("kind") == "nav-label"
+
+
+def test_body_prose_batch_has_no_kind_key() -> None:
+    """A batch of ordinary body nodes (no 'kind' key) → output chunk.meta has NO 'kind' key."""
+    from borgesica.domain.chunking import chunk_prose
+
+    provider = FakeTranslationProvider()
+    config = JobConfig(source_type=SourceType.EPUB, model="fake-model", prose_chunk_tokens=800)
+
+    node_a = _make_node(0, _words(50, "body"), chapter_index=0, href="ch1.xhtml", node_path="/p[0]")
+
+    chunks = chunk_prose([node_a], config, provider)
+
+    assert len(chunks) == 1
+    assert "kind" not in chunks[0].meta, f"Body chunk meta must not carry 'kind', got {chunks[0].meta}"
+
+
+def test_mixed_kind_batch_defensively_has_no_kind_key() -> None:
+    """Defensive case: a batch mixing kind=='nav-label' and no-kind nodes → NO top-level 'kind'.
+
+    This should not occur given the isolated bucket (nav labels always share a
+    dedicated chapter_index distinct from body chapters), but the "all(...)"
+    check must not set 'kind' unless EVERY node in the batch agrees.
+    """
+    from borgesica.domain.chunking import chunk_prose
+
+    provider = FakeTranslationProvider()
+    config = JobConfig(source_type=SourceType.EPUB, model="fake-model", prose_chunk_tokens=800)
+
+    # Same chapter_index so they land in the SAME batch (forcing the mixed case).
+    nav_node = _make_nav_node(0, "Chapter One", chapter_index=3, node_path="/nav[0]/a[0]")
+    body_like_node = _make_node(
+        1, _words(20, "plain"), chapter_index=3, href="nav.xhtml", node_path="/nav[0]/span[0]"
+    )
+
+    chunks = chunk_prose([nav_node, body_like_node], config, provider)
+
+    assert len(chunks) == 1
+    assert "kind" not in chunks[0].meta, (
+        f"Mixed-kind batch must NOT carry top-level 'kind' (only set when ALL nodes agree), "
+        f"got {chunks[0].meta}"
+    )
