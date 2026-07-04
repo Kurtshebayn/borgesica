@@ -25,11 +25,34 @@ import zipfile
 
 import pytest
 from ebooklib import epub
+from lxml import etree
 
 from borgesica.adapters.readers.epub_reader import EpubReader
 from borgesica.adapters.writers.epub_writer import EpubWriter
 from borgesica.domain.chunking import chunk_prose
 from borgesica.domain.models import Chunk, ChunkStatus, JobConfig, SourceType
+
+# ---------------------------------------------------------------------------
+# Raw-ZIP fixture helper (mirrors tests/integration/test_epub_reader.py's
+# _replace_zip_entry pattern) — used by nav/ncx writer tests below to inject
+# hand-built nav docs and ncx documents that ebooklib's public API cannot
+# easily produce (e.g. landmarks/page-list siblings, fragment-bearing content
+# src, unmatched navPoints).
+# ---------------------------------------------------------------------------
+
+
+def _replace_zip_entry(epub_bytes: bytes, entry_name: str, new_content: bytes) -> bytes:
+    """Return a copy of ``epub_bytes`` with ``entry_name``'s content replaced."""
+    buf_in = io.BytesIO(epub_bytes)
+    buf_out = io.BytesIO()
+    with (
+        zipfile.ZipFile(buf_in, "r") as zin,
+        zipfile.ZipFile(buf_out, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
+        for item in zin.infolist():
+            data = new_content if item.filename == entry_name else zin.read(item.filename)
+            zout.writestr(item, data)
+    return buf_out.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +800,280 @@ def test_e2e_provenance_round_trip() -> None:
         assert "[ES] Jumps over the lazy dog." not in ch1_text, (
             "Chapter-2 translation must NOT appear in ch1.xhtml — wrong chapter placement"
         )
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+# ---------------------------------------------------------------------------
+# WU5-1: nav <a>/<span>/heading patch regression guard (D5 xhtml path).
+#
+# These are REGRESSION-GUARD tests: _do_write/_patch_entry's existing .xhtml
+# branch already patches by epub_item_href + node_path and never touches
+# element.attrib. Confirms the existing mechanism correctly handles nav-doc
+# input now that the reader's nav walk (WU2-2) produces real nav-label
+# chunks feeding it.
+# ---------------------------------------------------------------------------
+
+_NAV_XHTML_SIMPLE = (
+    b"<?xml version='1.0' encoding='utf-8'?>"
+    b'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+    b"<head><title>Nav</title></head>"
+    b"<body>"
+    b'<nav epub:type="toc" id="toc">'
+    b"<h2>Contents</h2>"
+    b'<ol><li><a href="ch1.xhtml">Chapter One</a></li></ol>'
+    b"</nav>"
+    b"</body>"
+    b"</html>"
+)
+
+_NAV_XHTML_SIBLINGS = (
+    b"<?xml version='1.0' encoding='utf-8'?>"
+    b'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+    b"<head><title>Nav</title></head>"
+    b"<body>"
+    b'<nav epub:type="landmarks">'
+    b"<h2>Guide</h2>"
+    b'<ol><li><a href="ch1.xhtml">Cover</a></li></ol>'
+    b"</nav>"
+    b'<nav epub:type="toc" id="toc">'
+    b"<h2>Contents</h2>"
+    b'<ol><li><a href="ch1.xhtml">Chapter One</a></li></ol>'
+    b"</nav>"
+    b'<nav epub:type="page-list" hidden="hidden">'
+    b"<h2>Pages</h2>"
+    b'<ol><li><a href="ch1.xhtml#page1">1</a></li></ol>'
+    b"</nav>"
+    b"</body>"
+    b"</html>"
+)
+
+_NAV_XHTML_NESTED = (
+    b"<?xml version='1.0' encoding='utf-8'?>"
+    b'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+    b"<head><title>Nav</title></head>"
+    b"<body>"
+    b'<nav epub:type="toc" id="toc">'
+    b"<h2>Contents</h2>"
+    b"<ol>"
+    b'<li><a href="ch1.xhtml">Chapter One</a>'
+    b"<ol><li><a href=\"ch1.xhtml#sec1\">Section One</a></li></ol>"
+    b"</li>"
+    b'<li><a href="ch2.xhtml">Chapter Two</a></li>'
+    b"</ol>"
+    b"</nav>"
+    b"</body>"
+    b"</html>"
+)
+
+
+def _make_nav_epub_bytes(nav_xhtml: bytes, chapters: list[tuple[str, bytes]]) -> bytes:
+    """Build an ebooklib EPUB with toc_links, then swap in a hand-built nav doc.
+
+    ebooklib's public API cannot express landmarks/page-list siblings or
+    nested <ol> depth directly, so we generate a normal EPUB (with a
+    populated book.toc so the manifest/spine/ncx are wired correctly) and
+    then replace the nav.xhtml entry's raw bytes — mirroring the reader
+    test suite's `_replace_zip_entry` pattern.
+    """
+    toc_links = [(fname, f"Label for {fname}", f"uid-{i}") for i, (fname, _) in enumerate(chapters)]
+    src_bytes = _make_epub_bytes(chapters, toc_links=toc_links)
+    return _replace_zip_entry(src_bytes, "EPUB/nav.xhtml", nav_xhtml)
+
+
+def _find_nav_entry(zf: zipfile.ZipFile) -> str:
+    names = [n for n in zf.namelist() if n.endswith("nav.xhtml")]
+    assert names, f"nav.xhtml not found in output; got: {zf.namelist()}"
+    return names[0]
+
+
+def test_nav_a_label_patched_href_preserved_byte_for_byte() -> None:
+    """Translated nav-label chunk patches the <a> text; href stays byte-identical."""
+    chapters = [("ch1.xhtml", _chapter_xhtml("Chapter one body text."))]
+    src_bytes = _make_nav_epub_bytes(_NAV_XHTML_SIMPLE, chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        nav_label_chunk = next(
+            c for c in node_chunks
+            if c.meta.get("nav_href") == "ch1.xhtml" and c.source_text == "Chapter One"
+        )
+
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+
+        translated_chunks = []
+        for chunk in chunks:
+            prose_nodes = chunk.meta.get("prose_nodes", [])
+            is_nav_batch = any(
+                pn.get("node_path") == nav_label_chunk.meta["node_path"]
+                and pn.get("epub_item_href") == nav_label_chunk.meta["epub_item_href"]
+                for pn in prose_nodes
+            )
+            if is_nav_batch:
+                segments = chunk.source_text.split("\n\n")
+                translated_segments = [
+                    "Capítulo Uno" if seg == "Chapter One" else "[ES] " + seg
+                    for seg in segments
+                ]
+                translated_chunks.append(
+                    chunk.model_copy(
+                        update={
+                            "translated_text": "\n\n".join(translated_segments),
+                            "status": ChunkStatus.DONE,
+                        }
+                    )
+                )
+            else:
+                translated_chunks.extend(_fake_translate([chunk]))
+
+        writer = EpubWriter()
+        writer.write(translated_chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            nav_name = _find_nav_entry(zf)
+            raw = zf.read(nav_name).decode("utf-8", errors="replace")
+
+        assert "Capítulo Uno" in raw, f"Expected translated label in nav doc, got: {raw}"
+        assert 'href="ch1.xhtml"' in raw, (
+            f"Expected byte-identical href='ch1.xhtml', got: {raw}"
+        )
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def test_nav_sibling_node_path_stability_landmarks_toc_pagelist() -> None:
+    """Writer patches the correct <a> inside toc, not landmarks/page-list siblings."""
+    chapters = [("ch1.xhtml", _chapter_xhtml("Chapter one body text."))]
+    src_bytes = _make_nav_epub_bytes(_NAV_XHTML_SIBLINGS, chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+
+        toc_label_chunk = next(
+            c for c in node_chunks
+            if c.meta.get("nav_href") == "ch1.xhtml" and c.source_text == "Chapter One"
+        )
+        cover_label_chunk = next(
+            c for c in node_chunks
+            if c.meta.get("nav_href") == "ch1.xhtml" and c.source_text == "Cover"
+        )
+        # The two labels share the same href but MUST have distinct node_path
+        # (they live under different <nav> siblings) — otherwise this test
+        # can't distinguish which one got patched.
+        assert toc_label_chunk.meta["node_path"] != cover_label_chunk.meta["node_path"]
+
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+
+        translated_chunks = []
+        for chunk in chunks:
+            prose_nodes = chunk.meta.get("prose_nodes", [])
+            is_toc_batch = any(
+                pn.get("node_path") == toc_label_chunk.meta["node_path"]
+                and pn.get("epub_item_href") == toc_label_chunk.meta["epub_item_href"]
+                for pn in prose_nodes
+            )
+            if is_toc_batch:
+                segments = chunk.source_text.split("\n\n")
+                translated_segments = [
+                    "Capítulo Uno" if seg == "Chapter One" else seg
+                    for seg in segments
+                ]
+                translated_chunks.append(
+                    chunk.model_copy(
+                        update={
+                            "translated_text": "\n\n".join(translated_segments),
+                            "status": ChunkStatus.DONE,
+                        }
+                    )
+                )
+            else:
+                translated_chunks.extend(_fake_translate([chunk]))
+
+        writer = EpubWriter()
+        writer.write(translated_chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            nav_name = _find_nav_entry(zf)
+            raw = zf.read(nav_name).decode("utf-8", errors="replace")
+
+        # The toc label must be translated...
+        assert "Capítulo Uno" in raw, f"Expected translated toc label, got: {raw}"
+        # ...and it must NOT have replaced the landmarks "Cover" label (which
+        # should remain "[ES] Cover" via the fallback fake-translate path, or
+        # at minimum must NOT read "Capítulo Uno" instead of "Cover").
+        assert "Cover" in raw or "[ES] Cover" in raw, (
+            f"Expected landmarks 'Cover' label untouched by the toc patch, got: {raw}"
+        )
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def test_nav_ol_li_nesting_and_epub_type_survive_patching() -> None:
+    """Nested <ol><li> depth/count and epub:type value survive nav-label patching."""
+    chapters = [
+        ("ch1.xhtml", _chapter_xhtml("Chapter one body text.")),
+        ("ch2.xhtml", _chapter_xhtml("Chapter two body text.")),
+    ]
+    src_bytes = _make_nav_epub_bytes(_NAV_XHTML_NESTED, chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+        translated_chunks = _fake_translate(chunks)
+
+        writer = EpubWriter()
+        writer.write(translated_chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path, "r") as zf:
+            nav_name = _find_nav_entry(zf)
+            raw = zf.read(nav_name)
+
+        parsed = etree.fromstring(raw)
+        body = parsed.find(".//{http://www.w3.org/1999/xhtml}body")
+        if body is None:
+            body = parsed.find(".//body")
+        nav_el = body.find(".//{http://www.w3.org/1999/xhtml}nav")
+        if nav_el is None:
+            nav_el = body.find(".//nav")
+
+        epub_type = nav_el.get("{http://www.idpf.org/2007/ops}type") or nav_el.get("type")
+        assert epub_type == "toc", "Expected epub:type='toc' to survive patching"
+
+        # Depth/count: outer <ol> has 2 <li>, first <li> has a nested <ol><li>.
+        outer_ol = nav_el.find("{http://www.w3.org/1999/xhtml}ol")
+        if outer_ol is None:
+            outer_ol = nav_el.find("ol")
+        outer_lis = outer_ol.findall("{http://www.w3.org/1999/xhtml}li")
+        if not outer_lis:
+            outer_lis = outer_ol.findall("li")
+        assert len(outer_lis) == 2, f"Expected 2 top-level <li>, got {len(outer_lis)}"
+
+        nested_ol = outer_lis[0].find("{http://www.w3.org/1999/xhtml}ol")
+        if nested_ol is None:
+            nested_ol = outer_lis[0].find("ol")
+        assert nested_ol is not None, "Expected nested <ol> to survive patching"
+        nested_lis = nested_ol.findall("{http://www.w3.org/1999/xhtml}li")
+        if not nested_lis:
+            nested_lis = nested_ol.findall("li")
+        assert len(nested_lis) == 1, f"Expected 1 nested <li>, got {len(nested_lis)}"
     finally:
         os.unlink(src_path)
         if os.path.exists(out_path):
