@@ -305,14 +305,14 @@ class EpubReader:
                 continue
             seen_ids.add(spine_id)
 
-            # Skip the NAV document (it's structural, not content)
-            item_name = item.get_name()
-            if item_name and ("nav" in item_name.lower()):
-                # Only skip if the item is the dedicated navigation document
-                # (it carries toc/nav content, not translatable prose).
-                # We check media-type via the item itself.
-                if isinstance(item, epub.EpubNav):
-                    continue
+            # Skip the NAV document (it's structural, not content).
+            # ebooklib authoritatively classifies EpubNav via the OPF
+            # properties="nav" attribute, so isinstance is sufficient on its
+            # own — a filename-substring pre-check would miss a nav doc named
+            # without "nav" in it (e.g. contents.xhtml), letting it fall
+            # through to the general body-chapter traversal.
+            if isinstance(item, epub.EpubNav):
+                continue
 
             new_chunks = _extract_chunks_from_item(
                 item,

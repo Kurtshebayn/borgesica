@@ -29,6 +29,7 @@ def _make_epub(
     include_encryption_xml: bool = False,
     extra_image: bool = False,
     toc_links: list[tuple[str, str, str]] | None = None,
+    nav_file_name: str | None = None,
 ) -> bytes:
     """Build a minimal valid EPUB in memory using ebooklib.
 
@@ -41,6 +42,9 @@ def _make_epub(
             in the generated nav doc's ``<ol>`` and matching ``navPoint``
             entries in the ncx. Additive only — omitting this parameter keeps
             the default (empty ``book.toc``) behavior of every existing test.
+        nav_file_name: optional override for the ``EpubNav`` item's filename
+            (default ebooklib name is ``nav.xhtml``). Used to test that nav-doc
+            detection does not rely on a "nav" filename substring.
 
     Returns:
         Raw bytes of the .epub file.
@@ -77,7 +81,10 @@ def _make_epub(
 
     book.spine = ["nav"] + epub_items
     book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
+    nav_item = epub.EpubNav()
+    if nav_file_name:
+        nav_item.file_name = nav_file_name
+    book.add_item(nav_item)
 
     # Write to a BytesIO buffer via a temp file
     with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as f:
@@ -616,5 +623,92 @@ def test_non_utf8_chapter_encoding_produces_correct_accented_chars() -> None:
         assert "é" in all_text, f"Expected 'é' (from 'Café') in text, got: {all_text!r}"
         assert "ñ" in all_text, f"Expected 'ñ' (from 'mañana') in text, got: {all_text!r}"
         assert "ó" in all_text, f"Expected 'ó' (from 'corazón') in text, got: {all_text!r}"
+    finally:
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Test WU2-1: nav doc without "nav" filename substring must not leak (D2 gate fix)
+# ---------------------------------------------------------------------------
+
+
+def test_nav_doc_without_nav_substring_is_recognized_and_excluded() -> None:
+    """A nav doc named ``contents.xhtml`` (no "nav" substring) must still be
+    recognized as the EPUB3 navigation document via ``isinstance`` alone, and
+    must NOT be treated as an ordinary body chapter.
+
+    W-nav-toc-translation D2: the old two-level gate
+    ``if item_name and ("nav" in item_name.lower()): if isinstance(...): continue``
+    only routed control into the ``isinstance`` check when the filename
+    happened to contain "nav". A nav doc named ``contents.xhtml`` skipped the
+    ``isinstance`` check entirely (the outer ``if`` was False) and fell
+    through to the general body-chapter extraction path instead — consuming
+    a ``chapter_index`` slot meant for a real chapter and producing chunks
+    whose ``epub_item_href`` is the nav doc itself.
+
+    RED (before fix): a chunk exists with ``epub_item_href == "contents.xhtml"``
+    (the general body-chapter path ran for the nav doc) and/or the real
+    chapter's ``chapter_index`` is shifted to 1 instead of 0 because the nav
+    doc consumed slot 0.
+    GREEN (after fix): isinstance(item, epub.EpubNav) alone identifies and
+    excludes the item from the general body-chapter traversal, regardless of
+    filename — the real chapter keeps ``chapter_index == 0`` and no chunk
+    carries ``epub_item_href == "contents.xhtml"``.
+    """
+    chapters = [_simple_chapter("Chapter one text.", "ch1.xhtml")]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[("ch1.xhtml", "Chapter One", "ch1")],
+        nav_file_name="contents.xhtml",
+    )
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        # No chunk from the general body-chapter traversal may originate from
+        # the nav item's href (contents.xhtml) — at this stage (WU2-1 only
+        # fixes the gate; the dedicated nav walk lands in WU2-2), the branch
+        # still `continue`s, so contents.xhtml must produce ZERO chunks.
+        nav_href_chunks = [
+            c for c in chunks if c.meta.get("epub_item_href") == "contents.xhtml"
+        ]
+        assert not nav_href_chunks, (
+            f"Expected no chunks from contents.xhtml (nav doc), got: {nav_href_chunks}"
+        )
+
+        # The real chapter must be the FIRST body chapter (chapter_index=0) —
+        # the nav doc must not have consumed the slot ahead of it.
+        ch1_chunks = [c for c in chunks if c.meta.get("epub_item_href") == "ch1.xhtml"]
+        assert ch1_chunks, "Expected chunks from ch1.xhtml"
+        assert all(c.meta["chapter_index"] == 0 for c in ch1_chunks), (
+            f"Expected ch1.xhtml chapter_index == 0 (nav doc must not consume a "
+            f"chapter slot), got: {[c.meta['chapter_index'] for c in ch1_chunks]}"
+        )
+    finally:
+        os.unlink(path)
+
+
+def test_nav_doc_named_nav_xhtml_still_skipped_regression() -> None:
+    """Regression: a nav doc named ``nav.xhtml`` (contains "nav") must still
+    be correctly skipped from the general body-chunk traversal after the
+    gate simplification to isinstance-only.
+    """
+    chapters = [_simple_chapter("Chapter one text.", "ch1.xhtml")]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[("ch1.xhtml", "Chapter One", "ch1")],
+    )
+    path = _write_temp_epub(epub_bytes)
+    try:
+        reader = EpubReader()
+        chunks = reader.read(path, _config())
+
+        nav_href_chunks = [
+            c for c in chunks if c.meta.get("epub_item_href") == "nav.xhtml"
+        ]
+        assert not nav_href_chunks, (
+            f"Expected no chunks from nav.xhtml (nav doc), got: {nav_href_chunks}"
+        )
     finally:
         os.unlink(path)
