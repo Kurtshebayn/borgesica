@@ -2111,3 +2111,101 @@ def test_fallback_exception_usage_is_accrued_into_cost():
         f"dropped exc.usage entirely (except: pass with no cost accrual)."
     )
     assert result.cost_usd > 0.0
+
+
+# ===========================================================================
+# WU4-1 — nav-label chunks always single-pass, bypassing reflective mode
+# (translation-quality/"quality_mode controls how many model passes run per
+# chunk" — scenario "nav-label chunk bypasses reflective mode even when the
+# job is reflective"; translation-quality/"reflection is orchestrator-level
+# and provider-agnostic" — scenario "reflective mode works with any provider
+# via the same port" (mixed body + nav-label job))
+# ===========================================================================
+
+
+def make_nav_label_chunk(index: int, text: str = "Chapter One") -> Chunk:
+    """Build a nav-label chunk as chunk_prose would emit it (D3a: top-level
+    meta["kind"] == "nav-label", lifted from the isolated nav chapter_index
+    bucket's per-node marker set by EpubReader's nav walk)."""
+    return Chunk(
+        index=index,
+        source_text=text,
+        status=ChunkStatus.PENDING,
+        meta={"kind": "nav-label", "prose_nodes": [{"epub_item_href": "nav.xhtml", "node_path": "/nav[0]/a[0]"}]},
+    )
+
+
+def test_nav_label_chunk_bypasses_reflective_mode_single_call():
+    """quality_mode='reflective' job, mixed nav-label + body chunks: the
+    nav-label chunk gets exactly 1 provider call (no critique/revise), while
+    body chunks in the SAME job still receive the full 3-call reflective
+    sequence."""
+    canned = FakeTranslationProvider(
+        canned_unit=TranslationUnit(translation="Texto traducido.", summary_update="Summary.")
+    )
+    orch, provider, store = make_orchestrator(provider=canned)
+    config = make_config(quality_mode="reflective")
+    job = make_job(config, total=2)
+
+    nav_chunk = make_nav_label_chunk(0)
+    body_chunk = Chunk(index=1, source_text="Body chunk text.", status=ChunkStatus.PENDING)
+    chunks = [nav_chunk, body_chunk]
+
+    run_job(orch, job, chunks, store=store)
+
+    # 1 call for the nav-label chunk + 3 calls for the body chunk = 4 total.
+    assert provider.call_count == 4, (
+        f"Expected 4 total calls (1 nav-label + 3 reflective body), got {provider.call_count}"
+    )
+
+    # The FIRST call must be the nav-label chunk's single pass; calls 2-4 are
+    # the body chunk's draft/critique/revise sequence (chunks processed in
+    # index order).
+    nav_call_user = provider.call_log[0][1]
+    assert nav_chunk.source_text in nav_call_user
+
+    body_call_users = [c[1] for c in provider.call_log[1:]]
+    assert any(body_chunk.source_text in u for u in body_call_users), (
+        "Body chunk's draft call must appear among calls 2-4"
+    )
+
+
+def test_nav_label_chunk_cost_projection_uses_single_pass_even_when_reflective():
+    """_project_chunk_cost must use passes=1 for a nav-label chunk even under
+    quality_mode='reflective' — the budget guard must not over-project 3x
+    cost for a chunk that will actually only make 1 call."""
+    orch, provider, _ = make_orchestrator()
+    config = make_config(quality_mode="reflective")
+
+    nav_chunk = make_nav_label_chunk(0, text="Chapter One")
+    body_chunk = Chunk(index=1, source_text="Chapter One", status=ChunkStatus.PENDING)
+
+    nav_projection = orch._project_chunk_cost(nav_chunk, config)
+    body_projection = orch._project_chunk_cost(body_chunk, config)
+
+    # Same source_text, same config — the ONLY difference is nav_chunk's
+    # meta["kind"]. Body (ordinary) chunk projects reflective (3x); nav-label
+    # chunk projects fast (1x) — nav_projection must be exactly 1/3 of body's.
+    assert body_projection == pytest.approx(nav_projection * 3, rel=1e-9), (
+        f"nav-label projection ({nav_projection}) must be 1/3 of the reflective "
+        f"body projection ({body_projection}) — nav-label chunks must project "
+        f"passes=1 even under quality_mode='reflective'."
+    )
+
+
+def test_nav_label_chunk_fast_mode_unchanged_single_pass():
+    """Regression: quality_mode='fast' job with a nav-label chunk → unchanged
+    (still 1 pass — this path was already 1 pass; confirm the new branch
+    doesn't accidentally special-case fast mode differently)."""
+    orch, provider, store = make_orchestrator()
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=1)
+
+    nav_chunk = make_nav_label_chunk(0)
+    chunks = [nav_chunk]
+
+    run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 1, (
+        f"Expected exactly 1 call for a nav-label chunk under fast mode, got {provider.call_count}"
+    )

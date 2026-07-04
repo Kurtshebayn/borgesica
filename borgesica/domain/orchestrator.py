@@ -384,7 +384,12 @@ class TranslationOrchestrator:
         """
         input_tokens = self._provider.count_tokens(chunk.source_text, config.model)
         output_tokens = 150  # conservative default (same as CostEstimator)
-        passes = 3 if config.quality_mode == "reflective" else 1
+        # Nav-label chunks always single-pass, regardless of quality_mode (D3):
+        # the critique/revise cycle yields no quality gain for short factual
+        # nav labels, and the orchestrator must not over-project 3x budget for
+        # a chunk that will only ever make 1 real call.
+        is_nav_label = chunk.meta.get("kind") == "nav-label"
+        passes = 1 if is_nav_label else (3 if config.quality_mode == "reflective" else 1)
         in_price, out_price = self._provider.price(config.model)
         return (
             input_tokens * passes / 1_000_000 * in_price
@@ -437,6 +442,11 @@ class TranslationOrchestrator:
         user_prompt = chunk.source_text  # PRIMARY: send WITH tags
         total_call_cost = 0.0
 
+        # Nav-label chunks always single-pass, regardless of quality_mode (D3):
+        # short factual nav labels gain nothing from critique/revise, and the
+        # orchestrator has no other per-chunk-kind branch — this is the ONLY one.
+        is_nav_label = chunk.meta.get("kind") == "nav-label"
+
         # Last tag-valid attempt whose "\n\n" segment count diverged from the
         # source — accepted after the loop if no compliant output arrives.
         best_effort: tuple[TranslationUnit, str] | None = None
@@ -444,7 +454,7 @@ class TranslationOrchestrator:
         # --- PRIMARY: tags-in-text attempts ---
         for attempt in range(_MAX_TAG_RETRIES + 1):  # 0, 1, 2
             try:
-                if config.quality_mode == "reflective":
+                if config.quality_mode == "reflective" and not is_nav_label:
                     unit, translated_text, call_cost = self._translate_reflective(
                         system=system,
                         user=user_prompt,
