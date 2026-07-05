@@ -359,10 +359,14 @@ def _extract_nav_chunks(
         )
         chunk_idx += 1
 
-    # Select <nav> elements directly under <body> by epub:type value.
+    # Select <nav> elements ANYWHERE under <body> by epub:type value.
+    # Descendant search, not direct children: real nav docs commonly wrap the
+    # <nav> in a <section> (live-book regression: Strength_of_the_Few's
+    # <body epub:type="frontmatter"><section epub:type="toc"><nav ...> shape
+    # produced zero nav-label chunks with a direct-children scan).
     nav_elements = [
-        child for child in body
-        if _local_tag(child) == "nav" and _nav_epub_type(child) in _NAV_TRANSLATABLE_TYPES
+        el for el in body.iter()
+        if _local_tag(el) == "nav" and _nav_epub_type(el) in _NAV_TRANSLATABLE_TYPES
     ]
 
     for nav_el in nav_elements:
@@ -439,7 +443,19 @@ class EpubReader:
         chunks: list[Chunk] = []
         seen_ids: set[str] = set()
         chapter_index = 0
-        nav_items: list[epub.EpubHtml] = []
+
+        # Collect NAV documents from the MANIFEST, not the spine: most
+        # professionally produced EPUBs declare the nav doc as a manifest-only
+        # item (properties="nav") that never appears in the reading order, so
+        # a spine-driven collection walks right past it (live-book regression:
+        # Strength_of_the_Few.epub — navigation menu stayed untranslated).
+        # ebooklib authoritatively classifies EpubNav via the OPF
+        # properties="nav" attribute, so isinstance is sufficient on its own —
+        # a filename-substring pre-check would miss a nav doc named without
+        # "nav" in it (e.g. contents.xhtml).
+        nav_items: list[epub.EpubHtml] = [
+            item for item in book.get_items() if isinstance(item, epub.EpubNav)
+        ]
 
         for spine_id, _linear in book.spine:
             item = book.get_item_with_id(spine_id)
@@ -451,17 +467,12 @@ class EpubReader:
                 continue
             seen_ids.add(spine_id)
 
-            # Route the NAV document to the dedicated nav walk instead of the
-            # general body-chapter traversal. ebooklib authoritatively
-            # classifies EpubNav via the OPF properties="nav" attribute, so
-            # isinstance is sufficient on its own — a filename-substring
-            # pre-check would miss a nav doc named without "nav" in it (e.g.
-            # contents.xhtml), letting it fall through to the general
-            # body-chapter traversal. Nav chunks are appended AFTER all body
-            # chapters (see below), so collect the item now and process it
-            # once every body chapter_index is known.
+            # NAV documents were already collected from the manifest above —
+            # skip them here so a spine-listed nav doc is neither traversed as
+            # a body chapter nor walked twice. Nav chunks are appended AFTER
+            # all body chapters (see below), once every body chapter_index is
+            # known.
             if isinstance(item, epub.EpubNav):
-                nav_items.append(item)
                 continue
 
             new_chunks = _extract_chunks_from_item(

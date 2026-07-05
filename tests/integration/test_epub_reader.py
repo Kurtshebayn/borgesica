@@ -30,6 +30,7 @@ def _make_epub(
     extra_image: bool = False,
     toc_links: list[tuple[str, str, str]] | None = None,
     nav_file_name: str | None = None,
+    nav_in_spine: bool = True,
 ) -> bytes:
     """Build a minimal valid EPUB in memory using ebooklib.
 
@@ -45,6 +46,10 @@ def _make_epub(
         nav_file_name: optional override for the ``EpubNav`` item's filename
             (default ebooklib name is ``nav.xhtml``). Used to test that nav-doc
             detection does not rely on a "nav" filename substring.
+        nav_in_spine: when False, the nav doc stays a manifest-only item
+            (properties="nav", NOT part of the reading order) — the shape of
+            most professionally produced EPUBs (e.g. Strength_of_the_Few.epub,
+            whose nav doc never appears in the spine).
 
     Returns:
         Raw bytes of the .epub file.
@@ -79,7 +84,7 @@ def _make_epub(
         )
         book.add_item(img_item)
 
-    book.spine = ["nav"] + epub_items
+    book.spine = (["nav"] if nav_in_spine else []) + epub_items
     book.add_item(epub.EpubNcx())
     nav_item = epub.EpubNav()
     if nav_file_name:
@@ -989,5 +994,109 @@ def test_nav_label_chunk_kind_marker_set() -> None:
             assert c.meta.get("kind") == "nav-label", (
                 f"Expected meta['kind']=='nav-label', got: {c.meta}"
             )
+    finally:
+        os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Regression: nav doc OUTSIDE the spine (manifest-only) must still be walked.
+#
+# Live-book failure (Strength_of_the_Few.epub, job b01bc1ec, 2026-07-05):
+# the reader collected EpubNav items only while iterating book.spine, but
+# most professionally produced EPUBs declare the nav doc as a manifest-only
+# item (properties="nav") that never appears in the reading order — so the
+# nav walk never ran and the navigation menu stayed untranslated. Every
+# fixture had put "nav" in the spine, hiding the bug from the whole suite.
+# ---------------------------------------------------------------------------
+
+
+def test_nav_doc_outside_spine_still_emits_nav_label_chunks() -> None:
+    """A manifest-only nav doc (not in the spine) must still yield nav-label chunks."""
+    chapters = [_simple_chapter("Body text one.", "ch1.xhtml")]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[("ch1.xhtml", "Chapter One", "ch1")],
+        nav_in_spine=False,
+    )
+    path = _write_temp_epub(epub_bytes)
+    try:
+        chunks = EpubReader().read(path, _config())
+        nav_chunks = [c for c in chunks if c.meta.get("kind") == "nav-label"]
+        assert nav_chunks, (
+            "Expected nav-label chunks from a manifest-only nav doc "
+            "(nav NOT in spine — the real-book shape); got none"
+        )
+        labels = " ".join(c.source_text for c in nav_chunks)
+        assert "Chapter One" in labels, (
+            f"Expected the 'Chapter One' toc label among nav chunks, got: {labels!r}"
+        )
+        # Body extraction must be unaffected.
+        body_chunks = [c for c in chunks if c.meta.get("kind") != "nav-label"]
+        assert any("Body text one." in c.source_text for c in body_chunks)
+    finally:
+        os.unlink(path)
+
+
+def test_nav_doc_outside_spine_not_double_processed_when_also_in_spine() -> None:
+    """A nav doc present in BOTH manifest and spine must be walked exactly once."""
+    chapters = [_simple_chapter("Body text one.", "ch1.xhtml")]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[("ch1.xhtml", "Chapter One", "ch1")],
+        nav_in_spine=True,
+    )
+    path = _write_temp_epub(epub_bytes)
+    try:
+        chunks = EpubReader().read(path, _config())
+        nav_labels = [
+            c for c in chunks
+            if c.meta.get("kind") == "nav-label" and "Chapter One" in c.source_text
+        ]
+        assert len(nav_labels) == 1, (
+            f"'Chapter One' nav label must be emitted exactly once, got {len(nav_labels)}"
+        )
+    finally:
+        os.unlink(path)
+
+
+def test_nav_element_nested_inside_section_is_still_walked() -> None:
+    """A <nav epub:type="toc"> nested inside <section> (not a direct <body>
+    child) must still be walked — the real-book shape (Strength_of_the_Few's
+    nav doc wraps its <nav> in <section epub:type="toc"> under
+    <body epub:type="frontmatter">)."""
+    chapters = [_simple_chapter("Body text one.", "ch1.xhtml")]
+    epub_bytes = _make_epub(
+        chapters,
+        toc_links=[("ch1.xhtml", "Chapter One", "ch1")],
+        nav_in_spine=False,
+    )
+    nested_nav = (
+        "<?xml version='1.0' encoding='utf-8'?>"
+        '<html xmlns:epub="http://www.idpf.org/2007/ops" '
+        'xmlns="http://www.w3.org/1999/xhtml">'
+        "<head><title>Navigation Page</title></head>"
+        '<body epub:type="frontmatter">'
+        '<section epub:type="toc">'
+        "<h1>Table of Contents</h1>"
+        '<nav epub:type="toc">'
+        '<ol><li><a href="ch1.xhtml">Chapter One</a></li></ol>'
+        "</nav>"
+        "</section>"
+        "</body></html>"
+    ).encode("utf-8")
+    # Locate the actual nav entry name inside the ZIP, then replace its bytes.
+    with zipfile.ZipFile(io.BytesIO(epub_bytes)) as zf:
+        nav_entry = next(n for n in zf.namelist() if n.endswith("nav.xhtml"))
+    epub_bytes = _replace_zip_entry(epub_bytes, nav_entry, nested_nav)
+
+    path = _write_temp_epub(epub_bytes)
+    try:
+        chunks = EpubReader().read(path, _config())
+        nav_chunks = [c for c in chunks if c.meta.get("kind") == "nav-label"]
+        labels = " ".join(c.source_text for c in nav_chunks)
+        assert "Chapter One" in labels, (
+            "Expected 'Chapter One' from a <nav> nested inside <section> "
+            f"(real-book shape); nav chunks: {labels!r}"
+        )
     finally:
         os.unlink(path)
