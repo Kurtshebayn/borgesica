@@ -159,7 +159,7 @@ exists first):
    meta has NO `"kind"` key (only set when ALL nodes agree).
 
 Implement in `borgesica/domain/chunking.py`, `chunk_prose`'s `_flush_batch` (or equivalent batch
-      -flush site): when building the output chunk's `meta = {"prose_nodes": [...]}`, add: if
+flush site): when building the output chunk's `meta = {"prose_nodes": [...]}`, add: if
 `all(n.get("kind") == "nav-label" for n in batch_nodes)` (non-empty batch), set
 `chunk.meta["kind"] = "nav-label"`. Additive only — no change to existing prose-chunk output shape.
 
@@ -362,7 +362,7 @@ here to reflect completion, not a new commit.
 
 ## WU-8 — End-to-end integration + full regression
 
-### WU8-1 [T] — E2E: nav doc + ncx translated together, fast and reflective modes
+### WU8-1 [T] — E2E: nav doc + ncx translated together, fast and reflective modes [x]
 
 **Depends on**: WU2-2, WU3-1, WU4-1, WU5-1, WU6-2, WU7-1 (exercises the full pipeline built by all
 prior units)
@@ -388,7 +388,7 @@ Deliverable: `pytest tests/integration/test_epub_engine_e2e.py -k nav` → both 
 
 ---
 
-### WU8-2 [I] — Full regression pass
+### WU8-2 [I] — Full regression pass [x]
 
 **Depends on**: WU1-1 through WU8-1 (all prior units)
 **seq** (final gate before handing off to `sdd-verify`)
