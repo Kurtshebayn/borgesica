@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -103,11 +103,79 @@ class Chunk(BaseModel):
 
 
 class TranslationUnit(BaseModel):
-    """Structured LLM result — the per-chunk contract the provider MUST fulfill."""
+    """Structured LLM result — the per-chunk contract the provider MUST fulfill.
 
-    translation: str
+    Two output shapes, one model:
+      - Prose (EPUB/PDF): ``translation`` — a single string whose "\\n\\n"
+        segment count mirrors the source (writers map segments positionally).
+      - Segmented (SRT): ``translations`` — one string PER source cue.  Blank
+        lines are a typographic convention models "correct" on unpunctuated
+        speech-to-text fragments; an array is structural, so cue boundaries
+        survive.  ``translation`` is derived (the "\\n\\n" join) so every
+        legacy consumer (checkpoint, reflective prompts) keeps working.
+
+    At least one of the two fields must be present — a payload with neither
+    is malformed output and must fail validation so providers fall through
+    their tier chain.
+    """
+
+    translation: str = ""
+    translations: list[str] | None = None
     summary_update: str  # 3-5 sentences, REPLACES prior summary
     glossary_additions: list[GlossaryEntry] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _require_content_and_derive_translation(self) -> "TranslationUnit":
+        if not self.translation:
+            if self.translations is None:
+                raise ValueError(
+                    "TranslationUnit requires 'translation' or 'translations'"
+                )
+            self.translation = "\n\n".join(self.translations)
+        return self
+
+
+def translation_tool_schema(segment_count: int | None = None) -> dict[str, Any]:
+    """JSON schema for the provider tool call, per output shape.
+
+    segment_count=None (prose): legacy contract — ``translation`` (string)
+    required, no ``translations`` offered (models must not be tempted to
+    restructure prose output).
+
+    segment_count=N (SRT): ``translations`` required with minItems ==
+    maxItems == N and ``translation`` removed — the schema itself enforces
+    the cue-boundary contract instead of a typographic "\\n\\n" convention.
+
+    Adapters (the only schema consumers) pass the result verbatim as the
+    tool/function parameter schema; pydantic-generated pieces (summary_update,
+    glossary_additions, $defs) are reused as-is.
+    """
+    schema = TranslationUnit.model_json_schema()
+    props = schema["properties"]
+    props.pop("translations", None)
+
+    if segment_count is None:
+        props["translation"].pop("default", None)
+        schema["required"] = ["translation", "summary_update"]
+        return schema
+
+    props.pop("translation")
+    schema["properties"] = {
+        "translations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": segment_count,
+            "maxItems": segment_count,
+            "description": (
+                f"Exactly {segment_count} translated segments — one per source "
+                "segment, in source order. Never merge, split, or reorder "
+                "segments."
+            ),
+        },
+        **props,
+    }
+    schema["required"] = ["translations", "summary_update"]
+    return schema
 
 
 class Usage(BaseModel):

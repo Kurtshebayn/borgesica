@@ -90,6 +90,103 @@ def test_translation_unit_glossary_additions_defaults_to_empty() -> None:
     assert unit.glossary_additions == []
 
 
+# --- TranslationUnit.translations (segmented SRT contract) ---
+
+def test_translation_unit_accepts_translations_array() -> None:
+    from borgesica.domain.models import TranslationUnit
+
+    unit = TranslationUnit(
+        translations=["Hola", "mundo"],
+        summary_update="Two segments.",
+    )
+    assert unit.translations == ["Hola", "mundo"]
+
+
+def test_translation_unit_derives_translation_from_translations() -> None:
+    """When only the array is provided, .translation is the '\\n\\n' join so
+    every legacy consumer (checkpoint, reflective prompts) keeps working."""
+    from borgesica.domain.models import TranslationUnit
+
+    unit = TranslationUnit(
+        translations=["Hola", "mundo"],
+        summary_update="Two segments.",
+    )
+    assert unit.translation == "Hola\n\nmundo"
+
+
+def test_translation_unit_explicit_translation_not_overwritten() -> None:
+    from borgesica.domain.models import TranslationUnit
+
+    unit = TranslationUnit(
+        translation="Texto explícito",
+        translations=["Hola", "mundo"],
+        summary_update="Both fields.",
+    )
+    assert unit.translation == "Texto explícito"
+
+
+def test_translation_unit_rejects_missing_translation_and_translations() -> None:
+    """A unit with NEITHER translation NOR translations is malformed output —
+    providers rely on this ValidationError to fall through tiers."""
+    from borgesica.domain.models import TranslationUnit
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        TranslationUnit(summary_update="No content at all.")
+
+
+def test_translation_unit_translations_defaults_to_none() -> None:
+    from borgesica.domain.models import TranslationUnit
+
+    unit = TranslationUnit(translation="Hola", summary_update="Summary.")
+    assert unit.translations is None
+
+
+# --- translation_tool_schema ---
+
+def test_tool_schema_default_requires_translation_string() -> None:
+    """Prose mode: the tool schema keeps the legacy contract — 'translation'
+    required, no 'translations' array offered to the model."""
+    from borgesica.domain.models import translation_tool_schema
+
+    schema = translation_tool_schema()
+    assert "translation" in schema["properties"]
+    assert "translations" not in schema["properties"]
+    assert "translation" in schema["required"]
+    assert "summary_update" in schema["required"]
+
+
+def test_tool_schema_segmented_requires_exact_array() -> None:
+    """SRT mode: the schema demands a 'translations' array of EXACTLY N
+    strings and drops the free-form 'translation' string entirely."""
+    from borgesica.domain.models import translation_tool_schema
+
+    schema = translation_tool_schema(segment_count=25)
+    props = schema["properties"]
+    assert "translation" not in props
+    arr = props["translations"]
+    assert arr["type"] == "array"
+    assert arr["items"] == {"type": "string"}
+    assert arr["minItems"] == 25
+    assert arr["maxItems"] == 25
+    assert "translations" in schema["required"]
+    assert "summary_update" in schema["required"]
+
+
+def test_tool_schema_segmented_validates_against_unit() -> None:
+    """A payload matching the segmented schema must validate as TranslationUnit."""
+    from borgesica.domain.models import TranslationUnit
+
+    data = {
+        "translations": ["uno", "dos", "tres"],
+        "summary_update": "Three segments.",
+        "glossary_additions": [],
+    }
+    unit = TranslationUnit.model_validate(data)
+    assert unit.translations == ["uno", "dos", "tres"]
+    assert unit.translation == "uno\n\ndos\n\ntres"
+
+
 # --- CostEstimate ---
 
 def test_cost_estimate_within_budget_defaults_to_true() -> None:
