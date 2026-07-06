@@ -116,8 +116,8 @@ class SrtWriter:
 
         Per-cue translation text is recovered by splitting chunk.translated_text
         on "\\n\\n" and aligning positionally with cue_batches metadata.
-        If the counts don't match, the entire batch text is used verbatim
-        for each cue (graceful degradation).
+        If the counts don't match, each cue falls back to its original
+        source text (graceful degradation).
         """
         # Detect mode: batched (meta has "cue_batches") or single-cue
         # (meta has "cue_index").
@@ -132,8 +132,18 @@ class SrtWriter:
                 # Split translated text back into per-cue parts
                 parts = translated_text.split("\n\n")
                 if len(parts) != len(cue_batches):
-                    # Graceful degradation: use full text for every cue
-                    parts = [translated_text] * len(cue_batches)
+                    # Graceful degradation: fall back to each cue's ORIGINAL
+                    # source text (untranslated but readable, correct timing).
+                    # Duplicating the whole batch into every cue produces
+                    # walls of identical text and line_length violations.
+                    logger.warning(
+                        "SrtWriter: chunk %d translated into %d parts but has "
+                        "%d cues — falling back to per-cue source text.",
+                        chunk.index,
+                        len(parts),
+                        len(cue_batches),
+                    )
+                    parts = [cb["text"] for cb in cue_batches]
 
                 for cue_meta, part in zip(cue_batches, parts):
                     # Detect line_length from chunk meta if stored, else 42

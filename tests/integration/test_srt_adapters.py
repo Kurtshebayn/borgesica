@@ -255,6 +255,59 @@ class TestSrtWriter:
         finally:
             os.unlink(out_path)
 
+    def test_cue_count_mismatch_falls_back_to_per_cue_source_text(self):
+        """On cue-count mismatch, each cue falls back to ITS OWN source text.
+
+        Regression for job 0b86d4f2: when translated_text splits into fewer
+        parts than cue_batches, the writer must NOT duplicate the whole batch
+        text into every cue (walls of identical text, line_length violations).
+        It must degrade per cue using meta["cue_batches"][i]["text"].
+        """
+        from borgesica.domain.chunking import SrtChunker
+
+        config = make_config()
+        cue_chunks = self.reader.read(str(FIXTURES / "simple.srt"), config)
+        chunker = SrtChunker()
+        batched = chunker.chunk(cue_chunks, config.__class__(
+            source_type=SourceType.SRT,
+            model="claude-3-5-haiku-20241022",
+            chunk_size=5,
+            line_length=42,
+        ))
+
+        batch = batched[0]
+        cue_batches = batch.meta["cue_batches"]
+        assert len(cue_batches) >= 3, "fixture must yield a multi-cue batch"
+
+        # Mismatched translation: one segment fewer than the cue count
+        bad_translation = "\n\n".join(
+            f"Traducción {i}" for i in range(len(cue_batches) - 1)
+        )
+        translated = self._make_translated_chunks([batch], [bad_translation])
+
+        with tempfile.NamedTemporaryFile(suffix=".srt", delete=False, mode="w", encoding="utf-8") as f:
+            out_path = f.name
+
+        try:
+            self.writer.write(translated, str(FIXTURES / "simple.srt"), out_path)
+            with open(out_path, encoding="utf-8") as f:
+                parsed = list(srt.parse(f.read()))
+
+            assert len(parsed) == len(cue_batches)
+            full_batch_norm = " ".join(bad_translation.split())
+            for cue_meta, sub in zip(cue_batches, parsed):
+                content_norm = " ".join(sub.content.split())
+                source_norm = " ".join(cue_meta["text"].split())
+                # Each cue carries its OWN source text…
+                assert content_norm == source_norm, (
+                    f"cue {cue_meta['cue_index']}: expected per-cue source "
+                    f"fallback {source_norm!r}, got {content_norm!r}"
+                )
+                # …and never the whole batch duplicated.
+                assert content_norm != full_batch_norm
+        finally:
+            os.unlink(out_path)
+
     def test_output_parseable_by_srt_library(self):
         """Output SRT file is parseable by srt.parse() without error."""
         config = make_config()
