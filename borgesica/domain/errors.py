@@ -1,6 +1,6 @@
 """Domain exceptions for the Borgésica translation engine.
 
-All errors inherit from BorgésicaError so callers can catch at any granularity.
+All errors inherit from BorgesicaError so callers can catch at any granularity.
 No EXTERNAL (provider/adapter SDK) imports — only stdlib and sibling domain
 models. Usage is a domain value object, so carrying it on provider errors keeps
 domain purity intact (see tests/unit/test_domain_purity.py).
@@ -10,11 +10,11 @@ from __future__ import annotations
 from borgesica.domain.models import Usage
 
 
-class BorgésicaError(Exception):
+class BorgesicaError(Exception):
     """Base exception for all Borgésica domain errors."""
 
 
-class BudgetExceeded(BorgésicaError):
+class BudgetExceeded(BorgesicaError):
     """Raised when the running cost exceeds the configured budget_usd.
 
     The job is set to PAUSED; completed chunks are safe.
@@ -26,7 +26,7 @@ class BudgetExceeded(BorgésicaError):
         self.cost_so_far = cost_so_far
 
 
-class MalformedOutput(BorgésicaError):
+class MalformedOutput(BorgesicaError):
     """Raised when the provider returns output that cannot be parsed as TranslationUnit
     after all retry tiers are exhausted.
 
@@ -48,7 +48,7 @@ class MalformedOutput(BorgésicaError):
         self.usage = usage if usage is not None else Usage()
 
 
-class JobNotFoundError(BorgésicaError):
+class JobNotFoundError(BorgesicaError):
     """Raised when a job_id is not found in the checkpoint store."""
 
     def __init__(self, *, job_id: str) -> None:
@@ -56,7 +56,7 @@ class JobNotFoundError(BorgésicaError):
         self.job_id = job_id
 
 
-class JobStateError(BorgésicaError):
+class JobStateError(BorgesicaError):
     """Raised when an operation is invalid for the job's current status."""
 
     def __init__(self, *, job_id: str, current_status: str) -> None:
@@ -67,7 +67,7 @@ class JobStateError(BorgésicaError):
         self.current_status = current_status
 
 
-class UnsupportedFormatError(BorgésicaError):
+class UnsupportedFormatError(BorgesicaError):
     """Raised when a source file format is not supported or cannot be read."""
 
     def __init__(self, *, path: str, reason: str) -> None:
@@ -76,7 +76,7 @@ class UnsupportedFormatError(BorgésicaError):
         self.reason = reason
 
 
-class ProviderError(BorgésicaError):
+class ProviderError(BorgesicaError):
     """Raised after all retry attempts are exhausted on a provider HTTP error.
 
     `usage` carries the accumulated REAL token usage of any billed-but-failed

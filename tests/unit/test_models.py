@@ -199,19 +199,19 @@ def test_progress_has_all_5_fields() -> None:
 # --- Errors ---
 
 def test_budget_exceeded_is_borgesica_error() -> None:
-    from borgesica.domain.errors import BudgetExceeded, BorgésicaError
+    from borgesica.domain.errors import BudgetExceeded, BorgesicaError
 
     err = BudgetExceeded(job_id="job-1", cost_so_far=5.0)
-    assert isinstance(err, BorgésicaError)
+    assert isinstance(err, BorgesicaError)
     assert err.job_id == "job-1"
     assert err.cost_so_far == 5.0
 
 
 def test_malformed_output_carries_expected_attrs() -> None:
-    from borgesica.domain.errors import MalformedOutput, BorgésicaError
+    from borgesica.domain.errors import MalformedOutput, BorgesicaError
 
     err = MalformedOutput(job_id="job-1", chunk_index=3)
-    assert isinstance(err, BorgésicaError)
+    assert isinstance(err, BorgesicaError)
     assert err.chunk_index == 3
 
 
@@ -239,35 +239,35 @@ def test_malformed_output_carries_explicit_usage() -> None:
 
 
 def test_job_not_found_error() -> None:
-    from borgesica.domain.errors import JobNotFoundError, BorgésicaError
+    from borgesica.domain.errors import JobNotFoundError, BorgesicaError
 
     err = JobNotFoundError(job_id="x")
-    assert isinstance(err, BorgésicaError)
+    assert isinstance(err, BorgesicaError)
     assert err.job_id == "x"
 
 
 def test_job_state_error() -> None:
-    from borgesica.domain.errors import JobStateError, BorgésicaError
+    from borgesica.domain.errors import JobStateError, BorgesicaError
 
     err = JobStateError(job_id="y", current_status="RUNNING")
-    assert isinstance(err, BorgésicaError)
+    assert isinstance(err, BorgesicaError)
     assert err.current_status == "RUNNING"
 
 
 def test_unsupported_format_error() -> None:
-    from borgesica.domain.errors import UnsupportedFormatError, BorgésicaError
+    from borgesica.domain.errors import UnsupportedFormatError, BorgesicaError
 
     err = UnsupportedFormatError(path="/tmp/x.doc", reason="unknown format")
-    assert isinstance(err, BorgésicaError)
+    assert isinstance(err, BorgesicaError)
     assert err.path == "/tmp/x.doc"
     assert err.reason == "unknown format"
 
 
 def test_provider_error() -> None:
-    from borgesica.domain.errors import ProviderError, BorgésicaError
+    from borgesica.domain.errors import ProviderError, BorgesicaError
 
     err = ProviderError(status_code=429)
-    assert isinstance(err, BorgésicaError)
+    assert isinstance(err, BorgesicaError)
     assert err.status_code == 429
 
 

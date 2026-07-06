@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from borgesica.api import TranslatorEngine
-from borgesica.domain.errors import BorgésicaError, JobNotFoundError, UnsupportedFormatError
+from borgesica.domain.errors import BorgesicaError, JobNotFoundError, UnsupportedFormatError
 from borgesica.domain.models import GlossaryEntry, JobConfig, Progress, SourceType
 
 # Map file extension → SourceType and back (extension → format detection).
@@ -284,7 +284,7 @@ def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
         _print_skip_summary(args, engine)
         return 0
-    except BorgésicaError as exc:
+    except BorgesicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
@@ -297,7 +297,7 @@ def _cmd_resume(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
         _print_skip_summary(args, engine)
         return 0
-    except BorgésicaError as exc:
+    except BorgesicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
