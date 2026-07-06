@@ -33,10 +33,13 @@ from borgesica.domain.ports import TranslationProvider
 if TYPE_CHECKING:
     from borgesica.domain.context import ContextManager
 
-# Estimated output tokens per chunk call when we don't have a real measurement.
-# This is a conservative default: translations are typically similar length to
-# the source, with some expansion for Spanish verbosity.
-_DEFAULT_OUTPUT_TOKENS_PER_CHUNK = 150
+# Dynamic system-prompt budget paid on EVERY call: rendered glossary (≤ 300)
+# + rolling summary (≤ 200). Mirrors ContextManager._build_dynamic_block.
+_DYNAMIC_BLOCK_BUDGET_TOKENS = 500
+
+# Output tokens BEYOND the translation itself: the provider returns the full
+# JSON envelope — summary_update (3-5 sentences) + glossary_additions + keys.
+_OUTPUT_ENVELOPE_TOKENS = 150
 
 # reflective mode runs 3 passes: translate (draft) + critique + revise
 _REFLECTIVE_PASSES = 3
@@ -67,7 +70,7 @@ class CostEstimator:
         job: Job,
         chunks: list[Chunk],
         config: JobConfig,
-        output_tokens_per_chunk: int = _DEFAULT_OUTPUT_TOKENS_PER_CHUNK,
+        output_tokens_per_chunk: int | None = None,
     ) -> CostEstimate:
         """Compute a CostEstimate covering only PENDING chunks.
 
@@ -76,7 +79,8 @@ class CostEstimator:
             chunks: All chunks for the job (DONE chunks are skipped).
             config: JobConfig (model, quality_mode, budget_usd).
             output_tokens_per_chunk: Override for estimated output token count
-                per provider call. Default is a conservative 150 tokens.
+                per provider call. Default (None) models the real JSON
+                envelope: source-sized translation + _OUTPUT_ENVELOPE_TOKENS.
                 Pass an explicit value in tests for deterministic arithmetic.
 
         Returns:
@@ -108,17 +112,28 @@ class CostEstimator:
 
         passes = _REFLECTIVE_PASSES if config.quality_mode == "reflective" else _FAST_PASSES
 
+        # Per-call input overhead: the system prompt (static block + glossary
+        # + summary) is sent on EVERY provider call. On thin chunks (SRT cue
+        # batches ≈ 176 tokens) this overhead DOMINATES the call cost —
+        # omitting it under-estimated a full-movie job 16x (job 0b86d4f2).
+        # Without a context_manager the static block is unknown; overhead
+        # stays 0 (backward compat, same contract as `cached`).
+        overhead_tokens = 0
+        if self._context_manager is not None:
+            overhead_tokens = token_count + _DYNAMIC_BLOCK_BUDGET_TOKENS
+
         total_input = 0
         total_output = 0
 
         for chunk in pending:
-            # Input tokens: approximate (system + user prompt).
-            # We use source_text as a proxy — the system prompt overhead is
-            # accounted for separately in a real call, but for a pre-run
-            # estimate the source text is the dominant variable factor.
             chunk_input = self._provider.count_tokens(chunk.source_text, config.model)
-            total_input += chunk_input * passes
-            total_output += output_tokens_per_chunk * passes
+            chunk_output = (
+                output_tokens_per_chunk
+                if output_tokens_per_chunk is not None
+                else chunk_input + _OUTPUT_ENVELOPE_TOKENS
+            )
+            total_input += (chunk_input + overhead_tokens) * passes
+            total_output += chunk_output * passes
 
         in_usd_per_mtok, out_usd_per_mtok = self._provider.price(config.model)
         usd = (

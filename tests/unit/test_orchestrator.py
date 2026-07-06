@@ -2193,6 +2193,36 @@ def test_nav_label_chunk_cost_projection_uses_single_pass_even_when_reflective()
     )
 
 
+def test_project_chunk_cost_includes_system_prompt_overhead():
+    """The budget-guard projection must include the per-call system prompt
+    (static block + dynamic budget) and the JSON-envelope output — not just
+    source tokens + a flat 150 (bug: 16x under-estimate on SRT chunks)."""
+    from borgesica.domain.cost import (
+        _DYNAMIC_BLOCK_BUDGET_TOKENS,
+        _OUTPUT_ENVELOPE_TOKENS,
+    )
+
+    orch, provider, _ = make_orchestrator()
+    config = make_config(quality_mode="fast")
+    chunk = Chunk(index=0, source_text="hello world", status=ChunkStatus.PENDING)
+
+    projection = orch._project_chunk_cost(chunk, config)
+
+    static_tokens = provider.count_tokens(
+        orch._ctx.get_static_block(config), config.model
+    )
+    src_tokens = 2  # "hello world" with the word-count fake
+    in_price, out_price = provider.price(config.model)
+    expected = (
+        (src_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS) / 1_000_000 * in_price
+        + (src_tokens + _OUTPUT_ENVELOPE_TOKENS) / 1_000_000 * out_price
+    )
+    assert projection == pytest.approx(expected, rel=1e-9), (
+        f"Projection {projection} must include system-prompt overhead "
+        f"(expected {expected})"
+    )
+
+
 def test_nav_label_chunk_fast_mode_unchanged_single_pass():
     """Regression: quality_mode='fast' job with a nav-label chunk → unchanged
     (still 1 pass — this path was already 1 pass; confirm the new branch

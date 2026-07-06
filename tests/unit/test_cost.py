@@ -258,6 +258,59 @@ def test_estimate_preserves_model_field():
 
 
 # ---------------------------------------------------------------------------
+# Per-call overhead calibration (bug: 16x under-estimate on SRT, job 0b86d4f2)
+# The estimator counted ONLY source-text tokens and a flat 150-token output.
+# Real calls pay the system prompt (static block + glossary + summary) on
+# EVERY call, and the output is the full JSON envelope (translation +
+# summary_update + glossary_additions). On thin SRT chunks that overhead
+# dominates: estimate $0.0025 vs real $0.0395.
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_includes_per_call_system_prompt_overhead():
+    """With a context_manager, input tokens include the system prompt
+    (static block + dynamic budget) once per chunk per pass — not just source."""
+    from borgesica.domain.context import ContextManager
+    from borgesica.domain.cost import _DYNAMIC_BLOCK_BUDGET_TOKENS, CostEstimator
+
+    provider = FakeTranslationProvider()
+    context_manager = ContextManager(provider=provider)
+    estimator = CostEstimator(provider=provider, context_manager=context_manager)
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=3)
+    # "hello world" = 2 tokens per chunk with the word-count fake
+    chunks = [make_chunk(i, text="hello world") for i in range(3)]
+
+    est = estimator.estimate(job, chunks, config)
+
+    static_tokens = provider.count_tokens(
+        context_manager.get_static_block(config), config.model
+    )
+    expected_input = 3 * (2 + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS)
+    assert est.input_tokens == expected_input, (
+        f"Expected {expected_input} input tokens (source + system prompt per "
+        f"call), got {est.input_tokens} — per-call overhead not counted"
+    )
+
+
+def test_estimate_default_output_scales_with_source():
+    """Default output per chunk = translation (≈ source size) + JSON envelope
+    (summary_update + glossary_additions), not a flat 150 tokens."""
+    from borgesica.domain.cost import _OUTPUT_ENVELOPE_TOKENS, CostEstimator
+
+    provider = FakeTranslationProvider()
+    estimator = CostEstimator(provider=provider)
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=1)
+
+    est_small = estimator.estimate(job, [make_chunk(0, text="hello world")], config)
+    est_large = estimator.estimate(job, [make_chunk(0, text="w " * 400)], config)
+
+    assert est_small.output_tokens == 2 + _OUTPUT_ENVELOPE_TOKENS
+    assert est_large.output_tokens == 400 + _OUTPUT_ENVELOPE_TOKENS
+
+
+# ---------------------------------------------------------------------------
 # W-2: CostEstimate.cached reflects static-block caching eligibility
 # ---------------------------------------------------------------------------
 

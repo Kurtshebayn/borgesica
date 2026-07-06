@@ -54,7 +54,11 @@ import threading
 from datetime import UTC, datetime
 
 from borgesica.domain.context import ContextManager
-from borgesica.domain.cost import CostEstimator
+from borgesica.domain.cost import (
+    _DYNAMIC_BLOCK_BUDGET_TOKENS,
+    _OUTPUT_ENVELOPE_TOKENS,
+    CostEstimator,
+)
 from borgesica.domain.errors import (
     BudgetExceeded,
     JobStateError,
@@ -382,8 +386,15 @@ class TranslationOrchestrator:
         TranslationResult.usage after each real call.  Do NOT remove this method;
         the budget guard requires it.
         """
-        input_tokens = self._provider.count_tokens(chunk.source_text, config.model)
-        output_tokens = 150  # conservative default (same as CostEstimator)
+        source_tokens = self._provider.count_tokens(chunk.source_text, config.model)
+        # Per-call system prompt (static block + glossary/summary budget) is
+        # paid on EVERY call — on thin SRT chunks it dominates the call cost.
+        static_tokens = self._provider.count_tokens(
+            self._ctx.get_static_block(config), config.model
+        )
+        input_tokens = source_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS
+        # Output = source-sized translation + JSON envelope (same as CostEstimator).
+        output_tokens = source_tokens + _OUTPUT_ENVELOPE_TOKENS
         # Nav-label chunks always single-pass, regardless of quality_mode (D3):
         # the critique/revise cycle yields no quality gain for short factual
         # nav labels, and the orchestrator must not over-project 3x budget for
