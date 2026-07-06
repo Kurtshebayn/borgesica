@@ -4,7 +4,8 @@ Implements the CheckpointStore Protocol using Python's stdlib sqlite3.
 Schema from design section 5:
   - jobs(id PK, source_type, source_path, target_lang, model, status,
          budget_usd, chunk_size, line_length, glossary_strategy, quality_mode,
-         total_chunks, completed_chunks, cost_usd, created_at, updated_at)
+         total_chunks, completed_chunks, cost_usd, created_at, updated_at,
+         prose_chunk_tokens, prose_segmentation, continue_on_error)
   - chunks(job_id, chunk_index, source_text, translated_text, status, meta_json,
            PRIMARY KEY(job_id, chunk_index))
   - glossary(job_id, term, translation, locked, note,
@@ -55,9 +56,20 @@ CREATE TABLE IF NOT EXISTS jobs (
     completed_chunks INTEGER NOT NULL DEFAULT 0,
     cost_usd        REAL NOT NULL DEFAULT 0.0,
     created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    prose_chunk_tokens INTEGER NOT NULL DEFAULT 800,
+    prose_segmentation TEXT NOT NULL DEFAULT 'batch',
+    continue_on_error INTEGER NOT NULL DEFAULT 1
 )
 """
+
+# Columns added after the initial release; existing databases are migrated
+# in-place via ALTER TABLE guarded by PRAGMA table_info.
+_JOBS_MIGRATIONS = {
+    "prose_chunk_tokens": "INTEGER NOT NULL DEFAULT 800",
+    "prose_segmentation": "TEXT NOT NULL DEFAULT 'batch'",
+    "continue_on_error": "INTEGER NOT NULL DEFAULT 1",
+}
 
 _CREATE_CHUNKS = """
 CREATE TABLE IF NOT EXISTS chunks (
@@ -156,6 +168,10 @@ class SQLiteCheckpointStore:
             conn.execute(_CREATE_CHUNKS)
             conn.execute(_CREATE_GLOSSARY)
             conn.execute(_CREATE_SUMMARIES)
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+            for column, ddl in _JOBS_MIGRATIONS.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
 
     def __del__(self) -> None:
         if self._mem_conn is not None:
@@ -199,11 +215,13 @@ class SQLiteCheckpointStore:
         INSERT INTO jobs (
             id, source_type, source_path, target_lang, model, status,
             budget_usd, chunk_size, line_length, glossary_strategy, quality_mode,
-            total_chunks, completed_chunks, cost_usd, created_at, updated_at
+            total_chunks, completed_chunks, cost_usd, created_at, updated_at,
+            prose_chunk_tokens, prose_segmentation, continue_on_error
         ) VALUES (
             :id, :source_type, :source_path, :target_lang, :model, :status,
             :budget_usd, :chunk_size, :line_length, :glossary_strategy, :quality_mode,
-            :total_chunks, :completed_chunks, :cost_usd, :created_at, :updated_at
+            :total_chunks, :completed_chunks, :cost_usd, :created_at, :updated_at,
+            :prose_chunk_tokens, :prose_segmentation, :continue_on_error
         )
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
@@ -230,6 +248,9 @@ class SQLiteCheckpointStore:
                 "cost_usd": job.cost_usd,
                 "created_at": _dt_to_iso(job.created_at),
                 "updated_at": _dt_to_iso(job.updated_at),
+                "prose_chunk_tokens": job.config.prose_chunk_tokens,
+                "prose_segmentation": job.config.prose_segmentation,
+                "continue_on_error": 1 if job.config.continue_on_error else 0,
             })
 
     def load_job(self, job_id: str) -> Job | None:
@@ -249,6 +270,9 @@ class SQLiteCheckpointStore:
             line_length=row["line_length"],
             glossary_strategy=row["glossary_strategy"],
             quality_mode=row["quality_mode"],
+            prose_chunk_tokens=row["prose_chunk_tokens"],
+            prose_segmentation=row["prose_segmentation"],
+            continue_on_error=bool(row["continue_on_error"]),
         )
         return Job(
             id=row["id"],
