@@ -14,9 +14,23 @@ Dependency rule: only stdlib + domain models + srt library allowed here.
 """
 from __future__ import annotations
 
+import re
+
 import srt
 
 from borgesica.domain.models import Chunk, ChunkStatus, JobConfig
+
+
+def _normalize_cue_text(content: str) -> str:
+    """Collapse blank lines inside a cue's content and trim the edges.
+
+    The srt parser can absorb trailing blank lines at EOF into the last
+    cue's content (e.g. 'Ahhh\\n\\n'). Downstream, SrtChunker joins cue
+    texts with '\\n\\n' as the segment delimiter — an internal blank line
+    makes segments outnumber cues, and that chunk can never pass segment
+    validation (it burns every retry on every run).
+    """
+    return re.sub(r"\n\s*\n", "\n", content).strip()
 
 
 def _td_to_srt_ts(td: object) -> str:
@@ -48,7 +62,7 @@ class SrtReader:
             chunks.append(
                 Chunk(
                     index=seq,
-                    source_text=subtitle.content,
+                    source_text=_normalize_cue_text(subtitle.content),
                     status=ChunkStatus.PENDING,
                     meta={
                         "cue_index": subtitle.index,

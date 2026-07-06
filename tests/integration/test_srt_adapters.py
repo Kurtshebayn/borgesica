@@ -73,6 +73,30 @@ class TestSrtReader:
         chunks = self.reader.read(str(FIXTURES / "simple.srt"), self.config)
         assert len(chunks) == 10
 
+    def test_cue_content_blank_lines_normalized(self):
+        """Blank lines inside a cue's content must be normalized away.
+
+        The srt parser absorbs trailing blank lines at EOF into the last
+        cue's content (e.g. 'Ahhh\\n\\n'). SrtChunker joins cue texts with
+        '\\n\\n', so an internal blank line makes segments outnumber cues and
+        the chunk can NEVER pass segment validation — it burns every retry
+        on every run (chunk 36 of jobs 0b86d4f2 / 80a1ad82, cue 913).
+        """
+        from borgesica.domain.chunking import SrtChunker
+
+        chunks = self.reader.read(str(FIXTURES / "trailing_blank.srt"), self.config)
+
+        # The last cue's raw content is 'Ahhh\n\n' — must come out clean.
+        assert chunks[-1].source_text == "Ahhh"
+        for c in chunks:
+            assert "\n\n" not in c.source_text
+
+        # Batch invariant: segments == cues by construction.
+        batched = SrtChunker().chunk(chunks, self.config)
+        for batch in batched:
+            segments = batch.source_text.split("\n\n")
+            assert len(segments) == len(batch.meta["cue_batches"])
+
 
 # ---------------------------------------------------------------------------
 # reflow() unit-level tests
