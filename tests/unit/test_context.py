@@ -295,3 +295,44 @@ def test_system_prompt_contains_tag_preservation_instruction():
     assert "word" in text or "palabra" in text or "move" in text or "wrap" in text, (
         "system prompt must mention tags moving with words"
     )
+
+
+# ---------------------------------------------------------------------------
+# Segmented output instructions (SRT vs prose static blocks)
+# ---------------------------------------------------------------------------
+
+
+def test_srt_static_block_describes_translations_array():
+    """For SRT jobs the task description must teach the SEGMENTED contract:
+    the 'translations' array, one string per segment, no merging/splitting."""
+    from borgesica.domain.context import ContextManager
+
+    cm = ContextManager(provider=FakeTranslationProvider())
+    static = cm.get_static_block(make_config(source_type=SourceType.SRT))
+
+    assert '"translations"' in static
+    assert "one" in static.lower() and "segment" in static.lower()
+    assert "merge" in static.lower()
+
+
+def test_prose_static_block_keeps_legacy_translation_contract():
+    """EPUB/PDF jobs keep the single-string 'translation' instruction and must
+    NOT mention the translations array."""
+    from borgesica.domain.context import ContextManager
+
+    cm = ContextManager(provider=FakeTranslationProvider())
+    static = cm.get_static_block(make_config(source_type=SourceType.EPUB))
+
+    assert '"translation"' in static
+    assert '"translations"' not in static
+
+
+def test_srt_static_block_still_cacheable_and_stable():
+    """The SRT static block must not vary per chunk (caching boundary):
+    two calls with the same config return the identical string."""
+    from borgesica.domain.context import ContextManager
+
+    cm = ContextManager(provider=FakeTranslationProvider())
+    config = make_config(source_type=SourceType.SRT)
+
+    assert cm.get_static_block(config) == cm.get_static_block(config)

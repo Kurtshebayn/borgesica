@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from borgesica.domain.models import Glossary, JobConfig, RollingSummary
+from borgesica.domain.models import Glossary, JobConfig, RollingSummary, SourceType
 from borgesica.domain.ports import TranslationProvider  # noqa: I001
 
 # ---------------------------------------------------------------------------
@@ -153,6 +153,53 @@ Rules for locked glossary terms (marked [LOCKED] below):
 reinterpretation."""
 
 
+_TASK_DESCRIPTION_SRT = """\
+## Task
+
+You are a professional literary translator. Your task is to translate the \
+provided subtitle segments from English to neutral, pan-Latin-American \
+Spanish (es-neutral).
+
+The source is a batch of subtitle segments separated by blank lines. Each \
+segment is one subtitle cue — often a mid-sentence fragment without \
+punctuation (speech-to-text timing, NOT a formatting error). Translate each \
+segment on its own, preserving the fragment boundaries exactly.
+
+Return your response as a valid JSON object with EXACTLY the following fields:
+  {
+    "translations": ["<segment 1 translated>", "<segment 2 translated>", ...],
+    "summary_update": "<3–5 sentence narrative summary of what happened or \
+was discussed in this chunk — REPLACES the prior summary, does NOT append>",
+    "glossary_additions": [
+      {"term": "<source term>", "translation": "<Spanish equivalent>", \
+"locked": false, "note": "<optional context>"}
+    ]
+  }
+
+Rules for translations:
+- Return EXACTLY one string per source segment, in the same order.
+- NEVER merge, split, or reorder segments — even when a sentence clearly \
+continues across segments, each fragment must stay its own array item.
+- Do not add or remove segments to "fix" the formatting; the segmentation \
+carries subtitle timing and is not negotiable.
+
+Rules for summary_update:
+- Write 3–5 sentences maximum.
+- Capture narrative arc, tone, setting, and any new characters.
+- This summary REPLACES the previous one — do NOT include prior context verbatim.
+- Keep it under 200 tokens.
+
+Rules for glossary_additions:
+- Add ONLY proper nouns, invented terms, or domain-specific vocabulary first \
+encountered in this chunk.
+- Do NOT add common Spanish vocabulary.
+- Leave the list empty ([]) if no new terms appear.
+
+Rules for locked glossary terms (marked [LOCKED] below):
+- You MUST use locked translations verbatim. They are NOT open to \
+reinterpretation."""
+
+
 # ---------------------------------------------------------------------------
 # ContextManager
 # ---------------------------------------------------------------------------
@@ -212,8 +259,16 @@ class ContextManager:
 
         The static block never changes for a given config, so it is the
         caching boundary for Anthropic prompt caching.
+
+        SRT jobs get the SEGMENTED task description (the "translations" array,
+        one string per cue); prose jobs keep the legacy single-string contract.
         """
-        parts = [_TASK_DESCRIPTION, _PHILOSOPHY, _INLINE_TAG_RULES]
+        task = (
+            _TASK_DESCRIPTION_SRT
+            if config.source_type == SourceType.SRT
+            else _TASK_DESCRIPTION
+        )
+        parts = [task, _PHILOSOPHY, _INLINE_TAG_RULES]
         if config.target_lang == "es-neutral":
             parts.append(_NEUTRAL_SPANISH)
         return "\n\n".join(parts)
