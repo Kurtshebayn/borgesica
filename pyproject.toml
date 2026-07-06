@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "borgesica"
 version = "0.1.0"
 description = "Translation engine for SRT, EPUB, and PDF files to neutral Spanish"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0,<3",
