@@ -1989,6 +1989,80 @@ def test_prose_guard_skips_figure_wrapped_img_zero_calls():
     assert result.cost_usd == 0.0
 
 
+# ===========================================================================
+# Guard miss on roman-numeral/page-number nodes (job 34d5d0a7, per-paragraph
+# mode, qwen3:14b): a front-matter node like "i ii iii 1 2 3" has alphabetic
+# characters (roman numerals), so the zero-alphabetic check never fired and
+# the fragment went to the LLM — small local models reply with meta-commentary
+# ("No hay narrativa ni diálogo en este fragmento...") that leaked into the
+# book as the "translation".
+#
+# Contract: chunks whose stripped text is ONLY digits, strict roman numerals,
+# and punctuation pass through verbatim (0 calls, $0). Real prose — including
+# single-word headings like "Prologue" — must still be translated.
+# ===========================================================================
+
+
+def test_prose_guard_skips_roman_numeral_page_list_zero_calls():
+    """A front-matter page-list chunk (roman numerals + arabic page numbers)
+    passes through verbatim with ZERO provider calls and zero cost."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [
+        Chunk(index=0, source_text="i ii iii iv v vi vii 1 2 3 4 5 6 7 8 9")
+    ]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 0
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == chunks[0].source_text
+    assert result.cost_usd == 0.0
+
+
+def test_prose_guard_skips_tagged_roman_numeral_node_zero_calls():
+    """The same page-list shape wrapped in markup (as EPUB readers serialize
+    it) must also pass through — tags are stripped before the prose check."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="<span>xiv</span> <span>xv</span> 210")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 0
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == chunks[0].source_text
+    assert result.cost_usd == 0.0
+
+
+def test_prose_guard_does_not_catch_single_word_heading():
+    """A single-word heading ('Prologue') is real prose — the provider IS
+    called (zero-false-positives contract of the guard)."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Prologue")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 1
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.DONE
+
+
 def test_prose_guard_does_not_catch_img_with_prose():
     """An <img> accompanied by real prose must NOT be skipped — the provider
     IS called (zero-false-positives contract of the guard)."""

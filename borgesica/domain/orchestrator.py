@@ -73,6 +73,7 @@ from borgesica.domain.markup import (
     validate_segments,
     validate_tags,
 )
+from borgesica.domain.prose import has_translatable_prose
 from borgesica.domain.models import (
     Chunk,
     ChunkStatus,
@@ -238,17 +239,18 @@ class TranslationOrchestrator:
                     raise BudgetExceeded(job_id=job.id, cost_so_far=running_cost)
 
             # Prose guard: chunks with no translatable prose (empty/whitespace-only
-            # after stripping ALL markup, or containing no alphabetic characters at
-            # all) pass through verbatim with ZERO provider calls and ZERO cost.
+            # after stripping ALL markup, or made only of digits, strict roman
+            # numerals, and punctuation — front-matter page lists like "i ii iii
+            # 1 2 3") pass through verbatim with ZERO provider calls and ZERO cost.
             # strip_all_tags (not strip) so void/unknown tags don't count as prose:
             # an <img> nested in a <p> serializes into source_text and its src/alt
             # letters used to defeat the guard — a real cover burned provider calls.
-            # This is deliberately conservative — no real prose has zero alphabetic
-            # characters, so this guard has zero false positives (never silently
-            # skips a translatable sentence). Applies identically regardless of
-            # continue_on_error.
+            # This is deliberately conservative — one prose token anywhere makes the
+            # chunk translatable, so this guard has zero false positives (never
+            # silently skips a translatable sentence). Applies identically
+            # regardless of continue_on_error.
             stripped_text = strip_all_tags(chunk.source_text)
-            if stripped_text.strip() == "" or not any(c.isalpha() for c in stripped_text):
+            if not has_translatable_prose(stripped_text):
                 passthrough_chunk = chunk.model_copy(
                     update={
                         "status": ChunkStatus.DONE,
