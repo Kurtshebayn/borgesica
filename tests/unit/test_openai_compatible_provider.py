@@ -641,3 +641,112 @@ class TestConfigurableAndDeepSeekPreset:
             _client=fake_client,
         )
         assert "openrouter.ai" in provider.base_url
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Segmented output (SRT cue arrays — segment_count contract)
+# ---------------------------------------------------------------------------
+
+_SEGMENTED_UNIT_DATA = {
+    "translations": ["Hola", "mundo", "cruel"],
+    "summary_update": "Tres segmentos.",
+    "glossary_additions": [],
+}
+
+_SEGMENTED_TOOL_CALL_RESPONSE = {
+    "id": "chatcmpl-seg",
+    "object": "chat.completion",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_seg",
+                        "type": "function",
+                        "function": {
+                            "name": "submit_translation",
+                            "arguments": json.dumps(_SEGMENTED_UNIT_DATA),
+                        },
+                    }
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+    ],
+}
+
+
+class TestSegmentedOutput:
+    def test_segment_count_sends_segmented_tool_schema(self):
+        """translate(..., segment_count=3) sends a tool schema demanding a
+        'translations' array of exactly 3 strings — no 'translation' string."""
+        provider, fake_client = _make_provider([_SEGMENTED_TOOL_CALL_RESPONSE])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "a\n\nb\n\nc", "deepseek-v4-flash", segment_count=3)
+
+        params = fake_client.call_log[0]["tools"][0]["function"]["parameters"]
+        props = params["properties"]
+        assert "translation" not in props
+        assert props["translations"]["minItems"] == 3
+        assert props["translations"]["maxItems"] == 3
+        assert "translations" in params["required"]
+
+    def test_segmented_tool_call_parses_translations_array(self):
+        """A segmented tool response yields unit.translations (and the derived join)."""
+        provider, _ = _make_provider([_SEGMENTED_TOOL_CALL_RESPONSE])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            result = provider.translate(
+                "system", "a\n\nb\n\nc", "deepseek-v4-flash", segment_count=3
+            )
+
+        assert result.unit.translations == ["Hola", "mundo", "cruel"]
+        assert result.unit.translation == "Hola\n\nmundo\n\ncruel"
+
+    def test_no_segment_count_sends_legacy_schema(self):
+        """Without segment_count the tool schema keeps the prose contract:
+        'translation' required, no 'translations' offered."""
+        provider, fake_client = _make_provider([_TOOL_CALL_RESPONSE])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello", "deepseek-v4-flash")
+
+        params = fake_client.call_log[0]["tools"][0]["function"]["parameters"]
+        assert "translations" not in params["properties"]
+        assert "translation" in params["required"]
+
+    def test_tier3_instruction_embeds_segmented_schema(self):
+        """When Tier-1/2 fall through, the Tier-3 prompt instruction must show
+        the SEGMENTED schema so weak models see the array contract."""
+        seg_tier3_response = {
+            "id": "chatcmpl-seg3",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(_SEGMENTED_UNIT_DATA),
+                        "tool_calls": None,
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        provider, fake_client = _make_provider(
+            [_NO_TOOL_CALL_RESPONSE, _EMPTY_CONTENT_RESPONSE, seg_tier3_response]
+        )
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            result = provider.translate(
+                "system", "a\n\nb\n\nc", "deepseek-v4-flash", segment_count=3
+            )
+
+        assert result.unit.translations == ["Hola", "mundo", "cruel"]
+        tier3_user = fake_client.call_log[2]["messages"][1]["content"]
+        assert '"minItems": 3' in tier3_user
+        assert '"translations"' in tier3_user

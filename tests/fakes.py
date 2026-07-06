@@ -42,18 +42,30 @@ class FakeTranslationProvider:
     canned_unit: TranslationUnit | None = None
     fail_on: set[int] = field(default_factory=set)
     call_log: list[tuple[str, str, str]] = field(default_factory=list)
+    segment_count_log: list[int | None] = field(default_factory=list)
 
     # --- TranslationProvider Protocol methods ---
 
-    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+    def translate(
+        self, system: str, user: str, model: str, segment_count: int | None = None
+    ) -> TranslationResult:
         call_index = len(self.call_log)
         self.call_log.append((system, user, model))
+        self.segment_count_log.append(segment_count)
 
         if call_index in self.fail_on:
             raise MalformedOutput(job_id="fake-job", chunk_index=call_index)
 
         if self.canned_unit is not None:
             unit = self.canned_unit
+        elif segment_count is not None:
+            # Segmented (SRT) contract: echo one translated string per source
+            # segment — a compliant model filling the translations array.
+            unit = TranslationUnit(
+                translations=[f"[translated] {seg}" for seg in user.split("\n\n")],
+                summary_update="Fake summary.",
+                glossary_additions=[],
+            )
         else:
             unit = TranslationUnit(
                 translation=f"[translated] {user}",

@@ -44,7 +44,12 @@ import anthropic
 from pydantic import ValidationError
 
 from borgesica.domain.errors import MalformedOutput, ProviderError
-from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
+from borgesica.domain.models import (
+    TranslationResult,
+    TranslationUnit,
+    Usage,
+    translation_tool_schema,
+)
 
 if TYPE_CHECKING:
     pass
@@ -91,17 +96,25 @@ _DEFAULT_PRICE: tuple[float, float] = (3.0, 15.0)
 
 # The tool definition sent to Anthropic for structured output.
 _TOOL_NAME = "submit_translation"
-_TRANSLATION_TOOL: list[dict[str, Any]] = [
-    {
-        "name": _TOOL_NAME,
-        "description": (
-            "Submit the structured translation result. "
-            "Use this tool to return the translation, a summary update, "
-            "and any new glossary terms discovered."
-        ),
-        "input_schema": TranslationUnit.model_json_schema(),
-    }
-]
+
+
+def _translation_tool(segment_count: int | None = None) -> list[dict[str, Any]]:
+    """Build the tool definition for the requested output shape.
+
+    Per-call (not module-level) because the segmented schema pins the
+    translations array length to the chunk's cue count.
+    """
+    return [
+        {
+            "name": _TOOL_NAME,
+            "description": (
+                "Submit the structured translation result. "
+                "Use this tool to return the translation, a summary update, "
+                "and any new glossary terms discovered."
+            ),
+            "input_schema": translation_tool_schema(segment_count),
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +148,14 @@ class AnthropicProvider:
 
     # --- TranslationProvider Protocol ---
 
-    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+    def translate(
+        self, system: str, user: str, model: str, segment_count: int | None = None
+    ) -> TranslationResult:
         """Return a TranslationResult with a validated TranslationUnit and real Usage.
+
+        segment_count: when given (SRT cue batches), the tool input_schema
+        requests the SEGMENTED shape — a translations array of exactly
+        segment_count strings — instead of the legacy single string.
 
         Strategy:
           1. Use tool-calling: request the model to call `submit_translation`.
@@ -165,7 +184,7 @@ class AnthropicProvider:
                     max_tokens=_MAX_OUTPUT_TOKENS,
                     system=system,
                     messages=[{"role": "user", "content": user}],
-                    tools=_TRANSLATION_TOOL,
+                    tools=_translation_tool(segment_count),
                     tool_choice={"type": "auto"},
                 )
                 # HTTP 200: this response WAS billed regardless of parse outcome.

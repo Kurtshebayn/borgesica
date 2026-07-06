@@ -464,7 +464,68 @@ class TestPrice:
 
 
 # ---------------------------------------------------------------------------
-# Test 8: Domain purity — anthropic import ONLY in adapters/providers/
+# Test 8: Segmented output (SRT cue arrays — segment_count contract)
+# ---------------------------------------------------------------------------
+
+
+def _segmented_tool_use_response() -> object:
+    """Fake Anthropic response whose tool_use input carries a translations array."""
+    content_block = MagicMock()
+    content_block.type = "tool_use"
+    content_block.input = {
+        "translations": ["Hola", "mundo"],
+        "summary_update": "Dos segmentos.",
+        "glossary_additions": [],
+    }
+    msg = MagicMock()
+    msg.content = [content_block]
+    msg.stop_reason = "tool_use"
+    return msg
+
+
+class TestSegmentedOutput:
+    def test_segment_count_sends_segmented_input_schema(self):
+        """translate(..., segment_count=2) sends an input_schema demanding a
+        'translations' array of exactly 2 strings — no 'translation' string."""
+        client = make_fake_client([_segmented_tool_use_response()])
+        provider = AnthropicProvider(client=client)
+
+        provider.translate("system", "a\n\nb", "claude-3-5-haiku-20241022", segment_count=2)
+
+        kwargs = client.messages.create.call_args.kwargs
+        schema = kwargs["tools"][0]["input_schema"]
+        props = schema["properties"]
+        assert "translation" not in props
+        assert props["translations"]["minItems"] == 2
+        assert props["translations"]["maxItems"] == 2
+        assert "translations" in schema["required"]
+
+    def test_segmented_tool_use_parses_translations_array(self):
+        client = make_fake_client([_segmented_tool_use_response()])
+        provider = AnthropicProvider(client=client)
+
+        result = provider.translate(
+            "system", "a\n\nb", "claude-3-5-haiku-20241022", segment_count=2
+        )
+
+        assert result.unit.translations == ["Hola", "mundo"]
+        assert result.unit.translation == "Hola\n\nmundo"
+
+    def test_no_segment_count_sends_legacy_schema(self):
+        """Without segment_count the input_schema keeps the prose contract."""
+        client = make_fake_client([_valid_tool_use_response()])
+        provider = AnthropicProvider(client=client)
+
+        provider.translate("system", "Hello", "claude-3-5-haiku-20241022")
+
+        kwargs = client.messages.create.call_args.kwargs
+        schema = kwargs["tools"][0]["input_schema"]
+        assert "translations" not in schema["properties"]
+        assert "translation" in schema["required"]
+
+
+# ---------------------------------------------------------------------------
+# Domain purity — anthropic import ONLY in adapters/providers/
 # (already covered by test_domain_purity.py from M1-2)
 # ---------------------------------------------------------------------------
 

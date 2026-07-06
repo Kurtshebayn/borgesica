@@ -58,12 +58,21 @@ class TranslationProvider(Protocol):
     The domain only sees this interface — never any SDK types.
     """
 
-    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+    def translate(
+        self, system: str, user: str, model: str, segment_count: int | None = None
+    ) -> TranslationResult:
         """Return a TranslationResult containing a VALID TranslationUnit and the
         real token Usage for this call.  Adapters MUST populate usage from the
         provider response — not an estimate.  Retries and structured-output
         fallback chains are the adapter's responsibility; each retry is a separate
-        call and may have its own Usage."""
+        call and may have its own Usage.
+
+        segment_count (SRT cue batches): when given, the adapter requests the
+        SEGMENTED output shape — TranslationUnit.translations as an array of
+        exactly segment_count strings (see translation_tool_schema).  When
+        None, the legacy single-string contract applies.  Callers only pass
+        the argument when set, so implementations that predate it keep
+        working for prose."""
         ...
 
     def count_tokens(self, text: str, model: str) -> int:

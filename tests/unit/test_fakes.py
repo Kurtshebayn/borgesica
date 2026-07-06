@@ -31,3 +31,28 @@ def test_save_chunk_is_idempotent() -> None:
     chunks = store.load_chunks("job-1")
     assert len(chunks) == 1
     assert chunks[0].translated_text == "Hola"
+
+
+def test_fake_provider_segment_count_returns_translations_array() -> None:
+    """With segment_count=N (SRT contract), the default echo fake returns a
+    per-segment translations array aligned with the source segments."""
+    fake = FakeTranslationProvider()
+
+    result = fake.translate("system", "cue one\n\ncue two\n\ncue three", "fake", segment_count=3)
+
+    assert result.unit.translations == [
+        "[translated] cue one",
+        "[translated] cue two",
+        "[translated] cue three",
+    ]
+    assert fake.segment_count_log == [3]
+
+
+def test_fake_provider_without_segment_count_keeps_string_echo() -> None:
+    fake = FakeTranslationProvider()
+
+    result = fake.translate("system", "plain prose", "fake")
+
+    assert result.unit.translations is None
+    assert result.unit.translation == "[translated] plain prose"
+    assert fake.segment_count_log == [None]

@@ -54,7 +54,12 @@ import openai
 from pydantic import ValidationError
 
 from borgesica.domain.errors import MalformedOutput, ProviderError
-from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
+from borgesica.domain.models import (
+    TranslationResult,
+    TranslationUnit,
+    Usage,
+    translation_tool_schema,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -76,20 +81,28 @@ _MAX_OUTPUT_TOKENS = 8192
 
 # Tool / function definition sent for Tier-1 structured output.
 _TOOL_NAME = "submit_translation"
-_TRANSLATION_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": _TOOL_NAME,
-            "description": (
-                "Submit the structured translation result. "
-                "Use this function to return the translation, a summary update, "
-                "and any new glossary terms discovered."
-            ),
-            "parameters": TranslationUnit.model_json_schema(),
-        },
-    }
-]
+
+
+def _translation_tools(segment_count: int | None = None) -> list[dict[str, Any]]:
+    """Build the Tier-1 tool definition for the requested output shape.
+
+    Per-call (not module-level) because the segmented schema pins the
+    translations array length to the chunk's cue count.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": _TOOL_NAME,
+                "description": (
+                    "Submit the structured translation result. "
+                    "Use this function to return the translation, a summary update, "
+                    "and any new glossary terms discovered."
+                ),
+                "parameters": translation_tool_schema(segment_count),
+            },
+        }
+    ]
 
 # Default price table — (input_usd_per_mtok, output_usd_per_mtok).
 # NOT used for billing; only for pre-flight cost estimates.
@@ -184,8 +197,15 @@ class OpenAICompatibleProvider:
     # TranslationProvider Protocol
     # ------------------------------------------------------------------
 
-    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+    def translate(
+        self, system: str, user: str, model: str, segment_count: int | None = None
+    ) -> TranslationResult:
         """Return a TranslationResult with a validated TranslationUnit and real Usage.
+
+        segment_count: when given (SRT cue batches), Tier-1 and Tier-3 request
+        the SEGMENTED schema — a translations array of exactly segment_count
+        strings.  Tier-2 (JSON mode) has no schema channel; it relies on the
+        system prompt's segment instructions.
 
         Tier-1 → Tier-2 → Tier-3 fallback chain.
         429 retries the SAME call (with Retry-After sleep) before falling through.
@@ -206,7 +226,8 @@ class OpenAICompatibleProvider:
 
         # ---- TIER-1: tool/function calling (with inline 429 retry) ----
         t1 = self._call_with_retry(
-            self._tier1_tool_call, system, user, model,
+            lambda s, u, m: self._tier1_tool_call(s, u, m, segment_count),
+            system, user, model,
             server_err_count_ref=[server_err_count],
             fall_through_on_client_error=True,
         )
@@ -243,7 +264,7 @@ class OpenAICompatibleProvider:
         # ---- TIER-3: prompt-and-parse fallback (up to MAX_TIER3_RETRIES calls) ----
         for attempt in range(MAX_TIER3_RETRIES):
             t3 = self._call_with_retry(
-                lambda s, u, m: self._tier3_prompt_parse(s, u, m, attempt),
+                lambda s, u, m: self._tier3_prompt_parse(s, u, m, attempt, segment_count),
                 system, user, model,
                 server_err_count_ref=[server_err_count],
             )
@@ -357,7 +378,7 @@ class OpenAICompatibleProvider:
             return Usage()
 
     def _tier1_tool_call(
-        self, system: str, user: str, model: str
+        self, system: str, user: str, model: str, segment_count: int | None = None
     ) -> tuple[TranslationUnit | None, Any]:
         """TIER-1: function/tool-calling.
 
@@ -373,7 +394,7 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            tools=_TRANSLATION_TOOLS,
+            tools=_translation_tools(segment_count),
             tool_choice="auto",
             max_tokens=_MAX_OUTPUT_TOKENS,
         )
@@ -430,7 +451,8 @@ class OpenAICompatibleProvider:
             return None, False, response
 
     def _tier3_prompt_parse(
-        self, system: str, user: str, model: str, attempt: int
+        self, system: str, user: str, model: str, attempt: int,
+        segment_count: int | None = None,
     ) -> tuple[TranslationUnit | None, Any]:
         """TIER-3: prompt-and-parse fallback.
 
@@ -442,7 +464,7 @@ class OpenAICompatibleProvider:
         """
         json_instruction = (
             "\n\nYou MUST respond ONLY with a valid JSON object matching this schema:\n"
-            f"{json.dumps(TranslationUnit.model_json_schema(), indent=2)}\n"
+            f"{json.dumps(translation_tool_schema(segment_count), indent=2)}\n"
             "Do NOT include any markdown fences or extra text."
         )
         if attempt > 0:
