@@ -400,3 +400,74 @@ def test_mixed_kind_batch_defensively_has_no_kind_key() -> None:
         f"Mixed-kind batch must NOT carry top-level 'kind' (only set when ALL nodes agree), "
         f"got {chunks[0].meta}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-paragraph segmentation mode (prose_segmentation="paragraph") — for small
+# local models that translate well but cannot follow multi-segment contracts.
+# One node → one chunk; alignment becomes structural, not model-dependent.
+# ---------------------------------------------------------------------------
+
+
+def test_paragraph_mode_emits_one_chunk_per_node() -> None:
+    """paragraph mode: 3 small nodes (same chapter) → 3 chunks, 1 prose_node each, order kept."""
+    from borgesica.domain.chunking import chunk_prose
+
+    provider = FakeTranslationProvider()
+    config = JobConfig(
+        source_type=SourceType.EPUB,
+        model="fake-model",
+        prose_chunk_tokens=800,
+        prose_segmentation="paragraph",
+    )
+
+    nodes = [
+        _make_node(0, _words(50, "aaa"), chapter_index=0, node_path="/p[0]"),
+        _make_node(1, _words(50, "bbb"), chapter_index=0, node_path="/p[1]"),
+        _make_node(2, _words(50, "ccc"), chapter_index=0, node_path="/p[2]"),
+    ]
+
+    chunks = chunk_prose(nodes, config, provider)
+
+    assert len(chunks) == 3, f"Expected 1 chunk per node, got {len(chunks)}"
+    for i, chunk in enumerate(chunks):
+        assert chunk.index == i
+        prose_nodes = chunk.meta["prose_nodes"]
+        assert len(prose_nodes) == 1, (
+            f"paragraph mode must map 1 node per chunk, chunk {i} has {len(prose_nodes)}"
+        )
+        assert prose_nodes[0]["node_path"] == f"/p[{i}]"
+        assert "\n\n" not in chunk.source_text
+
+
+def test_paragraph_mode_oversized_node_still_sentence_splits() -> None:
+    """paragraph mode: a node over budget keeps the existing sentence-split path."""
+    from borgesica.domain.chunking import chunk_prose
+
+    provider = FakeTranslationProvider()
+    config = JobConfig(
+        source_type=SourceType.EPUB,
+        model="fake-model",
+        prose_chunk_tokens=100,
+        prose_segmentation="paragraph",
+    )
+
+    # 30 sentences x 10 words = 300 tokens > 100 budget.
+    big_text = " ".join(
+        f"Sentence {i} has exactly ten words in it right here now." for i in range(30)
+    )
+    nodes = [_make_node(0, big_text, chapter_index=0, node_path="/p[0]")]
+
+    chunks = chunk_prose(nodes, config, provider)
+
+    assert len(chunks) >= 2, "Over-budget node must still split"
+    for chunk in chunks:
+        # Every piece keeps provenance to the single source node.
+        for ref in chunk.meta["prose_nodes"]:
+            assert ref["node_path"] == "/p[0]"
+
+
+def test_default_segmentation_is_batch() -> None:
+    """Default JobConfig keeps batch mode — existing providers see identical behavior."""
+    config = JobConfig(source_type=SourceType.EPUB, model="fake-model")
+    assert config.prose_segmentation == "batch"

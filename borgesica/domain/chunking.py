@@ -207,6 +207,11 @@ def chunk_prose(
             node_tokens = provider.count_tokens(text, model)
 
             if node_tokens <= budget:
+                if config.prose_segmentation == "paragraph":
+                    # One node → one chunk: alignment is guaranteed by structure,
+                    # so the model never has to preserve segment separators.
+                    _flush_batch([text], [node_ref])
+                    continue
                 # Happy path: node fits within budget.
                 if accumulated_tokens + node_tokens > budget and accumulated_texts:
                     # Flush current batch before starting a new one with this node.

@@ -154,6 +154,11 @@ class JobConfig(BaseModel):
     quality_mode: Literal["fast", "reflective"] = "fast"
     # EPUB/PDF prose token budget per chunk — distinct from chunk_size (SRT cue-batch control).
     prose_chunk_tokens: int = 800
+    # "batch" (default): accumulate nodes up to prose_chunk_tokens per chunk.
+    # "paragraph": one node per chunk — for small local models that translate
+    # well but cannot follow the multi-segment output contract; segment→node
+    # alignment becomes structural instead of model-dependent.
+    prose_segmentation: Literal["batch", "paragraph"] = "batch"
     # continue-on-error: when True (default), a chunk that exhausts all translation
     # attempts is persisted FAILED and the run CONTINUES; the job still finishes
     # DONE. When False (--strict), the prior contract holds: FAILED chunk pauses

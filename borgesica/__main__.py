@@ -244,6 +244,9 @@ def _cmd_create(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         budget_usd=getattr(args, "budget", None),
         quality_mode=getattr(args, "quality_mode", "fast"),  # type: ignore[arg-type]
         continue_on_error=not getattr(args, "strict", False),
+        prose_segmentation=(
+            "paragraph" if getattr(args, "per_paragraph", False) else "batch"
+        ),
     )
     job = engine.create_job(args.source_file, config)
     print(job.id)
@@ -401,6 +404,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Pause the job on the first FAILED chunk instead of continuing "
             "(restores the pre-continue-on-error contract)."
+        ),
+    )
+    p_create.add_argument(
+        "--per-paragraph",
+        action="store_true",
+        default=False,
+        dest="per_paragraph",
+        help=(
+            "One paragraph per translation call (EPUB/PDF only). Slower, but "
+            "segment alignment is guaranteed by structure — recommended for "
+            "small local models that cannot follow the multi-segment contract."
         ),
     )
 
