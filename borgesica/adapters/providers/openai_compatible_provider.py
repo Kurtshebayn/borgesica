@@ -28,6 +28,11 @@ Retry / resilience:
   - 429 (rate-limit): honor Retry-After header; exponential backoff + jitter.
   - 5xx (server error): exponential backoff + jitter, ≤ MAX_5XX_RETRIES attempts
     total, then ProviderError.
+  - 4xx on Tier-1/Tier-2: falls through to the next tier instead of raising.
+    Endpoints reject capabilities per model (e.g. Ollama returns 400 when the
+    model does not support tool-calling, or when JSON mode is unavailable);
+    that is a capability signal, not a fatal transport error. Tier-3 uses
+    plain chat completions, so a 4xx there IS fatal → ProviderError.
   - Malformed output falls through tiers; does NOT trigger the 5xx retry path.
 
 Dependency rule: `openai` imported ONLY here; domain never sees it.
@@ -203,6 +208,7 @@ class OpenAICompatibleProvider:
         t1 = self._call_with_retry(
             self._tier1_tool_call, system, user, model,
             server_err_count_ref=[server_err_count],
+            fall_through_on_client_error=True,
         )
         if isinstance(t1, _Propagate):
             server_err_count = t1.server_err_count
@@ -220,6 +226,7 @@ class OpenAICompatibleProvider:
         t2 = self._call_with_retry(
             self._tier2_json_mode, system, user, model,
             server_err_count_ref=[server_err_count],
+            fall_through_on_client_error=True,
         )
         if isinstance(t2, _Propagate):
             server_err_count = t2.server_err_count
@@ -261,8 +268,18 @@ class OpenAICompatibleProvider:
     # Internal call wrapper (429 + 5xx handling)
     # ------------------------------------------------------------------
 
-    def _call_with_retry(self, fn, system, user, model, server_err_count_ref):
+    def _call_with_retry(
+        self, fn, system, user, model, server_err_count_ref,
+        fall_through_on_client_error: bool = False,
+    ):
         """Call fn(system, user, model); handle 429 (sleep + retry once) and 5xx.
+
+        fall_through_on_client_error: when True, a 4xx response (other than 429)
+        returns _Propagate so the caller falls through to the next tier instead
+        of raising ProviderError. Tier-1/Tier-2 set this because endpoints
+        reject unsupported capabilities (tools / JSON mode) with a 400 that is
+        model-specific, not fatal. Tier-3 (plain chat) keeps the default: a 4xx
+        there means the request itself is broken.
 
         Returns:
           - The return value of fn on success.
@@ -290,6 +307,9 @@ class OpenAICompatibleProvider:
                     last_error = exc
                     if server_err_count >= MAX_5XX_RETRIES:
                         raise ProviderError(status_code=status) from exc
+                    return _Propagate(server_err_count=server_err_count, last_error=exc)
+                elif fall_through_on_client_error and status is not None and 400 <= status < 500:
+                    last_error = exc
                     return _Propagate(server_err_count=server_err_count, last_error=exc)
                 else:
                     raise ProviderError(status_code=status) from exc

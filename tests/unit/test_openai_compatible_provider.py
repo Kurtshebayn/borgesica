@@ -178,6 +178,8 @@ def _make_http_error(status_code: int, retry_after: int | None = None):
     import openai
     if status_code == 429:
         return openai.RateLimitError("rate limit", response=response, body=None)
+    if 400 <= status_code < 500:
+        return openai.BadRequestError("does not support tools", response=response, body=None)
     return openai.InternalServerError("server error", response=response, body=None)
 
 
@@ -332,6 +334,61 @@ class TestTier2EmptyContentFallsToTier3:
         assert result.unit.translation == "Hola mundo"
         # Tier-1 (1) + Tier-2 (1) + Tier-3 attempt 1 (1) = 3
         assert fake_client._call_index == 3
+
+
+# ---------------------------------------------------------------------------
+# Test 4a: 4xx on Tier-1/Tier-2 falls through to the next tier instead of
+# raising ProviderError.
+#
+# Regression test: Ollama returns HTTP 400 when the model does not support
+# tool-calling (e.g. Tower-Plus-9B GGUF). The old behaviour raised
+# ProviderError immediately, killing the whole fallback chain — the chunk was
+# skipped and the output shipped UNTRANSLATED. A 4xx on Tier-1/Tier-2 is a
+# capability signal, not a fatal transport error.
+# ---------------------------------------------------------------------------
+
+
+class TestClientErrorFallsThrough:
+    def test_tier1_400_falls_through_to_tier2(self):
+        """Tier-1 raises 400 (no tool support) → Tier-2 JSON mode succeeds, 2 calls."""
+        provider, fake_client = _make_provider([
+            _make_http_error(400),     # Tier-1: endpoint rejects tools
+            _JSON_MODE_RESPONSE,       # Tier-2: JSON mode content
+        ])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            result = provider.translate("system", "Hello world", "tower-plus-9b")
+
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation == "Hola mundo"
+        assert fake_client._call_index == 2
+
+    def test_tier1_and_tier2_400_fall_through_to_tier3(self):
+        """400 on both Tier-1 and Tier-2 → Tier-3 prompt-and-parse succeeds, 3 calls."""
+        provider, fake_client = _make_provider([
+            _make_http_error(400),        # Tier-1: endpoint rejects tools
+            _make_http_error(400),        # Tier-2: endpoint rejects JSON mode
+            _TIER3_VALID_JSON_RESPONSE,   # Tier-3: valid JSON in content
+        ])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            result = provider.translate("system", "Hello world", "tower-plus-9b")
+
+        assert isinstance(result, TranslationResult)
+        assert result.unit.translation == "Hola mundo"
+        assert fake_client._call_index == 3
+
+    def test_tier3_400_still_raises_provider_error(self):
+        """A 4xx on Tier-3 (plain chat) means the request itself is broken → ProviderError."""
+        provider, _ = _make_provider([
+            _make_http_error(400),  # Tier-1
+            _make_http_error(400),  # Tier-2
+            _make_http_error(400),  # Tier-3: plain chat rejected → fatal
+        ])
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            with pytest.raises(ProviderError):
+                provider.translate("system", "Hello world", "tower-plus-9b")
 
 
 # ---------------------------------------------------------------------------
