@@ -36,6 +36,14 @@ Environment (per provider; only the selected provider's key is required):
     DEEPSEEK_API_KEY   — for --provider deepseek
     OLLAMA_HOST        — for --provider ollama (optional; defaults to localhost:11434)
     BORGESICA_PROVIDER — optional; sets the default provider when --provider is omitted
+
+API key from stdin (--key-stdin):
+    Instead of an environment variable, pass --key-stdin on any provider command
+    to read the selected provider's key from a single newline-delimited JSON line
+    on stdin: {"api_key": "..."}. This is how the desktop app hands the key (read
+    from the OS keyring) to this subprocess — the secret never touches argv (which
+    is world-readable via ps/Task Manager) or a persisted env var. Only the key
+    travels this channel; the subcommand, job_id, provider and model stay on argv.
 """
 from __future__ import annotations
 
@@ -116,11 +124,54 @@ def _require_env(var: str, provider: str) -> str:
     return value
 
 
-def _build_provider(provider: str) -> Any:
+def _read_key_from_stdin(provider: str) -> str:
+    """Read the provider API key from a single JSON init line on stdin.
+
+    The desktop shell (Tauri/Rust) reads the key from the OS keyring and writes
+    one newline-delimited JSON message — {"api_key": "..."} — to this
+    subprocess's stdin. Keeping the key off argv (visible via ps/Task Manager to
+    any process) and out of a persisted env var is the whole point: only the
+    SECRET travels this channel. Newline-delimited JSON is the forward-compatible
+    framing for any richer init message added later.
+
+    Exits(1) with a clear message if the line is missing, malformed, or has no
+    non-empty api_key — same failure contract as _require_env.
+    """
+    line = sys.stdin.readline()
+    key: str | None = None
+    try:
+        message = json.loads(line)
+        if isinstance(message, dict):
+            raw = message.get("api_key")
+            key = raw if isinstance(raw, str) and raw else None
+    except json.JSONDecodeError:
+        key = None
+    if not key:
+        print(
+            'ERROR: --key-stdin expects an init line {"api_key": "..."} on stdin '
+            f"(required for --provider {provider}).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return key
+
+
+def _resolve_key(var: str, provider: str, *, key_stdin: bool) -> str:
+    """Resolve the provider API key from stdin (desktop app) or the environment (CLI)."""
+    if key_stdin:
+        return _read_key_from_stdin(provider)
+    return _require_env(var, provider)
+
+
+def _build_provider(provider: str, *, key_stdin: bool = False) -> Any:
     """Instantiate a TranslationProvider by name.
 
     Supported: 'anthropic' (ANTHROPIC_API_KEY), 'deepseek' (DEEPSEEK_API_KEY),
     'ollama' (local; OLLAMA_HOST optional, no key needed).
+
+    key_stdin: when True, the provider's API key is read from a JSON init line
+    on stdin (desktop-app mode) instead of the environment. ollama needs no key,
+    so the flag is inert there.
 
     Raises:
         SystemExit: if an unknown provider is given or a required key is missing.
@@ -129,13 +180,15 @@ def _build_provider(provider: str) -> Any:
     if name == "anthropic":
         from borgesica.adapters.providers.anthropic_provider import AnthropicProvider
 
-        return AnthropicProvider(api_key=_require_env("ANTHROPIC_API_KEY", "anthropic"))
+        return AnthropicProvider(
+            api_key=_resolve_key("ANTHROPIC_API_KEY", "anthropic", key_stdin=key_stdin)
+        )
     if name == "deepseek":
         from borgesica.adapters.providers.openai_compatible_provider import (
             OpenAICompatibleProvider,
         )
 
-        key = _require_env("DEEPSEEK_API_KEY", "deepseek")
+        key = _resolve_key("DEEPSEEK_API_KEY", "deepseek", key_stdin=key_stdin)
         return OpenAICompatibleProvider.deepseek(api_key=key)
     if name == "ollama":
         from borgesica.adapters.providers.ollama_provider import OllamaProvider
@@ -149,7 +202,7 @@ def _build_provider(provider: str) -> Any:
 
 
 def _build_engine(
-    *, provider: str = "anthropic", model: str = "", db_path: str = ""
+    *, provider: str = "anthropic", model: str = "", db_path: str = "", key_stdin: bool = False
 ) -> TranslatorEngine:
     """Construct a TranslatorEngine wired with real adapters for all formats.
 
@@ -165,7 +218,7 @@ def _build_engine(
     Raises:
         SystemExit: if the selected provider's API key env var is not set.
     """
-    translation_provider = _build_provider(provider)
+    translation_provider = _build_provider(provider, key_stdin=key_stdin)
 
     # Lazy imports — keep CLI startup fast and avoid dependency errors
     # for people who only use the test helpers.
@@ -379,6 +432,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def _add_provider(p: argparse.ArgumentParser) -> None:
         p.add_argument("--provider", choices=provider_choices, default=None, help=provider_help)
+        p.add_argument(
+            "--key-stdin",
+            action="store_true",
+            default=False,
+            dest="key_stdin",
+            help=(
+                'Read the provider API key from a JSON init line {"api_key": "..."} '
+                "on stdin instead of the environment. Used by the desktop app to keep "
+                "the key out of argv and env vars."
+            ),
+        )
 
     # create
     p_create = sub.add_parser(
@@ -509,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
     engine = _build_engine(
         provider=getattr(args, "provider", None) or _default_provider(),
         model=getattr(args, "model", ""),
+        key_stdin=getattr(args, "key_stdin", False),
     )
 
     dispatch: dict[str, Any] = {

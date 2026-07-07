@@ -383,3 +383,101 @@ def test_cmd_status_no_failed_chunk_line_when_none(capsys: pytest.CaptureFixture
     assert code == 0
     assert out.strip() == "{}"
     assert "Failed chunks" not in out
+
+
+# ---------------------------------------------------------------------------
+# API key from stdin (priority #1: public desktop app).
+# The desktop shell (Tauri/Rust) reads the key from the OS keyring and hands it
+# to this subprocess as a single JSON init line on stdin — never on argv (visible
+# in ps) nor a persisted env var. Only the SECRET moves to stdin; the subcommand,
+# job_id, provider and model stay on argv. Framing is newline-delimited JSON.
+# ---------------------------------------------------------------------------
+
+
+def test_read_key_from_stdin_returns_api_key() -> None:
+    """_read_key_from_stdin parses {"api_key": "..."} from a single stdin line."""
+    import io
+
+    from borgesica.__main__ import _read_key_from_stdin
+
+    with patch("sys.stdin", io.StringIO('{"api_key": "sk-from-stdin"}\n')):
+        assert _read_key_from_stdin("anthropic") == "sk-from-stdin"
+
+
+def test_read_key_from_stdin_missing_key_exits() -> None:
+    """A JSON line without api_key exits(1) — the shell must supply the key."""
+    import io
+
+    from borgesica.__main__ import _read_key_from_stdin
+
+    with patch("sys.stdin", io.StringIO("{}\n")):
+        with pytest.raises(SystemExit) as exc:
+            _read_key_from_stdin("anthropic")
+    assert exc.value.code == 1
+
+
+def test_read_key_from_stdin_malformed_json_exits() -> None:
+    """Non-JSON on stdin exits(1) rather than passing garbage as a key."""
+    import io
+
+    from borgesica.__main__ import _read_key_from_stdin
+
+    with patch("sys.stdin", io.StringIO("not json at all\n")):
+        with pytest.raises(SystemExit) as exc:
+            _read_key_from_stdin("anthropic")
+    assert exc.value.code == 1
+
+
+def test_build_engine_key_stdin_bypasses_env() -> None:
+    """With key_stdin=True the key comes from stdin — a missing env var must
+    NOT abort (the whole point: no env dependency in the desktop app)."""
+    import io
+    import os
+
+    from borgesica.__main__ import _build_engine
+    from borgesica.api import TranslatorEngine
+
+    env_without_key = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    with patch.dict(os.environ, env_without_key, clear=True):
+        with patch("sys.stdin", io.StringIO('{"api_key": "sk-stdin"}\n')):
+            engine = _build_engine(
+                provider="anthropic", model="claude-haiku-4-5", db_path=":memory:", key_stdin=True
+            )
+    assert isinstance(engine, TranslatorEngine)
+
+
+def test_build_engine_deepseek_key_stdin_bypasses_env() -> None:
+    """key_stdin path works for deepseek too (OpenAI-compatible provider)."""
+    import io
+    import os
+
+    from borgesica.__main__ import _build_engine
+    from borgesica.api import TranslatorEngine
+
+    env = {k: v for k, v in os.environ.items() if k != "DEEPSEEK_API_KEY"}
+    with patch.dict(os.environ, env, clear=True):
+        with patch("sys.stdin", io.StringIO('{"api_key": "sk-ds-stdin"}\n')):
+            engine = _build_engine(
+                provider="deepseek", model="deepseek-v4-flash", db_path=":memory:", key_stdin=True
+            )
+    assert isinstance(engine, TranslatorEngine)
+
+
+def test_run_command_accepts_key_stdin_flag() -> None:
+    """The --key-stdin flag is wired on provider commands and threaded into
+    _build_engine as key_stdin=True."""
+    import io
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.run_job.return_value = MagicMock(status="DONE", cost_usd=0.0)
+        engine.failed_chunk_indices.return_value = []
+        engine.status.return_value = MagicMock(config=MagicMock(source_type=None))
+        mock_build.return_value = engine
+        with patch("sys.stdin", io.StringIO('{"api_key": "sk-x"}\n')):
+            main(["run", "job-1", "--out", "out.srt", "--provider", "anthropic", "--key-stdin"])
+
+    assert mock_build.call_args.kwargs.get("key_stdin") is True
