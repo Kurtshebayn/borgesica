@@ -131,11 +131,18 @@ class AnthropicProvider:
         max_retries: Number of retry attempts on transient errors.
     """
 
+    # Retry-waste ceiling factor (consumed by the cost estimator / budget guard):
+    # Anthropic's native tool-calling enforces the schema at the API level and
+    # rarely falls through to the text-JSON fallback, so its real cost stays
+    # close to the happy-path estimate — a modest ceiling.
+    retry_waste_factor: float = 1.5
+
     def __init__(
         self,
         api_key: str | None = None,
         client: Any | None = None,
         max_retries: int = MAX_RETRIES,
+        price_table: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         if client is not None:
             self._client = client
@@ -145,6 +152,11 @@ class AnthropicProvider:
             # Reads ANTHROPIC_API_KEY from environment
             self._client = anthropic.Anthropic()
         self._max_retries = max_retries
+        # Published prices go stale; let callers override/extend the built-in
+        # table (used ONLY for pre-flight estimates, never for billing).
+        self._price_table = dict(_PRICE_TABLE)
+        if price_table:
+            self._price_table.update(price_table)
 
     # --- TranslationProvider Protocol ---
 
@@ -241,7 +253,7 @@ class AnthropicProvider:
 
         Falls back to (3.0, 15.0) for unknown models.
         """
-        return _PRICE_TABLE.get(model, _DEFAULT_PRICE)
+        return self._price_table.get(model, _DEFAULT_PRICE)
 
     # --- Internal helpers ---
 
