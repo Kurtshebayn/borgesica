@@ -131,6 +131,15 @@ class OpenAICompatibleProvider:
         _client:       Injectable transport for testing (replaces the real openai.OpenAI).
     """
 
+    # Retry-waste ceiling factor (consumed by the cost estimator / budget guard):
+    # OpenAI-compatible endpoints fall through tier-1 tool → tier-2 JSON → tier-3,
+    # and each tier that returns HTTP 200 is billed while re-sending the full
+    # prompt. On the segmented SRT schema this fallthrough is common, so real
+    # cost runs ~3x the happy-path estimate (job 0b86d4f2: est $0.012 vs real
+    # $0.0395) — a heavy ceiling. Subclasses (Ollama) inherit it; local models
+    # are free, so the factor is inert there.
+    retry_waste_factor: float = 3.0
+
     def __init__(
         self,
         base_url: str,

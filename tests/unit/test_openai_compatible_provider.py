@@ -587,6 +587,13 @@ class TestPriceAndCountTokens:
         assert isinstance(result, tuple)
         assert len(result) == 2
 
+    def test_declares_heavy_retry_waste_factor(self):
+        """OpenAI-compatible endpoints fall through tier-1 tool → tier-2 JSON →
+        tier-3 (each billed), so the retry-waste ceiling factor is heavy (≥ 3x).
+        Real DeepSeek SRT runs cost ~3x the happy-path estimate (job 0b86d4f2)."""
+        provider, _ = _make_provider([], price_table={})
+        assert provider.retry_waste_factor >= 3.0
+
     def test_count_tokens_returns_non_negative_int(self):
         """count_tokens returns a non-negative int."""
         provider, _ = _make_provider([])

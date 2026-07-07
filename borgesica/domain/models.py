@@ -205,10 +205,25 @@ class TranslationResult(BaseModel):
 class CostEstimate(BaseModel):
     input_tokens: int
     output_tokens: int
-    usd: float
+    usd: float  # backward-compat point estimate; equals usd_low (happy path).
+    # Cost is a RANGE, not a point: usd_low is the best case (1 billed provider
+    # call per chunk), usd_high folds in the retry / structured-output tier
+    # fallthrough waste that no static token math can predict (provider-declared
+    # factor). The budget guard protects against usd_high, the ceiling.
+    usd_low: float | None = None
+    usd_high: float | None = None
     model: str
     cached: bool = False
     within_budget: bool = True
+
+    @model_validator(mode="after")
+    def _default_range_to_point(self) -> "CostEstimate":
+        """A bare point estimate is a degenerate range: low = high = usd."""
+        if self.usd_low is None:
+            self.usd_low = self.usd
+        if self.usd_high is None:
+            self.usd_high = self.usd
+        return self
 
 
 class JobConfig(BaseModel):

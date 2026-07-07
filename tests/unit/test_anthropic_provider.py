@@ -462,6 +462,30 @@ class TestPrice:
         provider = AnthropicProvider(api_key="fake-key")
         assert provider.price("claude-opus-4-8") == (5.00, 25.00)
 
+    def test_price_table_is_user_overridable(self):
+        """A caller can inject a price_table to override/extend the built-in
+        one — pricing goes stale, so it must not be hardcoded-only."""
+        provider = AnthropicProvider(
+            api_key="fake-key",
+            price_table={"claude-opus-4-8": (7.5, 30.0), "future-model": (2.0, 8.0)},
+        )
+        assert provider.price("claude-opus-4-8") == (7.5, 30.0)
+        assert provider.price("future-model") == (2.0, 8.0)
+
+    def test_price_table_defaults_to_builtin_when_not_injected(self):
+        """No override → the built-in table still applies (backward compat)."""
+        provider = AnthropicProvider(api_key="fake-key")
+        assert provider.price("claude-haiku-4-5-20251001") == (1.00, 5.00)
+
+
+class TestRetryWasteFactor:
+    def test_anthropic_declares_a_modest_waste_factor(self):
+        """Anthropic's native tool-calling rarely falls through, so its
+        retry-waste ceiling factor is modest (< the OpenAI-compatible default)."""
+        provider = AnthropicProvider(api_key="fake-key")
+        assert provider.retry_waste_factor < 3.0
+        assert provider.retry_waste_factor >= 1.0
+
 
 # ---------------------------------------------------------------------------
 # Test 8: Segmented output (SRT cue arrays — segment_count contract)
