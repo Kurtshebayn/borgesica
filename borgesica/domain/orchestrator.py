@@ -50,6 +50,7 @@ Resume semantics:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from datetime import UTC, datetime
 
@@ -121,6 +122,33 @@ Return a JSON object:
     "summary_update": "<3-5 sentence narrative summary — REPLACES prior summary>",
     "glossary_additions": []
   }"""
+
+# Appended to the system prompt for SRT cue-batch chunks (segmented contract).
+# The exact count is stated per chunk because "one per segment" alone is what
+# models silently violate on unpunctuated speech-to-text fragments.
+_SEGMENT_SYSTEM_INSTRUCTION = """\
+[SEGMENTS]
+This chunk contains exactly {n} subtitle segments separated by blank lines. \
+Fill the "translations" array with EXACTLY {n} strings — one per source \
+segment, in order. Never merge, split, or reorder segments; a segment that \
+ends mid-sentence must stay mid-sentence."""
+
+
+def _segmented_text(
+    unit: TranslationUnit, fallback_text: str, segment_count: int
+) -> str:
+    """Join an aligned translations array into the "\\n\\n" checkpoint format.
+
+    Blank lines INSIDE one segment are collapsed to a single newline — they
+    would desynchronize the writer's positional split. A missing or misaligned
+    array falls back to the legacy string so the existing segment validation
+    drives the retry / best-effort flow.
+    """
+    if unit.translations is not None and len(unit.translations) == segment_count:
+        return "\n\n".join(
+            re.sub(r"\n\s*\n", "\n", seg.strip()) for seg in unit.translations
+        )
+    return fallback_text
 
 
 class TranslationOrchestrator:
@@ -453,6 +481,23 @@ class TranslationOrchestrator:
         user_prompt = chunk.source_text  # PRIMARY: send WITH tags
         total_call_cost = 0.0
 
+        # Segmented (SRT) contract: cue-batch chunks request the translations
+        # ARRAY — cue boundaries as structured data, not blank-line convention
+        # (models "correct" blank lines between unpunctuated speech-to-text
+        # fragments; they fill a fixed-length array reliably).
+        cue_batches = chunk.meta.get("cue_batches")
+        segment_count = len(cue_batches) if cue_batches else None
+        if segment_count is not None:
+            system = (
+                f"{system}\n\n"
+                + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count)
+            )
+        # Passed as **kwargs so providers (and test fakes) that predate
+        # segment_count keep working on the prose path.
+        segment_kwargs = (
+            {} if segment_count is None else {"segment_count": segment_count}
+        )
+
         # Nav-label chunks always single-pass, regardless of quality_mode (D3):
         # short factual nav labels gain nothing from critique/revise, and the
         # orchestrator has no other per-chunk-kind branch — this is the ONLY one.
@@ -472,6 +517,7 @@ class TranslationOrchestrator:
                         config=config,
                         in_price=in_price,
                         out_price=out_price,
+                        segment_count=segment_count,
                     )
                     total_call_cost += call_cost
                 else:
@@ -479,6 +525,7 @@ class TranslationOrchestrator:
                         system=system,
                         user=user_prompt,
                         model=config.model,
+                        **segment_kwargs,
                     )
                     unit = result.unit
                     translated_text = result.unit.translation
@@ -494,6 +541,13 @@ class TranslationOrchestrator:
                 # the true spend of failed chunks (previously charged $0).
                 total_call_cost += self._usage_cost(exc.usage, in_price, out_price)
                 continue
+
+            # Segmented contract: an aligned translations array becomes the
+            # canonical "\n\n" join (validate_segments then passes by
+            # construction); anything else keeps the legacy string so the
+            # existing mismatch retry / best-effort flow applies.
+            if segment_count is not None:
+                translated_text = _segmented_text(unit, translated_text, segment_count)
 
             # Validate tag counts in the raw translation (tags-in-text path).
             if validate_tags(chunk.source_text, translated_text):
@@ -556,6 +610,7 @@ class TranslationOrchestrator:
         config: JobConfig,
         in_price: float,
         out_price: float,
+        segment_count: int | None = None,
     ) -> tuple[TranslationUnit, str, float]:
         """Execute the translate → critique → revise loop.
 
@@ -574,8 +629,17 @@ class TranslationOrchestrator:
         """
         total_cost = 0.0
 
+        # Segmented (SRT) contract applies to the DRAFT and REVISE calls — the
+        # calls whose output is a translation. The CRITIQUE call returns notes,
+        # not a translation, so it keeps the plain single-string contract.
+        segment_kwargs = (
+            {} if segment_count is None else {"segment_count": segment_count}
+        )
+
         # Step 1: Draft translation (user prompt has tags)
-        draft_result = self._provider.translate(system=system, user=user, model=config.model)
+        draft_result = self._provider.translate(
+            system=system, user=user, model=config.model, **segment_kwargs
+        )
         total_cost += self._usage_cost(draft_result.usage, in_price, out_price)
         draft_unit = draft_result.unit
         draft_text = draft_unit.translation
@@ -601,10 +665,17 @@ class TranslationOrchestrator:
             f"Critique:\n{critique_text}\n\n"
             "Please produce a revised translation."
         )
+        revise_system = _REVISE_SYSTEM
+        if segment_count is not None:
+            revise_system = (
+                f"{_REVISE_SYSTEM}\n\n"
+                + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count)
+            )
         revised_result = self._provider.translate(
-            system=_REVISE_SYSTEM,
+            system=revise_system,
             user=revise_prompt,
             model=config.model,
+            **segment_kwargs,
         )
         total_cost += self._usage_cost(revised_result.usage, in_price, out_price)
         revised_unit = revised_result.unit

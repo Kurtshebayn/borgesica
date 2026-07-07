@@ -2239,3 +2239,243 @@ def test_nav_label_chunk_fast_mode_unchanged_single_pass():
     assert provider.call_count == 1, (
         f"Expected exactly 1 call for a nav-label chunk under fast mode, got {provider.call_count}"
     )
+
+
+# ===========================================================================
+# 22. SRT segmented contract: chunks with meta["cue_batches"] request the
+#     translations ARRAY (segment_count=N) instead of the "\n\n" convention.
+#
+# Root fix for jobs 0b86d4f2 / 80a1ad82 (Backrooms, DeepSeek): on
+# unpunctuated speech-to-text fragments the model "corrects" blank-line
+# separators and regroups 25 cues into 5 (or 1) semantic paragraphs; retries
+# never help because that is trained instinct about well-formed text. An
+# array of exactly N strings is structural — models fill arrays reliably.
+# ===========================================================================
+
+
+def make_srt_chunk(cue_texts: list[str], index: int = 0) -> Chunk:
+    """Build a batch Chunk exactly as SrtChunker produces it."""
+    return Chunk(
+        index=index,
+        source_text="\n\n".join(cue_texts),
+        meta={
+            "cue_batches": [
+                {
+                    "cue_index": i + 1,
+                    "start": "00:00:01,000",
+                    "end": "00:00:02,000",
+                    "text": t,
+                }
+                for i, t in enumerate(cue_texts)
+            ],
+            "line_length": 42,
+        },
+    )
+
+
+def test_srt_chunk_passes_segment_count_and_joins_array():
+    """An SRT batch of 3 cues requests segment_count=3; the compliant array
+    is joined with "\n\n" for the checkpoint (writer contract unchanged)."""
+    store = InMemoryCheckpointStore()
+    orch, provider, _ = make_orchestrator(store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    cues = ["and then we went", "down the hallway that", "never seems to end"]
+    chunks = [make_srt_chunk(cues)]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.segment_count_log == [3]
+    assert provider.call_count == 1
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "\n\n".join(f"[translated] {c}" for c in cues)
+    assert result.status == JobStatus.DONE
+
+
+def test_srt_system_prompt_declares_segment_count():
+    """The per-chunk system prompt must state the exact segment count."""
+    store = InMemoryCheckpointStore()
+    orch, provider, _ = make_orchestrator(store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["one", "two", "three", "four"])]
+
+    run_job(orch, job, chunks, store=store)
+
+    system_sent = provider.call_log[0][0]
+    assert "exactly 4" in system_sent
+    assert "translations" in system_sent
+
+
+def test_prose_chunk_does_not_pass_segment_count():
+    """Chunks without cue_batches keep the legacy call — segment_count None."""
+    store = InMemoryCheckpointStore()
+    orch, provider, _ = make_orchestrator(store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Plain prose paragraph.")]
+
+    run_job(orch, job, chunks, store=store)
+
+    assert provider.segment_count_log == [None]
+
+
+def test_srt_array_segment_internal_blank_lines_normalized():
+    """A blank line INSIDE one array item would desynchronize the writer's
+    "\n\n" arithmetic — it must be collapsed to a single newline on join."""
+    store = InMemoryCheckpointStore()
+
+    class BlankLineInsideSegmentProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            unit = TranslationUnit(
+                translations=["primera\n\n\nlínea", "segunda"],
+                summary_update="Summary.",
+            )
+            return TranslationResult(unit=unit, usage=Usage())
+
+    provider = BlankLineInsideSegmentProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["cue a", "cue b"])]
+
+    run_job(orch, job, chunks, store=store)
+
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "primera\nlínea\n\nsegunda"
+    assert len(saved[0].translated_text.split("\n\n")) == 2
+
+
+def test_srt_wrong_array_length_retries_then_succeeds():
+    """Wrong array length on attempt 1, aligned on attempt 2 → 2 calls, DONE."""
+    store = InMemoryCheckpointStore()
+
+    class WrongLengthOnceProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            if n == 0:
+                unit = TranslationUnit(
+                    translations=["todo junto en uno"],
+                    summary_update="Summary.",
+                )
+            else:
+                unit = TranslationUnit(
+                    translations=["uno", "dos", "tres"],
+                    summary_update="Summary.",
+                )
+            return TranslationResult(unit=unit, usage=Usage())
+
+    provider = WrongLengthOnceProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["a", "b", "c"])]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert len(provider.call_log) == 2
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "uno\n\ndos\n\ntres"
+    assert result.status == JobStatus.DONE
+
+
+def test_srt_wrong_array_length_always_accepts_best_effort():
+    """Persistent misalignment: 3 attempts, then best effort accepted —
+    chunk DONE (writer's per-cue fallback absorbs it), no 4th call."""
+    store = InMemoryCheckpointStore()
+
+    class AlwaysWrongLengthProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            unit = TranslationUnit(
+                translations=["todo el batch en un solo bloque"],
+                summary_update="Summary.",
+            )
+            return TranslationResult(unit=unit, usage=Usage())
+
+    provider = AlwaysWrongLengthProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["a", "b", "c"])]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert len(provider.call_log) == 3
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "todo el batch en un solo bloque"
+    assert result.status == JobStatus.DONE
+
+
+def test_srt_legacy_string_with_matching_segments_still_accepted():
+    """A model that ignores the array but returns a "\n\n" string with the
+    right segment count is still accepted (graceful degradation, 1 call)."""
+    store = InMemoryCheckpointStore()
+
+    class LegacyStringProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            unit = TranslationUnit(
+                translation="uno\n\ndos",
+                summary_update="Summary.",
+            )
+            return TranslationResult(unit=unit, usage=Usage())
+
+    provider = LegacyStringProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["a", "b"])]
+
+    run_job(orch, job, chunks, store=store)
+
+    assert len(provider.call_log) == 1
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "uno\n\ndos"
+
+
+def test_srt_reflective_passes_segment_count_to_draft_and_revise_only():
+    """Reflective SRT: draft and revise request the array; the critique call
+    (notes, not a translation) must NOT carry segment_count."""
+    store = InMemoryCheckpointStore()
+
+    class ReflectiveSegmentedProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            step = n % 3
+            if step == 1:
+                unit = TranslationUnit(
+                    translation="Critique notes.", summary_update="Critique complete."
+                )
+            else:
+                unit = TranslationUnit(
+                    translations=["uno", "dos"], summary_update="Summary."
+                )
+            return TranslationResult(unit=unit, usage=Usage())
+
+    provider = ReflectiveSegmentedProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(quality_mode="reflective")
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["a", "b"])]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.segment_count_log == [2, None, 2]
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "uno\n\ndos"
+    assert result.status == JobStatus.DONE

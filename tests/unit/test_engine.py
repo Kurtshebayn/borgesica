@@ -409,7 +409,7 @@ def test_failed_chunk_indices_returns_sorted_failed_indices(tmp_path: Path) -> N
     srt_path = _make_srt_fixture(tmp_path, num_cues=6)
 
     class MismatchOn25Provider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str):
+        def translate(self, system: str, user: str, model: str, segment_count: int | None = None):
             self.call_log.append((system, user, model))
             if "Cue 3 " in user or "Cue 6 " in user:  # chunk indices 2 and 5 (1-based cues 3, 6)
                 unit = TranslationUnit(
