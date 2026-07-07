@@ -2269,12 +2269,18 @@ def test_nav_label_chunk_cost_projection_uses_single_pass_even_when_reflective()
 
 def test_project_chunk_cost_includes_system_prompt_overhead():
     """The budget-guard projection must include the per-call system prompt
-    (static block + dynamic budget) and the JSON-envelope output — not just
-    source tokens + a flat 150 (bug: 16x under-estimate on SRT chunks)."""
+    (static block + dynamic budget), the tool schema, and the JSON-envelope
+    output — not just source tokens + a flat 150 (bug: 16x under-estimate on
+    SRT chunks). It also applies the provider retry-waste factor so the guard
+    protects against the CEILING."""
+    import json as _json
+
     from borgesica.domain.cost import (
         _DYNAMIC_BLOCK_BUDGET_TOKENS,
         _OUTPUT_ENVELOPE_TOKENS,
+        _waste_factor,
     )
+    from borgesica.domain.models import translation_tool_schema
 
     orch, provider, _ = make_orchestrator()
     config = make_config(quality_mode="fast")
@@ -2285,15 +2291,40 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     static_tokens = provider.count_tokens(
         orch._ctx.get_static_block(config), config.model
     )
+    schema_tokens = provider.count_tokens(
+        _json.dumps(translation_tool_schema(None)), config.model
+    )
     src_tokens = 2  # "hello world" with the word-count fake
     in_price, out_price = provider.price(config.model)
-    expected = (
-        (src_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS) / 1_000_000 * in_price
+    base = (
+        (src_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens)
+        / 1_000_000 * in_price
         + (src_tokens + _OUTPUT_ENVELOPE_TOKENS) / 1_000_000 * out_price
     )
+    expected = base * _waste_factor(provider)
     assert projection == pytest.approx(expected, rel=1e-9), (
-        f"Projection {projection} must include system-prompt overhead "
-        f"(expected {expected})"
+        f"Projection {projection} must include system-prompt + tool-schema "
+        f"overhead and the retry-waste ceiling factor (expected {expected})"
+    )
+
+
+def test_project_chunk_cost_scales_with_provider_waste_factor():
+    """A provider that declares a heavier retry_waste_factor projects a
+    proportionally higher ceiling for the same chunk."""
+    reliable, _, _ = make_orchestrator()
+
+    wasteful_provider = FakeTranslationProvider()
+    wasteful_provider.retry_waste_factor = 6.0  # declare a heavy ceiling
+    wasteful, _, _ = make_orchestrator(provider=wasteful_provider)
+
+    config = make_config(quality_mode="fast")
+    chunk = Chunk(index=0, source_text="hello world foo", status=ChunkStatus.PENDING)
+
+    from borgesica.domain.cost import _waste_factor
+
+    ratio = _waste_factor(wasteful_provider) / _waste_factor(reliable._provider)
+    assert wasteful._project_chunk_cost(chunk, config) == pytest.approx(
+        reliable._project_chunk_cost(chunk, config) * ratio, rel=1e-9
     )
 
 

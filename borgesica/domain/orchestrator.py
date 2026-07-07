@@ -58,6 +58,8 @@ from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import (
     _DYNAMIC_BLOCK_BUDGET_TOKENS,
     _OUTPUT_ENVELOPE_TOKENS,
+    _tool_schema_tokens,
+    _waste_factor,
     CostEstimator,
 )
 from borgesica.domain.errors import (
@@ -422,7 +424,11 @@ class TranslationOrchestrator:
         static_tokens = self._provider.count_tokens(
             self._ctx.get_static_block(config), config.model
         )
-        input_tokens = source_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS
+        # Tool schema (input_schema in tools=) is billed as input on every call.
+        schema_tokens = _tool_schema_tokens(self._provider, chunk, config.model)
+        input_tokens = (
+            source_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens
+        )
         # Output = source-sized translation + JSON envelope (same as CostEstimator).
         output_tokens = source_tokens + _OUTPUT_ENVELOPE_TOKENS
         # Nav-label chunks always single-pass, regardless of quality_mode (D3):
@@ -432,10 +438,14 @@ class TranslationOrchestrator:
         is_nav_label = chunk.meta.get("kind") == "nav-label"
         passes = 1 if is_nav_label else (3 if config.quality_mode == "reflective" else 1)
         in_price, out_price = self._provider.price(config.model)
-        return (
+        happy_path = (
             input_tokens * passes / 1_000_000 * in_price
             + output_tokens * passes / 1_000_000 * out_price
         )
+        # The budget guard protects against the CEILING: apply the provider's
+        # retry / tier-fallthrough waste factor so a chunk that could realistically
+        # cost 2-3x its happy-path price does not silently blow the budget.
+        return happy_path * _waste_factor(self._provider)
 
     @staticmethod
     def _usage_cost(usage: Usage, in_price: float, out_price: float) -> float:
