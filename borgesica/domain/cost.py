@@ -19,6 +19,7 @@ whether to apply it and what discount to apply at runtime.
 """
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from borgesica.domain.models import (
@@ -27,6 +28,7 @@ from borgesica.domain.models import (
     CostEstimate,
     Job,
     JobConfig,
+    translation_tool_schema,
 )
 from borgesica.domain.ports import TranslationProvider
 
@@ -44,6 +46,41 @@ _OUTPUT_ENVELOPE_TOKENS = 150
 # reflective mode runs 3 passes: translate (draft) + critique + revise
 _REFLECTIVE_PASSES = 3
 _FAST_PASSES = 1
+
+# Retry-waste ceiling: the point estimate models the HAPPY PATH (1 billed call
+# per chunk). Real runs pay for structured-output tier fallthrough + malformed
+# retries — each billed call re-sends the full prompt. That waste is provider-
+# behaviour-dependent (a reliable tool-caller rarely falls through; an endpoint
+# that 400s tool-calls and JSON mode pays 2-3 billed calls per chunk), so a
+# provider DECLARES its own ceiling factor via `retry_waste_factor`. Providers
+# that don't declare one (fakes, minimal adapters) fall back to this default.
+_DEFAULT_WASTE_FACTOR = 1.5
+
+
+def _waste_factor(provider: object) -> float:
+    """Return the provider-declared retry-waste ceiling factor, or the default.
+
+    A plain attribute lookup (not a Protocol method) keeps every existing
+    provider and test double working unchanged: only providers that opt in by
+    declaring `retry_waste_factor` change the ceiling.
+    """
+    return float(getattr(provider, "retry_waste_factor", _DEFAULT_WASTE_FACTOR))
+
+
+def _tool_schema_tokens(
+    provider: TranslationProvider,  # type: ignore[type-arg]
+    chunk: Chunk,
+    model: str,
+) -> int:
+    """Tokens for the tool/function schema sent in `tools=` on EVERY call.
+
+    Billed as input by every provider but historically counted as zero.
+    SRT cue-batch chunks request the SEGMENTED schema (translations array);
+    prose chunks use the default single-string shape.
+    """
+    cue_batches = chunk.meta.get("cue_batches")
+    segment_count = len(cue_batches) if cue_batches else None
+    return provider.count_tokens(json.dumps(translation_tool_schema(segment_count)), model)
 
 
 class CostEstimator:
@@ -132,25 +169,42 @@ class CostEstimator:
                 if output_tokens_per_chunk is not None
                 else chunk_input + _OUTPUT_ENVELOPE_TOKENS
             )
-            total_input += (chunk_input + overhead_tokens) * passes
+            # The tool schema is per-call input overhead like the system prompt,
+            # so it is gated on context_manager presence (bare token-math mode
+            # counts neither — same backward-compat contract as `cached`).
+            schema_tokens = (
+                _tool_schema_tokens(self._provider, chunk, config.model)
+                if self._context_manager is not None
+                else 0
+            )
+            total_input += (chunk_input + overhead_tokens + schema_tokens) * passes
             total_output += chunk_output * passes
 
         in_usd_per_mtok, out_usd_per_mtok = self._provider.price(config.model)
-        usd = (
+        # usd_low: happy path — one billed call per chunk (× passes).
+        usd_low = (
             total_input / 1_000_000 * in_usd_per_mtok
             + total_output / 1_000_000 * out_usd_per_mtok
         )
+        # usd_high: ceiling — folds in the provider's retry / tier-fallthrough
+        # waste that no static token math can predict.
+        usd_high = usd_low * _waste_factor(self._provider)
 
+        # The budget guard protects against the CEILING, not the optimistic
+        # point. A public user who is promised a number must not blow past it
+        # because the model struggled with structured output.
         within_budget: bool
         if config.budget_usd is None:
             within_budget = True
         else:
-            within_budget = usd <= config.budget_usd
+            within_budget = usd_high <= config.budget_usd
 
         return CostEstimate(
             input_tokens=total_input,
             output_tokens=total_output,
-            usd=usd,
+            usd=usd_low,
+            usd_low=usd_low,
+            usd_high=usd_high,
             model=config.model,
             cached=cached,
             within_budget=within_budget,

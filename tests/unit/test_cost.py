@@ -283,13 +283,20 @@ def test_estimate_includes_per_call_system_prompt_overhead():
 
     est = estimator.estimate(job, chunks, config)
 
+    import json as _json
+
+    from borgesica.domain.models import translation_tool_schema
+
     static_tokens = provider.count_tokens(
         context_manager.get_static_block(config), config.model
     )
-    expected_input = 3 * (2 + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS)
+    schema_tokens = provider.count_tokens(
+        _json.dumps(translation_tool_schema(None)), config.model
+    )
+    expected_input = 3 * (2 + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens)
     assert est.input_tokens == expected_input, (
-        f"Expected {expected_input} input tokens (source + system prompt per "
-        f"call), got {est.input_tokens} — per-call overhead not counted"
+        f"Expected {expected_input} input tokens (source + system prompt + tool "
+        f"schema per call), got {est.input_tokens} — per-call overhead not counted"
     )
 
 
@@ -377,3 +384,106 @@ def test_cached_false_when_no_context_manager():
     est = estimator.estimate(job, chunks, config)
     # Without context_manager, cached MUST stay False (backward compat)
     assert est.cached is False, f"Expected cached=False (no context_manager), got {est.cached}"
+
+
+# ---------------------------------------------------------------------------
+# Cost RANGE (bug: SRT estimate ~3x below real, job 0b86d4f2).
+# The point estimate models the HAPPY PATH — one billed provider call per
+# chunk. Real runs pay for structured-output tier fallthrough + retries, each
+# billed call re-sending the full prompt. That waste is provider-behaviour-
+# dependent, so no static token math predicts it: the estimate is a RANGE.
+#   usd_low  = happy path (== usd, backward compat)
+#   usd_high = usd_low × provider-declared retry_waste_factor
+# The budget guard protects against usd_high, the ceiling.
+# ---------------------------------------------------------------------------
+
+
+class WastefulProvider(FakeTranslationProvider):
+    """Provider that declares a heavy retry-waste ceiling factor."""
+
+    retry_waste_factor = 4.0
+
+
+def test_usd_equals_low_and_high_applies_provider_waste_factor():
+    """usd == usd_low (happy path); usd_high = usd_low × provider factor."""
+    from borgesica.domain.cost import CostEstimator
+
+    provider = WastefulProvider()
+    estimator = CostEstimator(provider=provider)
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=3)
+    chunks = [make_chunk(i, text="hello world foo") for i in range(3)]
+
+    est = estimator.estimate(job, chunks, config)
+
+    assert est.usd == pytest.approx(est.usd_low)
+    assert est.usd_high == pytest.approx(est.usd_low * 4.0)
+    assert est.usd_high > est.usd_low
+
+
+def test_waste_factor_defaults_when_provider_undeclared():
+    """A provider that does not declare retry_waste_factor gets the module default."""
+    from borgesica.domain.cost import _DEFAULT_WASTE_FACTOR, CostEstimator
+
+    provider = FakeTranslationProvider()  # no retry_waste_factor attribute
+    estimator = CostEstimator(provider=provider)
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=2)
+    chunks = [make_chunk(i, text="hello world") for i in range(2)]
+
+    est = estimator.estimate(job, chunks, config)
+    assert est.usd_high == pytest.approx(est.usd_low * _DEFAULT_WASTE_FACTOR)
+
+
+def test_within_budget_guards_the_ceiling_not_the_point():
+    """budget between usd_low and usd_high → within_budget=False (guards ceiling)."""
+    from borgesica.domain.cost import CostEstimator
+
+    provider = WastefulProvider()  # factor 4.0
+    estimator = CostEstimator(provider=provider)
+    job_cfg = make_config(quality_mode="fast", budget_usd=None)
+    job = make_job(job_cfg, total=4)
+    chunks = [make_chunk(i, text="hello world foo bar baz") for i in range(4)]
+
+    # First measure the range with no budget.
+    ranged = estimator.estimate(job, chunks, job_cfg)
+    midpoint = (ranged.usd_low + ranged.usd_high) / 2
+    assert ranged.usd_low < midpoint < ranged.usd_high  # sanity
+
+    # A budget at the midpoint clears the floor but NOT the ceiling.
+    tight_cfg = make_config(quality_mode="fast", budget_usd=midpoint)
+    tight = estimator.estimate(job, chunks, tight_cfg)
+    assert tight.within_budget is False, "budget below usd_high must fail the guard"
+
+
+def test_estimate_counts_tool_schema_in_per_call_overhead():
+    """The tool/function schema (input_schema sent in tools=) is billed as input
+    on EVERY call but was counted as zero. With a context_manager, per-call
+    input overhead now includes the schema tokens."""
+    import json
+
+    from borgesica.domain.context import ContextManager
+    from borgesica.domain.cost import _DYNAMIC_BLOCK_BUDGET_TOKENS, CostEstimator
+    from borgesica.domain.models import translation_tool_schema
+
+    provider = FakeTranslationProvider()
+    context_manager = ContextManager(provider=provider)
+    estimator = CostEstimator(provider=provider, context_manager=context_manager)
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=2)
+    # Plain chunks (no cue_batches) → segment_count None → default schema shape.
+    chunks = [make_chunk(i, text="hello world") for i in range(2)]
+
+    est = estimator.estimate(job, chunks, config)
+
+    static_tokens = provider.count_tokens(
+        context_manager.get_static_block(config), config.model
+    )
+    schema_tokens = provider.count_tokens(
+        json.dumps(translation_tool_schema(None)), config.model
+    )
+    expected_input = 2 * (2 + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens)
+    assert est.input_tokens == expected_input, (
+        f"Expected {expected_input} (source + static + dynamic + tool schema), "
+        f"got {est.input_tokens} — tool schema not counted"
+    )
