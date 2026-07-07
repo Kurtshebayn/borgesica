@@ -174,5 +174,10 @@ class SrtWriter:
         # Sort by cue index before composing (order may vary if chunks reordered)
         subtitles.sort(key=lambda s: s.index)
 
+        # reindex=False: srt.compose() defaults to reindex=True, which RE-SORTS
+        # by start time and renumbers 1..N, silently discarding the sort above.
+        # Real transcripts are not always chronological (a post-credits/bonus
+        # scene can restart its own timestamp track) — one such cue is enough
+        # for the default time-based reindex to scramble everything after it.
         with open(out_path, "w", encoding="utf-8") as f:
-            f.write(srt.compose(subtitles))
+            f.write(srt.compose(subtitles, reindex=False))

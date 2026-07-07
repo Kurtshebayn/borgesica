@@ -351,3 +351,53 @@ class TestSrtWriter:
             assert len(parsed) == 10
         finally:
             os.unlink(out_path)
+
+    def test_non_monotonic_timestamps_preserve_original_cue_order(self):
+        """A cue whose timestamp jumps BACKWARDS (e.g. a post-credits/bonus
+        scene appended with a restarted timestamp track — real case: Backrooms
+        (2026) cue 897) must NOT get globally reshuffled.
+
+        Root cause: srt.compose() defaults to reindex=True, which re-SORTS
+        BY START TIME and renumbers 1..N, silently discarding the writer's
+        own `subtitles.sort(key=lambda s: s.index)` line. On a real 913-cue
+        file this corrupted 889 cues (97%) downstream of the single
+        non-monotonic timestamp. The writer must pass reindex=False — it
+        already establishes the correct order itself.
+        """
+        def make_batch(cue_index: int, start: str, end: str, text: str, translated: str) -> Chunk:
+            return Chunk(
+                index=cue_index - 1,
+                source_text=text,
+                translated_text=translated,
+                status=ChunkStatus.DONE,
+                meta={
+                    "cue_batches": [
+                        {"cue_index": cue_index, "start": start, "end": end, "text": text}
+                    ],
+                    "line_length": 42,
+                },
+            )
+
+        chunks = [
+            make_batch(1, "00:00:01,000", "00:00:02,000", "First line.", "Primera linea."),
+            make_batch(2, "00:00:02,000", "00:00:03,000", "Second line.", "Segunda linea."),
+            # Cue 3's timestamp jumps BACK before cues 1 and 2 (bonus-scene style).
+            make_batch(3, "00:00:00,100", "00:00:00,900", "Bonus scene line.", "Linea de escena bonus."),
+        ]
+
+        with tempfile.NamedTemporaryFile(suffix=".srt", delete=False, mode="w", encoding="utf-8") as f:
+            out_path = f.name
+
+        try:
+            self.writer.write(chunks, str(FIXTURES / "simple.srt"), out_path)
+            with open(out_path, encoding="utf-8") as f:
+                parsed = sorted(srt.parse(f.read()), key=lambda s: s.index)
+
+            assert len(parsed) == 3
+            assert [s.index for s in parsed] == [1, 2, 3]
+            assert parsed[0].content == "Primera linea."
+            assert parsed[1].content == "Segunda linea."
+            assert parsed[2].content == "Linea de escena bonus."
+            assert parsed[2].start == timedelta(seconds=0, milliseconds=100)
+        finally:
+            os.unlink(out_path)
