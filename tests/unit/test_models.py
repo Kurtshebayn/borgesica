@@ -215,6 +215,32 @@ def test_cost_estimate_has_all_5_fields() -> None:
     assert est.within_budget is False
 
 
+def test_cost_estimate_range_defaults_to_point() -> None:
+    """usd_low/usd_high default to usd when omitted (backward compat: a bare
+    point estimate is a degenerate range)."""
+    from borgesica.domain.models import CostEstimate
+
+    est = CostEstimate(input_tokens=100, output_tokens=50, usd=0.01, model="m")
+    assert est.usd_low == 0.01
+    assert est.usd_high == 0.01
+
+
+def test_cost_estimate_accepts_explicit_range() -> None:
+    """usd_low/usd_high carry the happy-path floor and retry-waste ceiling."""
+    from borgesica.domain.models import CostEstimate
+
+    est = CostEstimate(
+        input_tokens=100,
+        output_tokens=50,
+        usd=0.01,
+        usd_low=0.01,
+        usd_high=0.03,
+        model="m",
+    )
+    assert est.usd_low == 0.01
+    assert est.usd_high == 0.03
+
+
 # --- JobConfig ---
 
 def test_job_config_defaults() -> None:
