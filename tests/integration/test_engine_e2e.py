@@ -330,3 +330,110 @@ def test_engine_e2e_line_length_propagates_through_pipeline(tmp_path):
         "line_length=30 was NOT respected in the full pipeline.\n"
         + "\n".join(violations)
     )
+
+
+# ---------------------------------------------------------------------------
+# E2E Test 7: segmented SRT contract — regression for jobs 0b86d4f2 / 80a1ad82
+# (Backrooms, DeepSeek). Cues are unpunctuated mid-sentence speech-to-text
+# fragments; asked for a single "\n\n"-joined STRING the model "corrects" the
+# blank lines and regroups 25 cues into semantic paragraphs (5 blocks, or 1).
+# With the segmented contract the provider fills a translations array of
+# exactly N strings, so every cue keeps its positional translation.
+# ---------------------------------------------------------------------------
+
+
+_FRAGMENT_CUES = [
+    "and then we went down",
+    "the hallway that never",
+    "seems to end no matter",
+    "how long you walk",
+    "there was this hum",
+    "coming from the walls",
+    "like fluorescent lights",
+    "but there were no",
+    "lights anywhere just",
+    "yellow wallpaper forever",
+]
+
+
+def _write_fragment_srt(path) -> None:
+    """Write an SRT of unpunctuated mid-sentence fragments (speech-to-text style)."""
+    from datetime import timedelta
+
+    subtitles = [
+        srt.Subtitle(
+            index=i + 1,
+            start=timedelta(seconds=i * 2),
+            end=timedelta(seconds=i * 2 + 1),
+            content=text,
+        )
+        for i, text in enumerate(_FRAGMENT_CUES)
+    ]
+    path.write_text(srt.compose(subtitles), encoding="utf-8")
+
+
+class _BackroomsStyleProvider(FakeTranslationProvider):
+    """Simulates the observed DeepSeek failure mode on fragment cues.
+
+    STRING contract (segment_count=None): degrades every "\n\n" separator to
+    "\n" — the whole batch collapses into ONE semantic paragraph, on every
+    attempt (retries never help; it is trained instinct, not noise).
+
+    SEGMENTED contract (segment_count=N): fills the translations array with
+    exactly one item per source segment.
+    """
+
+    def translate(
+        self, system: str, user: str, model: str, segment_count: int | None = None
+    ) -> TranslationResult:
+        self.call_log.append((system, user, model))
+        self.segment_count_log.append(segment_count)
+
+        if segment_count is None:
+            merged = user.replace("\n\n", "\n")
+            unit = TranslationUnit(
+                translation=f"[es] {merged}", summary_update="Fake."
+            )
+        else:
+            unit = TranslationUnit(
+                translations=[f"[es] {seg}" for seg in user.split("\n\n")],
+                summary_update="Fake.",
+            )
+        in_tok = self.count_tokens(system + " " + user, model)
+        out_tok = self.count_tokens(unit.translation, model)
+        return TranslationResult(
+            unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok)
+        )
+
+
+def test_engine_e2e_fragment_cues_stay_aligned_per_cue(tmp_path):
+    """10 fragment cues, chunk_size=5 → every output cue carries ITS OWN
+    translation (no per-cue source fallback, no merged walls of text) and
+    each chunk costs exactly ONE provider call — no retries burned."""
+    src = tmp_path / "backrooms.srt"
+    _write_fragment_srt(src)
+    out = str(tmp_path / "output.srt")
+
+    provider = _BackroomsStyleProvider()
+    engine, _, _ = _make_engine(provider=provider)
+    config = JobConfig(source_type=SourceType.SRT, model="fake", chunk_size=5)
+
+    job = engine.create_job(str(src), config)
+    final_job = engine.run_job(job.id, out_path=out)
+
+    assert final_job.status == JobStatus.DONE
+    # The segmented contract was requested for every chunk…
+    assert provider.segment_count_log == [5, 5]
+    # …and satisfied on the first attempt (the string path would burn all 3).
+    assert provider.call_count == 2
+
+    parsed = sorted(
+        srt.parse((tmp_path / "output.srt").read_text(encoding="utf-8")),
+        key=lambda s: s.index,
+    )
+    assert len(parsed) == len(_FRAGMENT_CUES)
+    for source_text, sub in zip(_FRAGMENT_CUES, parsed):
+        content_norm = " ".join(sub.content.split())
+        assert content_norm == f"[es] {source_text}", (
+            f"cue {sub.index}: expected positional translation, got {content_norm!r}"
+        )
