@@ -143,6 +143,95 @@ class TestSQLiteCheckpointStore:
         assert loaded.chunk_index == 2
         assert loaded.text == "summary-2"
 
+    # --- Config persistence: prose_segmentation / prose_chunk_tokens / continue_on_error ---
+    def test_job_config_extra_fields_round_trip(self):
+        """Non-default prose_segmentation, prose_chunk_tokens, and continue_on_error survive save/load."""
+        now = datetime.now(tz=timezone.utc)
+        job = Job(
+            id="job-cfg",
+            config=JobConfig(
+                source_type=SourceType.EPUB,
+                model="claude-3-5-haiku-20241022",
+                prose_segmentation="paragraph",
+                prose_chunk_tokens=400,
+                continue_on_error=False,
+            ),
+            source_path="/tmp/test.epub",
+            created_at=now,
+            updated_at=now,
+        )
+        self.store.save_job(job)
+        loaded = self.store.load_job(job.id)
+        assert loaded is not None
+        assert loaded.config.prose_segmentation == "paragraph"
+        assert loaded.config.prose_chunk_tokens == 400
+        assert loaded.config.continue_on_error is False
+
+    def test_migrates_existing_db_without_config_columns(self):
+        """Opening a DB created with the pre-migration schema adds the new columns
+        and old rows load with JobConfig defaults."""
+        import os
+        import sqlite3
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        old_jobs_ddl = """
+        CREATE TABLE jobs (
+            id              TEXT PRIMARY KEY,
+            source_type     TEXT NOT NULL,
+            source_path     TEXT NOT NULL,
+            target_lang     TEXT NOT NULL,
+            model           TEXT NOT NULL,
+            status          TEXT NOT NULL,
+            budget_usd      REAL,
+            chunk_size      INTEGER NOT NULL,
+            line_length     INTEGER NOT NULL,
+            glossary_strategy TEXT NOT NULL,
+            quality_mode    TEXT NOT NULL,
+            total_chunks    INTEGER NOT NULL DEFAULT 0,
+            completed_chunks INTEGER NOT NULL DEFAULT 0,
+            cost_usd        REAL NOT NULL DEFAULT 0.0,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )
+        """
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(old_jobs_ddl)
+            now = datetime.now(tz=timezone.utc).isoformat()
+            conn.execute(
+                "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("job-old", str(SourceType.SRT), "/tmp/old.srt", "es-neutral",
+                 "claude-3-5-haiku-20241022", str(JobStatus.CREATED), None, 25, 42,
+                 "llm", "fast", 0, 0, 0.0, now, now),
+            )
+            conn.commit()
+            conn.close()
+
+            store = SQLiteCheckpointStore(db_path)
+            # Old row loads with defaults
+            loaded = store.load_job("job-old")
+            assert loaded is not None
+            assert loaded.config.prose_segmentation == "batch"
+            assert loaded.config.prose_chunk_tokens == 800
+            assert loaded.config.continue_on_error is True
+            # New rows persist non-default values in the migrated DB
+            job = make_job("job-new")
+            job = job.model_copy(update={
+                "config": job.config.model_copy(update={
+                    "prose_segmentation": "paragraph",
+                    "continue_on_error": False,
+                })
+            })
+            store.save_job(job)
+            reloaded = SQLiteCheckpointStore(db_path).load_job("job-new")
+            assert reloaded is not None
+            assert reloaded.config.prose_segmentation == "paragraph"
+            assert reloaded.config.continue_on_error is False
+        finally:
+            os.unlink(db_path)
+
     # --- Test 7: load_job with unknown job_id → returns None ---
     def test_load_unknown_job_returns_none(self):
         result = self.store.load_job("does-not-exist")
