@@ -162,8 +162,13 @@ Spanish (es-neutral).
 
 The source is a batch of subtitle segments separated by blank lines. Each \
 segment is one subtitle cue — often a mid-sentence fragment without \
-punctuation (speech-to-text timing, NOT a formatting error). Translate each \
-segment on its own, preserving the fragment boundaries exactly.
+punctuation (speech-to-text timing, NOT a formatting error). Together the \
+segments form CONTINUOUS SPEECH: a sentence frequently starts in one segment \
+and finishes in the next. First read the whole batch to understand the full \
+passage, then translate it so meaning flows coherently across segment \
+boundaries — never translate a fragment in isolation as if it were a complete \
+sentence, while still preserving the fragment boundaries exactly in your \
+output.
 
 Return your response as a valid JSON object with EXACTLY the following fields:
   {

@@ -315,6 +315,25 @@ def test_srt_static_block_describes_translations_array():
     assert "merge" in static.lower()
 
 
+def test_srt_static_block_teaches_continuous_speech_coherence():
+    """Segments in a batch are consecutive cues of the SAME speech stream.
+    The prompt must instruct the model to read the whole passage as continuous
+    speech and translate with cross-segment coherence — NOT to translate each
+    fragment in isolation ('on its own'), which produces mistranslations when
+    a sentence spans two cues (e.g. 'I didn't get a good one' / 'look at it'
+    rendered as an unrelated imperative)."""
+    from borgesica.domain.context import ContextManager
+
+    cm = ContextManager(provider=FakeTranslationProvider())
+    static = cm.get_static_block(make_config(source_type=SourceType.SRT))
+
+    assert "continuous speech" in static.lower()
+    assert "on its own" not in static.lower()
+    # The alignment contract must survive the rewrite.
+    assert "EXACTLY one string per source segment" in static
+    assert "NEVER merge, split, or reorder" in static
+
+
 def test_prose_static_block_keeps_legacy_translation_contract():
     """EPUB/PDF jobs keep the single-string 'translation' instruction and must
     NOT mention the translations array."""
