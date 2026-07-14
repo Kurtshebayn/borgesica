@@ -170,6 +170,16 @@ boundaries — never translate a fragment in isolation as if it were a complete 
 sentence, while still preserving the fragment boundaries exactly in your \
 output.
 
+Example — a sentence split across two segments:
+  Source segments:
+    "I bought her a brand new"
+    "watch for her birthday"
+  WRONG (each fragment translated in isolation — "watch" misread as an \
+imperative):
+    ["le compré algo totalmente nuevo", "mira su cumpleaños"]
+  RIGHT (whole sentence understood first, boundaries preserved):
+    ["le compré un reloj", "nuevo para su cumpleaños"]
+
 Return your response as a valid JSON object with EXACTLY the following fields:
   {
     "translations": ["<segment 1 translated>", "<segment 2 translated>", ...],

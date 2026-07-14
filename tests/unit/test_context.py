@@ -334,6 +334,25 @@ def test_srt_static_block_teaches_continuous_speech_coherence():
     assert "NEVER merge, split, or reorder" in static
 
 
+def test_srt_static_block_has_split_sentence_few_shot_example():
+    """An abstract coherence rule proved insufficient (DeepSeek v4-flash AND
+    v4-pro both rendered 'look at it' as an isolated imperative even with the
+    continuous-speech instruction). The prompt must include a concrete WRONG
+    vs RIGHT example of a sentence split across two segments. The example is
+    deliberately NOT the known failing passage, so real transcripts remain a
+    valid held-out test of generalization."""
+    from borgesica.domain.context import ContextManager
+
+    cm = ContextManager(provider=FakeTranslationProvider())
+    static = cm.get_static_block(make_config(source_type=SourceType.SRT))
+
+    assert "watch for her birthday" in static
+    assert "WRONG" in static and "RIGHT" in static
+    # The example must never leak into the prose (single-string) prompt.
+    prose = cm.get_static_block(make_config(source_type=SourceType.EPUB))
+    assert "watch for her birthday" not in prose
+
+
 def test_prose_static_block_keeps_legacy_translation_contract():
     """EPUB/PDF jobs keep the single-string 'translation' instruction and must
     NOT mention the translations array."""
