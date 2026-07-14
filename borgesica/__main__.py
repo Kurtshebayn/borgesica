@@ -325,11 +325,17 @@ def _resolve_out(args: argparse.Namespace, engine: TranslatorEngine) -> str:
 
 
 def _print_skip_summary(args: argparse.Namespace, engine: TranslatorEngine) -> None:
-    """Print a skip-summary line naming the count and indices of FAILED chunks,
-    if any. No output when there are none (continue-on-error skip report)."""
+    """Print a skip summary naming the FAILED chunks, their consequence
+    (segments keep the untranslated source text in the output) and the
+    remedy (`resume` retries only failed chunks). No output when there
+    are none (continue-on-error skip report)."""
     failed = engine.failed_chunk_indices(args.job_id)
     if failed:
-        print(f"WARNING: {len(failed)} chunk(s) failed and were skipped: {failed}")
+        print(
+            f"WARNING: {len(failed)} chunk(s) failed and were skipped: {failed}\n"
+            f"Their segments keep the untranslated source text in the output.\n"
+            f"Run `borgesica resume {args.job_id}` to retry only the failed chunks."
+        )
 
 
 def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:

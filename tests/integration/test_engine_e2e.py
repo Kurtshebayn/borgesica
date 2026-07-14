@@ -15,6 +15,8 @@ This is NOT a live API test. It requires no network or API key.
 """
 from __future__ import annotations
 
+import re
+
 import srt
 
 from borgesica.api import TranslatorEngine
@@ -395,8 +397,13 @@ class _BackroomsStyleProvider(FakeTranslationProvider):
                 translation=f"[es] {merged}", summary_update="Fake."
             )
         else:
+            # Compliant model: one item per "[k]"-marked source segment,
+            # without copying the index markers into the output.
             unit = TranslationUnit(
-                translations=[f"[es] {seg}" for seg in user.split("\n\n")],
+                translations=[
+                    "[es] " + re.sub(r"^\[\d+\]\n?", "", seg)
+                    for seg in user.split("\n\n")
+                ],
                 summary_update="Fake.",
             )
         in_tok = self.count_tokens(system + " " + user, model)

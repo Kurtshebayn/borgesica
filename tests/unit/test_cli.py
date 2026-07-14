@@ -316,6 +316,31 @@ def test_cmd_run_prints_skip_summary_when_chunks_failed(capsys: pytest.CaptureFi
     assert "[2, 5]" in out
 
 
+def test_cmd_run_skip_summary_offers_resume(capsys: pytest.CaptureFixture) -> None:
+    """The skip summary must state the consequence (failed chunks keep their
+    source-language text in the output) and the remedy: `resume` retries
+    ONLY the failed chunks."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import JobStatus
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.status.return_value = MagicMock(config=MagicMock(source_type="SRT"))
+        done_job = MagicMock(status=JobStatus.DONE, cost_usd=0.001)
+        engine.run_job.return_value = done_job
+        engine.failed_chunk_indices.return_value = [2, 5]
+        mock_build.return_value = engine
+
+        code = main(["run", "job-1", "--out", "out.srt"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert "untranslated" in out
+    assert "borgesica resume job-1" in out
+
+
 def test_cmd_run_no_skip_summary_when_no_failures(capsys: pytest.CaptureFixture) -> None:
     """run prints no skip-summary line when failed_chunk_indices returns []."""
     from unittest.mock import MagicMock

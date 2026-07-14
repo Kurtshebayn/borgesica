@@ -128,13 +128,31 @@ Return a JSON object:
 
 # Appended to the system prompt for SRT cue-batch chunks (segmented contract).
 # The exact count is stated per chunk because "one per segment" alone is what
-# models silently violate on unpunctuated speech-to-text fragments.
+# models silently violate on unpunctuated speech-to-text fragments. Segments
+# carry explicit [k] index markers because blank-line separation alone is
+# ambiguous to the model: a two-line cue looks like two segments, and one
+# miscounted chunk desynchronizes the whole positional mapping.
 _SEGMENT_SYSTEM_INSTRUCTION = """\
 [SEGMENTS]
-This chunk contains exactly {n} subtitle segments separated by blank lines. \
-Fill the "translations" array with EXACTLY {n} strings — one per source \
-segment, in order. Never merge, split, or reorder segments; a segment that \
-ends mid-sentence must stay mid-sentence."""
+This chunk contains exactly {n} subtitle segments. Each source segment \
+begins with an index marker line "[k]" (from [1] to [{n}]); everything until \
+the next marker belongs to that ONE segment, even across line breaks. Fill \
+the "translations" array with EXACTLY {n} strings — item k is the \
+translation of segment [k]. Do NOT copy the index markers into the \
+translations. Never merge, split, or reorder segments; a segment that ends \
+mid-sentence must stay mid-sentence."""
+
+# Leading "[k]" echo of the index markers in a returned translation item.
+_INDEX_MARKER_RE = re.compile(r"^\[\d+\]\s*")
+
+
+def _indexed_segments(cue_batches: list[dict]) -> str:
+    """Render cue batch texts as the indexed user prompt: "[k]\\n<text>"
+    blocks separated by blank lines. Markers are transport only — they never
+    enter chunk.source_text or the checkpoint format."""
+    return "\n\n".join(
+        f"[{i}]\n{cb['text']}" for i, cb in enumerate(cue_batches, start=1)
+    )
 
 
 def _segmented_text(
@@ -142,14 +160,16 @@ def _segmented_text(
 ) -> str:
     """Join an aligned translations array into the "\\n\\n" checkpoint format.
 
-    Blank lines INSIDE one segment are collapsed to a single newline — they
-    would desynchronize the writer's positional split. A missing or misaligned
-    array falls back to the legacy string so the existing segment validation
-    drives the retry / best-effort flow.
+    A leading "[k]" marker echoed back by the model is stripped (markers are
+    transport, never content). Blank lines INSIDE one segment are collapsed
+    to a single newline — they would desynchronize the writer's positional
+    split. A missing or misaligned array falls back to the legacy string so
+    the existing segment validation drives the retry flow.
     """
     if unit.translations is not None and len(unit.translations) == segment_count:
         return "\n\n".join(
-            re.sub(r"\n\s*\n", "\n", seg.strip()) for seg in unit.translations
+            re.sub(r"\n\s*\n", "\n", _INDEX_MARKER_RE.sub("", seg.strip()))
+            for seg in unit.translations
         )
     return fallback_text
 
@@ -496,10 +516,13 @@ class TranslationOrchestrator:
         # Segmented (SRT) contract: cue-batch chunks request the translations
         # ARRAY — cue boundaries as structured data, not blank-line convention
         # (models "correct" blank lines between unpunctuated speech-to-text
-        # fragments; they fill a fixed-length array reliably).
+        # fragments; they fill a fixed-length array reliably). The user prompt
+        # carries explicit [k] index markers; validation and checkpointing
+        # keep using the marker-free chunk.source_text.
         cue_batches = chunk.meta.get("cue_batches")
         segment_count = len(cue_batches) if cue_batches else None
         if segment_count is not None:
+            user_prompt = _indexed_segments(cue_batches)
             system = (
                 f"{system}\n\n"
                 + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count)
@@ -574,19 +597,36 @@ class TranslationOrchestrator:
             # Tag mismatch — retry unless this was the last attempt.
 
         # All attempts exhausted with at least one tag-valid but
-        # segment-mismatched output: accept the last one. The writer's
-        # defensive mapping absorbs the mismatch; the strip/reinsert fallback
-        # below exists for TAG failures and would cost another call without
-        # fixing segmentation. A chunk must never end FAILED over this.
+        # segment-mismatched output. Two different consequences:
+        #
+        # PROSE: accept the last one — the writer's defensive mapping absorbs
+        # the mismatch and the text is still shown translated.
+        #
+        # SRT cue batches: a misaligned batch is USELESS to the SrtWriter (it
+        # cannot map k translations onto n cues without desynchronizing
+        # timing, so it falls back to source text — untranslated cues shipped
+        # silently). End the chunk FAILED instead: it surfaces in the CLI
+        # skip summary and `resume` retries exactly these chunks. The
+        # strip/reinsert fallback below exists for TAG failures and would
+        # cost another call without fixing segmentation — skip it.
         if best_effort is not None:
+            if segment_count is None:
+                logger.warning(
+                    "Chunk %d: segment-count mismatch persisted after %d attempts — "
+                    "accepting best effort (writer applies defensive mapping)",
+                    chunk.index,
+                    _MAX_TAG_RETRIES + 1,
+                )
+                best_unit, best_text = best_effort
+                return best_unit, best_text, total_call_cost
             logger.warning(
-                "Chunk %d: segment-count mismatch persisted after %d attempts — "
-                "accepting best effort (writer applies defensive mapping)",
+                "Chunk %d: translations array misaligned with the %d cues after "
+                "%d attempts — chunk FAILED (resume retries only failed chunks)",
                 chunk.index,
+                segment_count,
                 _MAX_TAG_RETRIES + 1,
             )
-            best_unit, best_text = best_effort
-            return best_unit, best_text, total_call_cost
+            return None, None, total_call_cost
 
         # --- FALLBACK: strip → translate plain → reinsert ---
         # All primary (tags-in-text) attempts exhausted.

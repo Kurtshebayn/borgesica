@@ -8,6 +8,7 @@ Provided doubles:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from borgesica.domain.errors import MalformedOutput
@@ -60,9 +61,14 @@ class FakeTranslationProvider:
             unit = self.canned_unit
         elif segment_count is not None:
             # Segmented (SRT) contract: echo one translated string per source
-            # segment — a compliant model filling the translations array.
+            # segment — a compliant model filling the translations array. The
+            # orchestrator prefixes each segment with a "[k]" marker line; a
+            # compliant model does not copy the markers into its output.
             unit = TranslationUnit(
-                translations=[f"[translated] {seg}" for seg in user.split("\n\n")],
+                translations=[
+                    "[translated] " + re.sub(r"^\[\d+\]\n?", "", seg)
+                    for seg in user.split("\n\n")
+                ],
                 summary_update="Fake summary.",
                 glossary_additions=[],
             )

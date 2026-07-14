@@ -2491,9 +2491,14 @@ def test_srt_wrong_array_length_retries_then_succeeds():
     assert result.status == JobStatus.DONE
 
 
-def test_srt_wrong_array_length_always_accepts_best_effort():
-    """Persistent misalignment: 3 attempts, then best effort accepted —
-    chunk DONE (writer's per-cue fallback absorbs it), no 4th call."""
+def test_srt_wrong_array_length_marks_chunk_failed():
+    """Persistent misalignment on a cue-batch chunk: 3 attempts, then the
+    chunk ends FAILED — NOT silently accepted as best effort. A best-effort
+    misaligned batch is useless to the SrtWriter (it falls back to source
+    text, shipping untranslated cues), so FAILED is honest: it surfaces in
+    the skip summary and `resume` retries exactly these chunks. The
+    strip/reinsert fallback must NOT fire (a 4th call cannot fix
+    segmentation)."""
     store = InMemoryCheckpointStore()
 
     class AlwaysWrongLengthProvider(FakeTranslationProvider):
@@ -2516,9 +2521,54 @@ def test_srt_wrong_array_length_always_accepts_best_effort():
 
     assert len(provider.call_log) == 3
     saved = store.load_chunks(job.id)
-    assert saved[0].status == ChunkStatus.DONE
-    assert saved[0].translated_text == "todo el batch en un solo bloque"
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[0].translated_text is None
+    # continue_on_error=True: the job still finishes DONE.
     assert result.status == JobStatus.DONE
+
+
+def test_srt_user_prompt_numbers_segments():
+    """Cue-batch chunks send the segments with explicit [k] index markers so
+    segment boundaries are unambiguous (a model splitting a two-line cue into
+    two items caused chunk-wide fallback to source text). The checkpoint
+    format stays marker-free."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(
+        canned_unit=TranslationUnit(
+            translations=["uno\ndos", "tres"], summary_update="Summary."
+        )
+    )
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["a\nb", "c"])]
+
+    run_job(orch, job, chunks, store=store)
+
+    _, user, _ = provider.call_log[0]
+    assert user == "[1]\na\nb\n\n[2]\nc"
+    saved = store.load_chunks(job.id)
+    assert saved[0].translated_text == "uno\ndos\n\ntres"
+
+
+def test_srt_leading_index_markers_stripped_from_translations():
+    """If the model echoes the [k] markers back in the translations array,
+    they are stripped — markers are transport, never content."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(
+        canned_unit=TranslationUnit(
+            translations=["[1] uno", "[2]\ndos"], summary_update="Summary."
+        )
+    )
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["a", "b"])]
+
+    run_job(orch, job, chunks, store=store)
+
+    saved = store.load_chunks(job.id)
+    assert saved[0].translated_text == "uno\n\ndos"
 
 
 def test_srt_legacy_string_with_matching_segments_still_accepted():
