@@ -39,7 +39,7 @@ from borgesica.domain.models import (
     Usage,
 )
 from borgesica.domain.orchestrator import TranslationOrchestrator
-from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
+from tests.fakes import FakeCorpusStore, FakeTranslationProvider, InMemoryCheckpointStore
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +83,8 @@ def make_chunks(n: int, status: ChunkStatus = ChunkStatus.PENDING) -> list[Chunk
 def make_orchestrator(
     provider: FakeTranslationProvider | None = None,
     store: InMemoryCheckpointStore | None = None,
+    corpus_store: FakeCorpusStore | None = None,
+    provider_name: str = "unknown",
 ) -> tuple[TranslationOrchestrator, FakeTranslationProvider, InMemoryCheckpointStore]:
     if provider is None:
         provider = FakeTranslationProvider()
@@ -95,6 +97,8 @@ def make_orchestrator(
         checkpoint=store,
         context_manager=ctx,
         cost_estimator=cost_est,
+        provider_name=provider_name,
+        corpus_store=corpus_store,
     )
     return orch, provider, store
 
@@ -2810,3 +2814,98 @@ def test_orchestrator_accepts_provider_name_explicit_value():
         provider_name="anthropic",
     )
     assert orch._provider_name == "anthropic"
+
+
+# ===========================================================================
+# T4 — corpus capture hook (design decision #6/#10): a CorpusSample is
+# written at the real chunk-DONE point (translated, not passthrough/FAILED).
+# Best-effort: a raising CorpusStore never fails the job. No store → no
+# behavior change.
+# ===========================================================================
+
+
+def test_corpus_store_receives_sample_on_chunk_done():
+    """A DONE (translated) chunk writes a CorpusSample carrying provenance
+    (source/translated text, provider, model, quality_mode, passed_validation)."""
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+    orch, provider, _ = make_orchestrator(store=store, corpus_store=corpus, provider_name="anthropic")
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    sample = corpus.samples[(job.id, 0)]
+    assert sample.source_text == chunks[0].source_text
+    assert sample.translated_text is not None
+    assert sample.provider == "anthropic"
+    assert sample.model == config.model
+    assert sample.quality_mode == config.quality_mode
+    assert sample.passed_validation is True
+
+
+def test_corpus_store_failure_does_not_fail_job():
+    """A raising CorpusStore.save_sample() MUST NOT fail, pause, or otherwise
+    affect the translation job (design decision #10 — silent best-effort)."""
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore(raise_on_save=True)
+    orch, provider, _ = make_orchestrator(store=store, corpus_store=corpus)
+    config = make_config()
+    job = make_job(config, total=3)
+    chunks = make_chunks(3)
+
+    result = run_job(orch, job, chunks, config=config, store=store)
+
+    assert result.status == JobStatus.DONE
+    assert provider.call_count == 3
+    assert corpus.samples == {}
+
+
+def test_no_corpus_store_no_writes():
+    """Omitting corpus_store (default None) is a pure no-op — no attribute
+    error, job completes exactly as before T4."""
+    orch, provider, store = make_orchestrator()
+    config = make_config()
+    job = make_job(config, total=2)
+    chunks = make_chunks(2)
+
+    result = run_job(orch, job, chunks, config=config, store=store)
+
+    assert result.status == JobStatus.DONE
+    assert provider.call_count == 2
+
+
+def test_corpus_store_skips_passthrough_chunk():
+    """A pass-through chunk (no translatable prose) makes zero provider calls
+    and MUST NOT be captured to the corpus store (design decision #10)."""
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+    orch, provider, _ = make_orchestrator(store=store, corpus_store=corpus)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="<span></span>")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    assert provider.call_count == 0
+    assert corpus.samples == {}
+
+
+def test_corpus_store_skips_failed_chunk():
+    """A chunk that ends FAILED (no translated_text) MUST NOT be captured to
+    the corpus store (design decision #10)."""
+    store = InMemoryCheckpointStore()
+    provider = _AlwaysMismatchProvider()
+    corpus = FakeCorpusStore()
+    orch, _, _ = make_orchestrator(provider=provider, store=store, corpus_store=corpus)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="No tags here.")]
+
+    result = run_job(orch, job, chunks, config=config, store=store)
+
+    assert result.status == JobStatus.DONE
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.FAILED
+    assert corpus.samples == {}

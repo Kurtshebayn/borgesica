@@ -80,6 +80,7 @@ from borgesica.domain.prose import has_translatable_prose
 from borgesica.domain.models import (
     Chunk,
     ChunkStatus,
+    CorpusSample,
     Glossary,
     Job,
     JobConfig,
@@ -89,7 +90,12 @@ from borgesica.domain.models import (
     TranslationUnit,
     Usage,
 )
-from borgesica.domain.ports import CheckpointStore, ProgressCallback, TranslationProvider
+from borgesica.domain.ports import (
+    CheckpointStore,
+    CorpusStore,
+    ProgressCallback,
+    TranslationProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +200,7 @@ class TranslationOrchestrator:
         context_manager: ContextManager,
         cost_estimator: CostEstimator,
         provider_name: str = "unknown",
+        corpus_store: CorpusStore | None = None,  # type: ignore[type-arg]
     ) -> None:
         self._provider = provider
         self._checkpoint = checkpoint
@@ -204,6 +211,10 @@ class TranslationOrchestrator:
         # decision #6). Additive with a safe default — no required new
         # constructor argument for existing call sites.
         self._provider_name = provider_name
+        # Optional corpus capture collaborator (design decision #6). Default
+        # None → zero behavior change when absent. Writes are best-effort:
+        # a raising CorpusStore never fails the job (decision #10).
+        self._corpus_store = corpus_store
 
     # ------------------------------------------------------------------
     # Public interface
@@ -388,6 +399,11 @@ class TranslationOrchestrator:
             )
             self._checkpoint.save_chunk(job.id, done_chunk)
 
+            # Corpus capture (design decisions #6/#10): engine-wide, best-effort,
+            # write-only. Only real translated DONE chunks are captured — never
+            # pass-through (source==translated, zero provider calls) or FAILED.
+            self._capture_corpus(job.id, done_chunk, config, passed_validation)
+
             # Update rolling summary (REPLACES prior summary).
             current_summary = RollingSummary(
                 text=final_unit.summary_update,
@@ -475,6 +491,43 @@ class TranslationOrchestrator:
         # retry / tier-fallthrough waste factor so a chunk that could realistically
         # cost 2-3x its happy-path price does not silently blow the budget.
         return happy_path * _waste_factor(self._provider)
+
+    def _capture_corpus(
+        self,
+        job_id: str,
+        done_chunk: Chunk,
+        config: JobConfig,
+        passed_validation: bool,
+    ) -> None:
+        """Best-effort corpus capture at the real chunk-DONE point.
+
+        No-op when no corpus_store is injected (default None — zero behavior
+        change). A raised exception from the store is logged and swallowed —
+        it MUST NOT fail, pause, or otherwise affect the translation job
+        (design decision #10: silent best-effort).
+        """
+        if self._corpus_store is None:
+            return
+        try:
+            sample = CorpusSample(
+                job_id=job_id,
+                chunk_index=done_chunk.index,
+                source_text=done_chunk.source_text,
+                translated_text=done_chunk.translated_text,
+                provider=self._provider_name,
+                model=config.model,
+                quality_mode=config.quality_mode,
+                passed_validation=passed_validation,
+            )
+            self._corpus_store.save_sample(sample)
+        except Exception:
+            logger.warning(
+                "Corpus capture failed for job %s chunk %d — dropping sample "
+                "(best-effort, does not affect the translation job)",
+                job_id,
+                done_chunk.index,
+                exc_info=True,
+            )
 
     @staticmethod
     def _usage_cost(usage: Usage, in_price: float, out_price: float) -> float:
