@@ -63,6 +63,34 @@ def test_in_memory_checkpoint_store_satisfies_protocol() -> None:
     assert isinstance(store, CheckpointStore)
 
 
+def test_corpus_store_is_runtime_checkable() -> None:
+    from borgesica.domain.ports import CorpusStore
+
+    try:
+        isinstance(object(), CorpusStore)
+    except TypeError as e:
+        raise AssertionError(f"CorpusStore is not @runtime_checkable: {e}") from e
+
+
+def test_fake_corpus_store_satisfies_protocol() -> None:
+    """FakeCorpusStore (from tests/fakes.py) passes the Protocol check."""
+    from tests.fakes import FakeCorpusStore
+    from borgesica.domain.ports import CorpusStore
+
+    fake = FakeCorpusStore()
+    assert isinstance(fake, CorpusStore)
+
+
+def test_missing_method_does_not_satisfy_corpus_store() -> None:
+    """A class with no save_sample method must NOT pass the Protocol check."""
+    from borgesica.domain.ports import CorpusStore
+
+    class Incomplete:
+        pass
+
+    assert not isinstance(Incomplete(), CorpusStore)
+
+
 def test_missing_method_does_not_satisfy_translation_provider() -> None:
     """A class that is missing one required method must NOT pass the Protocol check."""
     from borgesica.domain.ports import TranslationProvider

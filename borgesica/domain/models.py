@@ -277,6 +277,30 @@ class Progress(BaseModel):
     status: JobStatus
 
 
+class CorpusSample(BaseModel):
+    """A single captured corpus entry (write-only; see CorpusStore port).
+
+    Captured at the orchestrator's chunk-DONE point (design decision #6),
+    for every job execution path (CLI and served/UI). One CorpusSample maps
+    to one row in corpus.db's ``samples`` table, upserted on
+    (job_id, chunk_index).
+    """
+
+    job_id: str
+    chunk_index: int
+    source_text: str
+    translated_text: str | None = None
+    provider: str
+    model: str
+    quality_mode: str
+    # Provenance mirror of Chunk.passed_validation — DONE does not imply
+    # validation passed (see Chunk.passed_validation docstring).
+    passed_validation: bool = True
+    # JSON/text detail of validation failures. Populated when
+    # passed_validation is False; empty/null when True.
+    validation_errors: str | None = None
+
+
 class QualityScore(BaseModel):
     """Rubric score produced by the LLM-as-judge harness (M4-2).
 
