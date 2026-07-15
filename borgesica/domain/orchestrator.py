@@ -193,11 +193,17 @@ class TranslationOrchestrator:
         checkpoint: CheckpointStore,  # type: ignore[type-arg]
         context_manager: ContextManager,
         cost_estimator: CostEstimator,
+        provider_name: str = "unknown",
     ) -> None:
         self._provider = provider
         self._checkpoint = checkpoint
         self._ctx = context_manager
         self._cost_est = cost_estimator
+        # Provenance: the adapter's provider name, available in the same
+        # scope as chunk.source_text/final_text at chunk-DONE (design
+        # decision #6). Additive with a safe default — no required new
+        # constructor argument for existing call sites.
+        self._provider_name = provider_name
 
     # ------------------------------------------------------------------
     # Public interface
@@ -328,7 +334,7 @@ class TranslationOrchestrator:
             # PRIMARY: send source_text WITH tags (do NOT strip up front).
             # The system prompt instructs the model to carry every tag with its word.
             # FALLBACK (if primary exhausted): strip → translate plain → reinsert.
-            final_unit, final_text, call_cost = self._translate_with_retry(
+            final_unit, final_text, call_cost, passed_validation = self._translate_with_retry(
                 chunk=chunk,
                 system=system_prompt.text,
                 config=config,
@@ -344,7 +350,9 @@ class TranslationOrchestrator:
             if final_unit is None:
                 # All retries exhausted — chunk FAILED. Whether the job PAUSES
                 # is gated by JobConfig.continue_on_error.
-                failed_chunk = chunk.model_copy(update={"status": ChunkStatus.FAILED})
+                failed_chunk = chunk.model_copy(
+                    update={"status": ChunkStatus.FAILED, "passed_validation": passed_validation}
+                )
                 self._checkpoint.save_chunk(job.id, failed_chunk)
                 if not config.continue_on_error:
                     paused_job = job.model_copy(
@@ -375,6 +383,7 @@ class TranslationOrchestrator:
                 update={
                     "status": ChunkStatus.DONE,
                     "translated_text": final_text,
+                    "passed_validation": passed_validation,
                 }
             )
             self._checkpoint.save_chunk(job.id, done_chunk)
@@ -482,7 +491,7 @@ class TranslationOrchestrator:
         config: JobConfig,
         in_price: float,
         out_price: float,
-    ) -> tuple[TranslationUnit | None, str | None, float]:
+    ) -> tuple[TranslationUnit | None, str | None, float, bool]:
         """Attempt translation using the tags-in-text PRIMARY path, with up to
         _MAX_TAG_RETRIES retries on tag-count mismatch, then a deterministic
         FALLBACK (strip → translate plain → reinsert) if all primary attempts fail.
@@ -502,11 +511,19 @@ class TranslationOrchestrator:
           - Applied only after all primary attempts fail.
           - strip(source) → translate plain text (fresh provider call) → reinsert(tags).
           - validate_tags again; if pass → chunk DONE using fallback output.
-          - If provider raises or validate_tags fails → return (None, None, total_cost).
+          - If provider raises or validate_tags fails → return (None, None, total_cost, False).
 
         Returns:
-            (TranslationUnit, translated_text, total_call_cost) on success.
-            (None, None, total_call_cost) if both primary and fallback fail.
+            (TranslationUnit, translated_text, total_call_cost, passed_validation)
+            on success. passed_validation is True for the happy-path first-try
+            match AND the strip/reinsert fallback success (both are full
+            validate_tags/validate_segments passes) — False for the
+            segment-mismatch best-effort acceptance (design decision #7: DONE
+            does NOT imply validation passed) and False when both primary and
+            fallback are exhausted (chunk FAILED — caller ignores the flag's
+            semantic weight there since translated_text is None, but it is
+            still threaded consistently).
+            (None, None, total_call_cost, False) if both primary and fallback fail.
             total_call_cost is the SUM of real usage costs from ALL calls made
             (including failed attempts and the fallback call).
         """
@@ -587,7 +604,7 @@ class TranslationOrchestrator:
             # Validate tag counts in the raw translation (tags-in-text path).
             if validate_tags(chunk.source_text, translated_text):
                 if validate_segments(chunk.source_text, translated_text):
-                    return unit, translated_text, total_call_cost
+                    return unit, translated_text, total_call_cost, True
                 # Segment-count mismatch (model merged/split "\n\n" paragraphs,
                 # which desynchronizes the writer's positional node mapping):
                 # keep this tag-valid attempt and retry for a compliant one.
@@ -618,7 +635,7 @@ class TranslationOrchestrator:
                     _MAX_TAG_RETRIES + 1,
                 )
                 best_unit, best_text = best_effort
-                return best_unit, best_text, total_call_cost
+                return best_unit, best_text, total_call_cost, False
             logger.warning(
                 "Chunk %d: translations array misaligned with the %d cues after "
                 "%d attempts — chunk FAILED (resume retries only failed chunks)",
@@ -626,7 +643,7 @@ class TranslationOrchestrator:
                 segment_count,
                 _MAX_TAG_RETRIES + 1,
             )
-            return None, None, total_call_cost
+            return None, None, total_call_cost, False
 
         # --- FALLBACK: strip → translate plain → reinsert ---
         # All primary (tags-in-text) attempts exhausted.
@@ -642,7 +659,7 @@ class TranslationOrchestrator:
             fallback_unit = fallback_result.unit
             fallback_text = reinsert(fallback_unit.translation, tags, plain_source)
             if validate_tags(chunk.source_text, fallback_text):
-                return fallback_unit, fallback_text, total_call_cost
+                return fallback_unit, fallback_text, total_call_cost, True
         except (MalformedOutput, ProviderError) as exc:
             # Provider failed during the fallback call — treat as total failure
             # (chunk FAILED, job PAUSED). Any OTHER exception (a real bug in
@@ -653,7 +670,7 @@ class TranslationOrchestrator:
             total_call_cost += self._usage_cost(exc.usage, in_price, out_price)
 
         # Both primary and fallback failed.
-        return None, None, total_call_cost
+        return None, None, total_call_cost, False
 
     def _translate_reflective(
         self,

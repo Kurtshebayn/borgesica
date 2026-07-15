@@ -100,6 +100,12 @@ class Chunk(BaseModel):
     status: ChunkStatus = ChunkStatus.PENDING
     translated_text: str | None = None
     meta: dict = Field(default_factory=dict)  # adapter round-trip data
+    # Provenance: whether the persisted translation passed tag/segment
+    # validation. DONE does NOT imply True — a prose chunk can be accepted
+    # as best-effort after exhausting all retries (see orchestrator.py
+    # _translate_with_retry). Defaults True so legacy rows (and passthrough/
+    # no-translation chunks) are backward-compatible.
+    passed_validation: bool = True
 
 
 class TranslationUnit(BaseModel):

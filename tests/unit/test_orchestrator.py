@@ -2634,3 +2634,179 @@ def test_srt_reflective_passes_segment_count_to_draft_and_revise_only():
     assert saved[0].status == ChunkStatus.DONE
     assert saved[0].translated_text == "uno\n\ndos"
     assert result.status == JobStatus.DONE
+
+
+# ===========================================================================
+# T2 — passed_validation provenance threading through _translate_with_retry's
+# four return paths (spec: job-execution-core/"passed_validation persisted
+# per chunk"; design decision #7, orchestrator.py:612-621).
+# ===========================================================================
+
+
+def test_passed_validation_true_on_first_try_success():
+    """Return path 1 (happy): translation passes tag+segment validation on the
+    FIRST attempt → persisted chunk.passed_validation is True."""
+    orch, provider, store = make_orchestrator()
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 1
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].passed_validation is True
+
+
+def test_passed_validation_false_on_best_effort_segment_mismatch():
+    """Return path 2 (best-effort accepted): a prose chunk that never produces
+    a segment-compliant output is accepted DONE after 3 attempts (design
+    decision #7 / orchestrator.py:612-621) with passed_validation=False."""
+    store = InMemoryCheckpointStore()
+
+    class AlwaysMergeProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="Párrafo uno. Párrafo dos.",
+                summary_update="Summary.",
+            )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = AlwaysMergeProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 3
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].passed_validation is False
+    assert result.status == JobStatus.DONE
+
+
+def test_passed_validation_true_on_fallback_success():
+    """Return path 4 (strip/reinsert fallback): all 3 tags-in-text attempts
+    fail, but the deterministic fallback call passes validate_tags → chunk
+    DONE with passed_validation=True (fallback success IS a validation pass,
+    distinct from the best-effort segment-mismatch acceptance)."""
+    store = InMemoryCheckpointStore()
+
+    class AllTagsFailThenPlainProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="El zorro rápido.",
+                summary_update="Summary.",
+            )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = AllTagsFailThenPlainProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="The <i>quick</i> fox.")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 4  # 3 primary + 1 fallback
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].passed_validation is True
+    assert result.status == JobStatus.DONE
+
+
+def test_passed_validation_false_on_chunk_failed_tag_mismatch():
+    """Return path 3 (FAILED): both primary and fallback exhaust without a
+    tag-valid output → chunk FAILED with passed_validation=False."""
+    store = InMemoryCheckpointStore()
+    provider = _always_mismatch_except({"Chunk 0 text."})()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Chunk 0 text.")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[0].passed_validation is False
+    assert result.status == JobStatus.DONE
+
+
+def test_passed_validation_false_on_segmented_misalignment_failed():
+    """Return path 3 (FAILED), segmented-cue variant: a translations array
+    that never aligns with the cue count ends the chunk FAILED (not
+    best-effort — SRT cue batches cannot absorb a misalignment) with
+    passed_validation=False."""
+    store = InMemoryCheckpointStore()
+
+    class MisalignedSegmentsProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            # Always return ONE fewer translation than requested — permanently
+            # misaligned with the cue count.
+            unit = TranslationUnit(
+                translations=["uno"] if segment_count else ["uno", "dos"],
+                summary_update="Summary.",
+            )
+            return TranslationResult(unit=unit, usage=Usage())
+
+    provider = MisalignedSegmentsProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["a", "b"])]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[0].passed_validation is False
+    assert result.status == JobStatus.DONE
+
+
+def test_orchestrator_accepts_provider_name_default_unknown():
+    """Orchestrator ctor gains an additive provider_name kwarg (design decision
+    #6) defaulting to 'unknown' so existing call sites are unaffected."""
+    provider = FakeTranslationProvider()
+    store = InMemoryCheckpointStore()
+    ctx = ContextManager(provider)
+    cost_est = CostEstimator(provider)
+    orch = TranslationOrchestrator(
+        provider=provider,
+        checkpoint=store,
+        context_manager=ctx,
+        cost_estimator=cost_est,
+    )
+    assert orch._provider_name == "unknown"
+
+
+def test_orchestrator_accepts_provider_name_explicit_value():
+    """Triangulation: explicit provider_name is stored verbatim."""
+    provider = FakeTranslationProvider()
+    store = InMemoryCheckpointStore()
+    ctx = ContextManager(provider)
+    cost_est = CostEstimator(provider)
+    orch = TranslationOrchestrator(
+        provider=provider,
+        checkpoint=store,
+        context_manager=ctx,
+        cost_estimator=cost_est,
+        provider_name="anthropic",
+    )
+    assert orch._provider_name == "anthropic"
