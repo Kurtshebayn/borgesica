@@ -79,6 +79,84 @@ class TestSQLiteCheckpointStore:
         assert c.meta["cue_index"] == 1
         assert c.meta["start"] == "00:00:01,000"
 
+    # --- passed_validation round-trip (T2 — design decision #8) ---
+    def test_save_and_load_chunk_passed_validation_false(self):
+        """A chunk persisted with passed_validation=False (best-effort accepted)
+        round-trips as False, not the column default."""
+        job = make_job()
+        self.store.save_job(job)
+        chunk = make_chunk(0)
+        chunk = chunk.model_copy(
+            update={
+                "translated_text": "best effort",
+                "status": ChunkStatus.DONE,
+                "passed_validation": False,
+            }
+        )
+        self.store.save_chunk(job.id, chunk)
+        loaded = self.store.load_chunks(job.id)
+        assert len(loaded) == 1
+        assert loaded[0].passed_validation is False
+
+    def test_save_and_load_chunk_passed_validation_true_default(self):
+        """Triangulation: a chunk saved without overriding passed_validation
+        round-trips as True (the model default)."""
+        job = make_job()
+        self.store.save_job(job)
+        chunk = make_chunk(0)
+        self.store.save_chunk(job.id, chunk)
+        loaded = self.store.load_chunks(job.id)
+        assert loaded[0].passed_validation is True
+
+    def test_migrates_existing_db_without_passed_validation_column(self):
+        """Opening a jobs.db created before the chunks.passed_validation column
+        existed loads old chunk rows with the default (True), no error or data
+        loss (spec: job-execution-core/'Backward-compatible load of existing
+        jobs.db')."""
+        import os
+        import sqlite3
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        old_chunks_ddl = """
+        CREATE TABLE chunks (
+            job_id          TEXT NOT NULL,
+            chunk_index     INTEGER NOT NULL,
+            source_text     TEXT NOT NULL,
+            translated_text TEXT,
+            status          TEXT NOT NULL,
+            meta_json       TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (job_id, chunk_index)
+        )
+        """
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(old_chunks_ddl)
+            conn.execute(
+                "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                ("job-old", 0, "hello world", "hola mundo", str(ChunkStatus.DONE), "{}"),
+            )
+            conn.commit()
+            conn.close()
+
+            store = SQLiteCheckpointStore(db_path)
+            loaded = store.load_chunks("job-old")
+            assert len(loaded) == 1
+            assert loaded[0].passed_validation is True
+            assert loaded[0].translated_text == "hola mundo"
+
+            # New rows persist non-default values in the migrated DB.
+            chunk = make_chunk(1)
+            chunk = chunk.model_copy(
+                update={"status": ChunkStatus.DONE, "passed_validation": False}
+            )
+            store.save_chunk("job-old", chunk)
+            reloaded = {c.index: c for c in SQLiteCheckpointStore(db_path).load_chunks("job-old")}
+            assert reloaded[1].passed_validation is False
+        finally:
+            os.unlink(db_path)
+
     # --- Test 3: save_chunk twice with same (job_id, chunk.index) → exactly 1 row, no error ---
     def test_save_chunk_idempotent_no_duplicate(self):
         job = make_job()
