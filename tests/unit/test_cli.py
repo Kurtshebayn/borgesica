@@ -364,6 +364,88 @@ def test_cmd_run_no_skip_summary_when_no_failures(capsys: pytest.CaptureFixture)
 
 
 # ---------------------------------------------------------------------------
+# T4 — `run`/`resume` print a best-effort summary line when N>0 chunks have
+# passed_validation=False, and print nothing (no noise) when N=0.
+# Spec: "End-of-run best-effort summary" (rev 2).
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_run_prints_best_effort_summary_when_present(capsys: pytest.CaptureFixture) -> None:
+    """run prints a NOTE line naming the count and indices of best-effort
+    chunks (translated but not passing validation)."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import JobStatus
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.status.return_value = MagicMock(config=MagicMock(source_type="SRT"))
+        done_job = MagicMock(status=JobStatus.DONE, cost_usd=0.001)
+        engine.run_job.return_value = done_job
+        engine.failed_chunk_indices.return_value = []
+        engine.best_effort_chunk_indices.return_value = [1, 4]
+        mock_build.return_value = engine
+
+        code = main(["run", "job-1", "--out", "out.srt"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert "2" in out
+    assert "[1, 4]" in out
+
+
+def test_cmd_run_no_best_effort_summary_when_zero(capsys: pytest.CaptureFixture) -> None:
+    """run prints no best-effort NOTE line when best_effort_chunk_indices
+    returns [] (no noise on the happy path)."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import JobStatus
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        done_job = MagicMock(status=JobStatus.DONE, cost_usd=0.001)
+        engine.run_job.return_value = done_job
+        engine.failed_chunk_indices.return_value = []
+        engine.best_effort_chunk_indices.return_value = []
+        mock_build.return_value = engine
+
+        code = main(["run", "job-1", "--out", "out.srt"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert "NOTE" not in out
+    assert "Done. Status=" in out
+
+
+def test_cmd_resume_prints_best_effort_summary_when_present(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """resume also prints the best-effort NOTE line when present."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import JobStatus
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.status.return_value = MagicMock(config=MagicMock(source_type="SRT"))
+        done_job = MagicMock(status=JobStatus.DONE, cost_usd=0.001)
+        engine.resume_job.return_value = done_job
+        engine.failed_chunk_indices.return_value = []
+        engine.best_effort_chunk_indices.return_value = [0]
+        mock_build.return_value = engine
+
+        code = main(["resume", "job-1", "--out", "out.srt"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert "1" in out
+    assert "[0]" in out
+
+
+# ---------------------------------------------------------------------------
 # continue-on-error WU4-3 — `status` lists FAILED chunk indices when present
 # Spec: job-lifecycle/"skip report surfaces FAILED chunk indices at end of run"
 # (scenario: CLI status lists no failed chunks when none exist)

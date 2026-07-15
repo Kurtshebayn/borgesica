@@ -236,6 +236,16 @@ def _build_engine(
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = str(db_dir / "jobs.db")
 
+    # Corpus capture is engine-wide (design decision #6/#10): CLI runs get it
+    # from day one, in a separate corpus.db next to jobs.db. Mirrors db_path's
+    # ":memory:" escape hatch so tests exercising the real _build_engine path
+    # never touch the filesystem.
+    from borgesica.adapters.corpus.sqlite_corpus import SQLiteCorpusStore
+
+    corpus_db_path = (
+        ":memory:" if db_path == ":memory:" else str(Path(db_path).parent / "corpus.db")
+    )
+
     return TranslatorEngine(
         provider=translation_provider,
         checkpoint=SQLiteCheckpointStore(db_path=db_path),
@@ -250,6 +260,8 @@ def _build_engine(
             SourceType.PDF: PdfWriter(),
         },
         extractor=NullGlossaryExtractor(),  # default: no LLM glossary seed on CLI
+        corpus_store=SQLiteCorpusStore(corpus_db_path),
+        provider_name=provider,
     )
 
 
@@ -338,6 +350,20 @@ def _print_skip_summary(args: argparse.Namespace, engine: TranslatorEngine) -> N
         )
 
 
+def _print_best_effort_summary(args: argparse.Namespace, engine: TranslatorEngine) -> None:
+    """Print an end-of-run best-effort summary, analogous to
+    _print_skip_summary (spec: "End-of-run best-effort summary" — v1). Prints
+    nothing when there are zero best-effort chunks (no noise on the happy
+    path). Best-effort chunks ARE translated (unlike FAILED skips) but did
+    not pass tag/segment validation on any attempt."""
+    best_effort = engine.best_effort_chunk_indices(args.job_id)
+    if best_effort:
+        print(
+            f"NOTE: {len(best_effort)} chunk(s) remained best-effort "
+            f"(translated, but did not pass validation): {best_effort}"
+        )
+
+
 def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         out_path = _resolve_out(args, engine)
@@ -345,6 +371,7 @@ def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         final_job = engine.run_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
         _print_skip_summary(args, engine)
+        _print_best_effort_summary(args, engine)
         return 0
     except BorgesicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -358,6 +385,7 @@ def _cmd_resume(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         final_job = engine.resume_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
         _print_skip_summary(args, engine)
+        _print_best_effort_summary(args, engine)
         return 0
     except BorgesicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

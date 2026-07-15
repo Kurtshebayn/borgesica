@@ -27,7 +27,7 @@ from borgesica.domain.models import (
     SourceType,
     TranslationUnit,
 )
-from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
+from tests.fakes import FakeCorpusStore, FakeTranslationProvider, InMemoryCheckpointStore
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +208,45 @@ def test_run_job_completes_and_calls_provider_per_chunk(
 
     assert final_job.status == JobStatus.DONE
     assert provider.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# T4 — corpus_store/provider_name ctor kwargs are threaded through to the
+# orchestrator during run_job (design decision #6: engine-wide capture, CLI
+# included, since api.py is the CLI's driving adapter's composition root).
+# ---------------------------------------------------------------------------
+
+
+def test_run_job_threads_corpus_store_to_orchestrator(tmp_path: Path) -> None:
+    """Injecting corpus_store + provider_name into TranslatorEngine results in
+    corpus samples being captured during run_job, with provenance carrying
+    the configured provider_name."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=1)
+    provider = FakeTranslationProvider()
+    checkpoint = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+    from borgesica.adapters.readers.srt_reader import SrtReader
+    from borgesica.adapters.writers.srt_writer import SrtWriter
+    from borgesica.domain.glossary import NullGlossaryExtractor
+
+    engine = TranslatorEngine(
+        provider=provider,
+        checkpoint=checkpoint,
+        readers={SourceType.SRT: SrtReader()},
+        writers={SourceType.SRT: SrtWriter()},
+        extractor=NullGlossaryExtractor(),
+        corpus_store=corpus,
+        provider_name="anthropic",
+    )
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    out_path = str(tmp_path / "out.srt")
+    engine.run_job(job.id, out_path=out_path)
+
+    assert corpus.samples
+    sample = next(iter(corpus.samples.values()))
+    assert sample.provider == "anthropic"
 
 
 # ---------------------------------------------------------------------------
@@ -444,3 +483,55 @@ def test_failed_chunk_indices_raises_for_unknown_job_id() -> None:
     engine, _, _ = _make_engine()
     with pytest.raises(JobNotFoundError):
         engine.failed_chunk_indices("unknown-id")
+
+
+# ---------------------------------------------------------------------------
+# T4 — TranslatorEngine.best_effort_chunk_indices(job_id)
+# Spec: "End-of-run best-effort summary" — DONE chunks with
+# passed_validation=False, sorted 0-based (design decision #9).
+# ---------------------------------------------------------------------------
+
+
+def test_best_effort_chunk_indices_empty_when_all_validated(tmp_path: Path) -> None:
+    """best_effort_chunk_indices returns [] when every DONE chunk validated."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    engine, _, _ = _make_engine()
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    out_path = str(tmp_path / "out.srt")
+    engine.run_job(job.id, out_path=out_path)
+
+    assert engine.best_effort_chunk_indices(job.id) == []
+
+
+def test_best_effort_chunk_indices_returns_sorted_indices(tmp_path: Path) -> None:
+    """DONE chunks persisted with passed_validation=False are surfaced,
+    sorted 0-based; a DONE chunk with passed_validation=True is excluded."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    engine, _, checkpoint = _make_engine()
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    chunks = {c.index: c for c in checkpoint.load_chunks(job.id)}
+    checkpoint.save_chunk(
+        job.id,
+        chunks[0].model_copy(
+            update={"status": ChunkStatus.DONE, "passed_validation": False}
+        ),
+    )
+    checkpoint.save_chunk(
+        job.id,
+        chunks[1].model_copy(
+            update={"status": ChunkStatus.DONE, "passed_validation": True}
+        ),
+    )
+
+    assert engine.best_effort_chunk_indices(job.id) == [0]
+
+
+def test_best_effort_chunk_indices_raises_for_unknown_job_id() -> None:
+    """best_effort_chunk_indices raises JobNotFoundError for an unknown job_id."""
+    engine, _, _ = _make_engine()
+    with pytest.raises(JobNotFoundError):
+        engine.best_effort_chunk_indices("unknown-id")

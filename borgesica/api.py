@@ -32,6 +32,7 @@ from borgesica.domain.models import (
 from borgesica.domain.orchestrator import TranslationOrchestrator
 from borgesica.domain.ports import (
     CheckpointStore,
+    CorpusStore,
     DocumentReader,
     DocumentWriter,
     GlossaryExtractor,
@@ -52,6 +53,10 @@ class TranslatorEngine:
         readers:    Map from SourceType → DocumentReader.
         writers:    Map from SourceType → DocumentWriter.
         extractor:  GlossaryExtractor for seeding; None → NullGlossaryExtractor.
+        corpus_store:  Optional CorpusStore for engine-wide corpus capture
+            (design decision #6); default None → zero behavior change.
+        provider_name: Provenance label passed through to the orchestrator
+            (design decision #6); default "unknown".
     """
 
     def __init__(
@@ -62,12 +67,16 @@ class TranslatorEngine:
         readers: dict[SourceType, DocumentReader],
         writers: dict[SourceType, DocumentWriter],
         extractor: GlossaryExtractor | None = None,
+        corpus_store: CorpusStore | None = None,  # type: ignore[type-arg]
+        provider_name: str = "unknown",
     ) -> None:
         self._provider = provider
         self._checkpoint = checkpoint
         self._readers = readers
         self._writers = writers
         self._extractor = extractor if extractor is not None else NullGlossaryExtractor()
+        self._corpus_store = corpus_store
+        self._provider_name = provider_name
 
         # Domain services (no adapter deps)
         self._ctx = ContextManager(provider=provider)
@@ -278,6 +287,34 @@ class TranslatorEngine:
         return sorted(c.index for c in chunks if c.status == ChunkStatus.FAILED)
 
     # ------------------------------------------------------------------
+    # best_effort_chunk_indices
+    # ------------------------------------------------------------------
+
+    def best_effort_chunk_indices(self, job_id: str) -> list[int]:
+        """Return the sorted list of DONE chunk indices with passed_validation=False.
+
+        Pure pass-through over per-chunk state already persisted by the
+        checkpoint store (design decision #9). Used by the CLI end-of-run
+        summary and (v1) the serve API's job status payload.
+
+        Args:
+            job_id: ID of the job.
+
+        Returns:
+            Sorted (0-based) list of best-effort chunk indices. Empty if none.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        chunks = self._checkpoint.load_chunks(job_id)
+        return sorted(
+            c.index
+            for c in chunks
+            if c.status == ChunkStatus.DONE and not c.passed_validation
+        )
+
+    # ------------------------------------------------------------------
     # get_glossary / update_glossary
     # ------------------------------------------------------------------
 
@@ -413,6 +450,8 @@ class TranslatorEngine:
             checkpoint=self._checkpoint,
             context_manager=self._ctx,
             cost_estimator=self._cost_est,
+            provider_name=self._provider_name,
+            corpus_store=self._corpus_store,
         )
 
         # No-op progress callback if none provided
