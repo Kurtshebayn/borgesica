@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { deriveSidecarStatus, type SidecarState } from "./sidecarStatus";
 import { startSidecar, stopSidecar } from "./sidecarClient";
+import WizardScreen from "./WizardScreen";
 
 /**
- * Minimal app shell for T7a: proves the sidecar lifecycle end to end
- * (start -> ready -> teardown on unmount). The full wizard (file pick,
- * estimate, glossary, progress, export) is T7b.
+ * App shell: session-only API key entry + sidecar lifecycle (T7a), then
+ * hands off to the translation wizard (T7b) once the sidecar reports
+ * `ready` (spec: desktop-shell "UI waits for readiness").
  */
 export default function App() {
   const [apiKeyInput, setApiKeyInput] = useState("");
@@ -55,6 +56,7 @@ export default function App() {
         </div>
       )}
       {state.error && <p role="alert">{state.error}</p>}
+      {status === "ready" && state.baseUrl && <WizardScreen baseUrl={state.baseUrl} />}
     </main>
   );
 }
