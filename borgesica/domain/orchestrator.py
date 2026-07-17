@@ -49,6 +49,7 @@ Resume semantics:
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -345,7 +346,13 @@ class TranslationOrchestrator:
             # PRIMARY: send source_text WITH tags (do NOT strip up front).
             # The system prompt instructs the model to carry every tag with its word.
             # FALLBACK (if primary exhausted): strip → translate plain → reinsert.
-            final_unit, final_text, call_cost, passed_validation = self._translate_with_retry(
+            (
+                final_unit,
+                final_text,
+                call_cost,
+                passed_validation,
+                validation_errors,
+            ) = self._translate_with_retry(
                 chunk=chunk,
                 system=system_prompt.text,
                 config=config,
@@ -362,7 +369,11 @@ class TranslationOrchestrator:
                 # All retries exhausted — chunk FAILED. Whether the job PAUSES
                 # is gated by JobConfig.continue_on_error.
                 failed_chunk = chunk.model_copy(
-                    update={"status": ChunkStatus.FAILED, "passed_validation": passed_validation}
+                    update={
+                        "status": ChunkStatus.FAILED,
+                        "passed_validation": passed_validation,
+                        "validation_errors": validation_errors,
+                    }
                 )
                 self._checkpoint.save_chunk(job.id, failed_chunk)
                 if not config.continue_on_error:
@@ -395,6 +406,7 @@ class TranslationOrchestrator:
                     "status": ChunkStatus.DONE,
                     "translated_text": final_text,
                     "passed_validation": passed_validation,
+                    "validation_errors": validation_errors,
                 }
             )
             self._checkpoint.save_chunk(job.id, done_chunk)
@@ -518,6 +530,7 @@ class TranslationOrchestrator:
                 model=config.model,
                 quality_mode=config.quality_mode,
                 passed_validation=passed_validation,
+                validation_errors=done_chunk.validation_errors,
             )
             self._corpus_store.save_sample(sample)
         except Exception:
@@ -544,7 +557,7 @@ class TranslationOrchestrator:
         config: JobConfig,
         in_price: float,
         out_price: float,
-    ) -> tuple[TranslationUnit | None, str | None, float, bool]:
+    ) -> tuple[TranslationUnit | None, str | None, float, bool, str | None]:
         """Attempt translation using the tags-in-text PRIMARY path, with up to
         _MAX_TAG_RETRIES retries on tag-count mismatch, then a deterministic
         FALLBACK (strip → translate plain → reinsert) if all primary attempts fail.
@@ -567,21 +580,30 @@ class TranslationOrchestrator:
           - If provider raises or validate_tags fails → return (None, None, total_cost, False).
 
         Returns:
-            (TranslationUnit, translated_text, total_call_cost, passed_validation)
-            on success. passed_validation is True for the happy-path first-try
-            match AND the strip/reinsert fallback success (both are full
-            validate_tags/validate_segments passes) — False for the
-            segment-mismatch best-effort acceptance (design decision #7: DONE
-            does NOT imply validation passed) and False when both primary and
-            fallback are exhausted (chunk FAILED — caller ignores the flag's
-            semantic weight there since translated_text is None, but it is
-            still threaded consistently).
-            (None, None, total_call_cost, False) if both primary and fallback fail.
+            (TranslationUnit, translated_text, total_call_cost, passed_validation,
+            validation_errors) on success. passed_validation is True for the
+            happy-path first-try match AND the strip/reinsert fallback success
+            (both are full validate_tags/validate_segments passes) — False for
+            the segment-mismatch best-effort acceptance (design decision #7:
+            DONE does NOT imply validation passed) and False when both primary
+            and fallback are exhausted (chunk FAILED — caller ignores the
+            flag's semantic weight there since translated_text is None, but it
+            is still threaded consistently).
+            (None, None, total_call_cost, False, validation_errors) if both
+            primary and fallback fail.
             total_call_cost is the SUM of real usage costs from ALL calls made
             (including failed attempts and the fallback call).
+            validation_errors (T4b amendment) is a JSON-serialized list of the
+            validator issue messages collected across every failed/mismatched
+            attempt — None whenever passed_validation ends up True (a clean
+            pass discards prior transient mismatches from earlier attempts).
         """
         user_prompt = chunk.source_text  # PRIMARY: send WITH tags
         total_call_cost = 0.0
+        # T4b: validator issue messages collected across every mismatched or
+        # failed attempt (tag mismatch, segment mismatch, fallback failure).
+        # Serialized to JSON only when the chunk ends up NOT passing validation.
+        validation_issues: list[str] = []
 
         # Segmented (SRT) contract: cue-batch chunks request the translations
         # ARRAY — cue boundaries as structured data, not blank-line convention
@@ -657,14 +679,21 @@ class TranslationOrchestrator:
             # Validate tag counts in the raw translation (tags-in-text path).
             if validate_tags(chunk.source_text, translated_text):
                 if validate_segments(chunk.source_text, translated_text):
-                    return unit, translated_text, total_call_cost, True
+                    return unit, translated_text, total_call_cost, True, None
                 # Segment-count mismatch (model merged/split "\n\n" paragraphs,
                 # which desynchronizes the writer's positional node mapping):
                 # keep this tag-valid attempt and retry for a compliant one.
+                src_segs = len(chunk.source_text.split("\n\n"))
+                got_segs = len(translated_text.split("\n\n"))
+                validation_issues.append(
+                    f"attempt {attempt + 1}: segment count mismatch "
+                    f"(expected {src_segs}, got {got_segs})"
+                )
                 best_effort = (unit, translated_text)
                 continue
 
             # Tag mismatch — retry unless this was the last attempt.
+            validation_issues.append(f"attempt {attempt + 1}: tag count mismatch")
 
         # All attempts exhausted with at least one tag-valid but
         # segment-mismatched output. Two different consequences:
@@ -688,7 +717,13 @@ class TranslationOrchestrator:
                     _MAX_TAG_RETRIES + 1,
                 )
                 best_unit, best_text = best_effort
-                return best_unit, best_text, total_call_cost, False
+                return (
+                    best_unit,
+                    best_text,
+                    total_call_cost,
+                    False,
+                    json.dumps(validation_issues),
+                )
             logger.warning(
                 "Chunk %d: translations array misaligned with the %d cues after "
                 "%d attempts — chunk FAILED (resume retries only failed chunks)",
@@ -696,7 +731,7 @@ class TranslationOrchestrator:
                 segment_count,
                 _MAX_TAG_RETRIES + 1,
             )
-            return None, None, total_call_cost, False
+            return None, None, total_call_cost, False, json.dumps(validation_issues)
 
         # --- FALLBACK: strip → translate plain → reinsert ---
         # All primary (tags-in-text) attempts exhausted.
@@ -712,7 +747,8 @@ class TranslationOrchestrator:
             fallback_unit = fallback_result.unit
             fallback_text = reinsert(fallback_unit.translation, tags, plain_source)
             if validate_tags(chunk.source_text, fallback_text):
-                return fallback_unit, fallback_text, total_call_cost, True
+                return fallback_unit, fallback_text, total_call_cost, True, None
+            validation_issues.append("fallback: tag count mismatch after strip/reinsert")
         except (MalformedOutput, ProviderError) as exc:
             # Provider failed during the fallback call — treat as total failure
             # (chunk FAILED, job PAUSED). Any OTHER exception (a real bug in
@@ -721,9 +757,10 @@ class TranslationOrchestrator:
             # Cost fix: accrue the billed-but-failed usage carried on the exception
             # so the fallback call's real cost is not dropped.
             total_call_cost += self._usage_cost(exc.usage, in_price, out_price)
+            validation_issues.append(f"fallback: provider error ({exc})")
 
         # Both primary and fallback failed.
-        return None, None, total_call_cost, False
+        return None, None, total_call_cost, False, json.dumps(validation_issues)
 
     def _translate_reflective(
         self,

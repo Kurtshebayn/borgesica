@@ -2909,3 +2909,68 @@ def test_corpus_store_skips_failed_chunk():
     saved = {c.index: c for c in store.load_chunks(job.id)}
     assert saved[0].status == ChunkStatus.FAILED
     assert corpus.samples == {}
+
+
+# ===========================================================================
+# T4b amendment — validation failure detail (spec-conformance gap): a
+# best-effort corpus sample MUST carry the actual validator issue messages
+# in validation_errors; a cleanly-passing sample MUST have validation_errors
+# None; a FAILED chunk still makes zero corpus writes (unchanged from T4).
+# ===========================================================================
+
+
+def test_corpus_store_best_effort_chunk_carries_validator_messages():
+    """A prose chunk accepted as best-effort (segment-count mismatch on every
+    attempt) is captured with validation_errors populated with the actual
+    validator issue messages (JSON list of strings)."""
+    import json
+
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+
+    class AlwaysMergeProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="Párrafo uno. Párrafo dos.",
+                summary_update="Summary.",
+            )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = AlwaysMergeProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store, corpus_store=corpus)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.DONE
+    assert saved.passed_validation is False
+
+    sample = corpus.samples[(job.id, 0)]
+    assert sample.passed_validation is False
+    assert sample.validation_errors is not None
+    issues = json.loads(sample.validation_errors)
+    assert isinstance(issues, list) and len(issues) > 0
+    assert any("segment" in issue.lower() for issue in issues)
+
+
+def test_corpus_store_passing_chunk_validation_errors_none():
+    """A chunk that passes validation cleanly (first attempt) is captured
+    with validation_errors=None."""
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+    orch, _, _ = make_orchestrator(store=store, corpus_store=corpus)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    sample = corpus.samples[(job.id, 0)]
+    assert sample.passed_validation is True
+    assert sample.validation_errors is None

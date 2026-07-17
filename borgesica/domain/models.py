@@ -106,6 +106,14 @@ class Chunk(BaseModel):
     # _translate_with_retry). Defaults True so legacy rows (and passthrough/
     # no-translation chunks) are backward-compatible.
     passed_validation: bool = True
+    # Validation failure detail (JSON list of issue-message strings),
+    # populated whenever passed_validation is False (best-effort or FAILED
+    # paths — see orchestrator.py _translate_with_retry); None when
+    # validation passed cleanly. In-memory only — NOT persisted to the
+    # checkpoint schema (T4b amendment: the corpus hook fires at DONE
+    # within the same run, so in-memory threading suffices; no jobs.db
+    # column needed).
+    validation_errors: str | None = None
 
 
 class TranslationUnit(BaseModel):
