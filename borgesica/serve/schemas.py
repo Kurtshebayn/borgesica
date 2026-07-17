@@ -74,3 +74,10 @@ class GlossaryResponse(BaseModel):
 
 class GlossaryUpdateRequest(BaseModel):
     entries: list[GlossaryEntry]
+
+
+class RunRequest(BaseModel):
+    """Body for POST run/resume (T6): destination for the translated output,
+    chosen by the UI before the run starts (design decision #11)."""
+
+    out_path: str
