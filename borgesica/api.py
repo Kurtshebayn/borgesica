@@ -84,6 +84,11 @@ class TranslatorEngine:
 
         # Per-job cancel flags: {job_id: threading.Event}
         self._cancel_flags: dict[str, threading.Event] = {}
+        # Guards all reads/writes of self._cancel_flags (REL-002): without
+        # this, a cancel_job() call racing concurrently with run_job's
+        # _execute_job start can have its Event.set() silently discarded when
+        # _execute_job installs a fresh Event for the same job_id.
+        self._cancel_flags_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # create_job
@@ -382,12 +387,13 @@ class TranslatorEngine:
         """
         job = self._load_job_or_raise(job_id)
 
-        # Ensure a cancel flag exists for this job
-        if job_id not in self._cancel_flags:
-            self._cancel_flags[job_id] = threading.Event()
-
-        # Set the cooperative flag
-        self._cancel_flags[job_id].set()
+        # Ensure a cancel flag exists for this job, and set it. Guarded by
+        # _cancel_flags_lock so this can never interleave with _execute_job
+        # installing a fresh Event for the same job_id (REL-002).
+        with self._cancel_flags_lock:
+            if job_id not in self._cancel_flags:
+                self._cancel_flags[job_id] = threading.Event()
+            self._cancel_flags[job_id].set()
 
         # If the job is not currently RUNNING, mark it CANCELLED directly
         if job.status != JobStatus.RUNNING:
@@ -418,11 +424,25 @@ class TranslatorEngine:
 
         This is the shared implementation for run_job and resume_job.
         """
-        # Create a FRESH cancel flag for each execution (clears any prior cancel).
-        # This allows resume after a previous cancel_job() call.
-        fresh_flag = threading.Event()
-        self._cancel_flags[job.id] = fresh_flag
-        cancel_flag = fresh_flag
+        # Install this execution's cancel flag (REL-002).
+        #
+        # Ordinarily a FRESH (unset) Event is installed, clearing any prior
+        # cancel state — this is what lets resume_job() run to completion
+        # after a previous, already-persisted CANCELLED status (deliberate
+        # resume-after-cancel: `job.status == JobStatus.CANCELLED` here).
+        #
+        # But if the job was NOT already CANCELLED when loaded (i.e. this is
+        # a fresh run/resume of a CREATED/PAUSED job) and the existing flag
+        # is already set, a concurrent cancel_job() call raced with this
+        # run's start. Preserve that signal instead of silently discarding
+        # it by installing a brand-new unset Event over it.
+        with self._cancel_flags_lock:
+            existing_flag = self._cancel_flags.get(job.id)
+            if job.status != JobStatus.CANCELLED and existing_flag is not None and existing_flag.is_set():
+                cancel_flag = existing_flag
+            else:
+                cancel_flag = threading.Event()
+                self._cancel_flags[job.id] = cancel_flag
 
         # Load current state
         chunks = self._checkpoint.load_chunks(job.id)

@@ -424,6 +424,76 @@ def test_on_progress_callback_receives_progress(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# REL-002 — cancel_job racing concurrently with run_job()'s _execute_job start
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_race_before_execute_installs_fresh_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel_job() landing in the window between run_job() loading the job
+    and _execute_job installing its fresh cancel Event must not be silently
+    lost. Regression: _execute_job used to unconditionally overwrite
+    self._cancel_flags[job.id] with a brand-new (unset) Event, discarding any
+    concurrent cancel signal — the job would then run to completion instead
+    of observing the cancellation."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    engine, provider, checkpoint = _make_engine()
+    config = _make_config(chunk_size=1)
+    job = engine.create_job(srt_path, config)
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    original_execute = engine._execute_job
+
+    def _blocking_execute(job_arg, *, out_path, on_progress):
+        entered.set()
+        proceed.wait(timeout=5)
+        return original_execute(job_arg, out_path=out_path, on_progress=on_progress)
+
+    monkeypatch.setattr(engine, "_execute_job", _blocking_execute)
+
+    out_path = str(tmp_path / "out.srt")
+    result: dict[str, Job] = {}
+
+    def _run() -> None:
+        result["job"] = engine.run_job(job.id, out_path=out_path)
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    assert entered.wait(timeout=2)
+
+    # Concurrent cancel lands here — before the real _execute_job body runs.
+    engine.cancel_job(job.id)
+
+    proceed.set()
+    thread.join(timeout=5)
+
+    assert result["job"].status == JobStatus.CANCELLED
+    assert provider.call_count == 0
+
+
+def test_cancel_then_resume_still_reaches_done(tmp_path: Path) -> None:
+    """Companion to test_cancel_then_resume: guards against a fix for the
+    concurrent-cancel race (REL-002) accidentally making a fresh, deliberate
+    resume-after-cancel inherit a stale set cancel-flag from the prior
+    cancelled run."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, provider, checkpoint = _make_engine()
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    engine.cancel_job(job.id)
+    assert engine.status(job.id).status == JobStatus.CANCELLED
+
+    out_path = str(tmp_path / "out.srt")
+    final_job = engine.resume_job(job.id, out_path=out_path)
+
+    assert final_job.status == JobStatus.DONE
+    assert provider.call_count == 3
+
+
+# ---------------------------------------------------------------------------
 # continue-on-error WU3-1 — TranslatorEngine.failed_chunk_indices(job_id)
 # Spec: job-lifecycle/"skip report surfaces FAILED chunk indices at end of run"
 # ---------------------------------------------------------------------------
