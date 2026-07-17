@@ -426,6 +426,22 @@ def _cmd_glossary_show(args: argparse.Namespace, engine: TranslatorEngine) -> in
         return 1
 
 
+def _cmd_serve(args: argparse.Namespace, engine: TranslatorEngine) -> int:
+    """Boot the local HTTP API (borgesica.serve) bound to loopback only.
+
+    main() builds *engine* eagerly for every subcommand (including
+    --key-stdin key intake), so the key is consumed once at process boot,
+    before serving any request (spec: "Key at process boot").
+    """
+    import uvicorn
+
+    from borgesica.serve.app import SERVE_HOST, create_app
+
+    app = create_app(engine)
+    uvicorn.run(app, host=SERVE_HOST, port=args.port)
+    return 0
+
+
 def _cmd_glossary_update(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         entry = GlossaryEntry(
@@ -558,6 +574,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_gupdate.add_argument("--lock", action="store_true", default=False)
     _add_provider(p_gupdate)
 
+    # serve — local HTTP API (design decision #1/#5). No --host flag: the
+    # server always binds loopback only (borgesica.serve.app.SERVE_HOST);
+    # non-loopback binding can never be configured via this CLI.
+    p_serve = sub.add_parser(
+        "serve", help="Start the local HTTP API (127.0.0.1 only) for the desktop app"
+    )
+    p_serve.add_argument(
+        "--port", type=int, default=0, help="Port to listen on (default: 0, ephemeral)"
+    )
+    _add_provider(p_serve)
+
     return parser
 
 
@@ -617,6 +644,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "status": _cmd_status,
         "cancel": _cmd_cancel,
+        "serve": _cmd_serve,
     }
 
     if args.command == "glossary":
