@@ -18,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from borgesica.api import TranslatorEngine
-from borgesica.domain.models import SourceType
+from borgesica.domain.models import JobStatus, SourceType
 from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
 
 
@@ -191,6 +191,59 @@ def test_sse_stream_emits_progress_then_terminal_event(tmp_path: Path) -> None:
     with client.stream("GET", f"/jobs/{job_id}/events") as stream_resp:
         assert stream_resp.status_code == 200
         release.set()
+        for line in stream_resp.iter_lines():
+            if not line or line.startswith(":"):
+                continue
+            assert line.startswith("data: ")
+            events.append(json.loads(line[len("data: ") :]))
+            if events[-1]["type"] == "terminal":
+                break
+
+    assert any(e["type"] == "progress" for e in events)
+    assert events[-1] == {"type": "terminal", "status": "DONE", "error": None}
+
+    runner = client.app.state.runner
+    runner._handles[job_id].thread.join(timeout=5)
+
+
+def test_sse_stream_connects_before_running_persisted_gets_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REL-001: the SSE stream must not read a premature terminal event when
+    a client connects in the window after POST /run returns (worker thread
+    started, registered as active in JobRunner) but BEFORE the worker has
+    persisted RUNNING. Regression: sse_event_stream used to read a fresh
+    `engine.status(job_id)` first and, seeing it still CREATED, emit a
+    terminal event and return without ever consuming the runner's live
+    progress queue."""
+    engine, checkpoint = _make_engine()
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path, num_cues=1)
+    out_path = str(tmp_path / "out.srt")
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    original_execute = engine._execute_job
+
+    def _blocking_execute(job_arg, *, out_path, on_progress):
+        entered.set()
+        proceed.wait(timeout=5)
+        return original_execute(job_arg, out_path=out_path, on_progress=on_progress)
+
+    monkeypatch.setattr(engine, "_execute_job", _blocking_execute)
+
+    resp = client.post(f"/jobs/{job_id}/run", json={"out_path": out_path})
+    assert resp.status_code == 202
+    assert entered.wait(timeout=2)
+
+    # Worker thread started (registered active in JobRunner) but blocked
+    # before persisting RUNNING — a fresh status read still shows CREATED.
+    assert engine.status(job_id).status == JobStatus.CREATED
+
+    events: list[dict] = []
+    with client.stream("GET", f"/jobs/{job_id}/events") as stream_resp:
+        assert stream_resp.status_code == 200
+        proceed.set()
         for line in stream_resp.iter_lines():
             if not line or line.startswith(":"):
                 continue

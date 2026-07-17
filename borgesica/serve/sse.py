@@ -37,12 +37,22 @@ def sse_event_stream(engine: TranslatorEngine, runner: JobRunner, job_id: str) -
     404) BEFORE calling this — exceptions raised lazily inside a streaming
     generator are not caught by FastAPI's exception_handler machinery.
     """
-    job = engine.status(job_id)
-    if job.status != JobStatus.RUNNING:
-        yield format_sse({"type": "terminal", "status": str(job.status), "error": None})
-        return
-
-    events = runner.queue_for(job_id)
+    # Check the runner's authoritative in-memory active-run registry FIRST
+    # (REL-001): runner.start() marks a job active synchronously, before its
+    # worker thread is started, so this can never lag behind a freshly-read
+    # persisted status the way `engine.status(job_id)` can. Without this
+    # check-order, a client connecting in the window after POST /run returns
+    # but before the worker has persisted RUNNING would see a stale
+    # non-RUNNING status and get a premature terminal event instead of the
+    # job's real progress/terminal stream.
+    if runner.is_active(job_id):
+        events = runner.queue_for(job_id)
+    else:
+        job = engine.status(job_id)
+        if job.status != JobStatus.RUNNING:
+            yield format_sse({"type": "terminal", "status": str(job.status), "error": None})
+            return
+        events = runner.queue_for(job_id)
     while True:
         try:
             item = events.get(timeout=_HEARTBEAT_TIMEOUT)

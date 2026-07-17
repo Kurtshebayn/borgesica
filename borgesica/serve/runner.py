@@ -76,6 +76,19 @@ class JobRunner:
         self._handles[job_id] = RunHandle(thread=thread, events=events)
         thread.start()
 
+    def is_active(self, job_id: str) -> bool:
+        """True while job_id's background run is registered as active.
+
+        Set synchronously in start() BEFORE the worker thread is started (and
+        therefore before the worker has had a chance to persist RUNNING), and
+        cleared only once the worker's finally-block runs. This is the
+        authoritative "is a run currently in flight for this job_id" signal —
+        unlike a freshly-read persisted status, it cannot lag behind
+        start()'s caller (REL-001).
+        """
+        with self._lock:
+            return self._active_job_id == job_id
+
     def queue_for(self, job_id: str) -> "queue.Queue[dict]":
         """Return the progress/terminal event queue for a currently-active run.
 
