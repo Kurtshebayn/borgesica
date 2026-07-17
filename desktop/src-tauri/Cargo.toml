@@ -1,0 +1,24 @@
+[package]
+name = "borgesica-desktop"
+version = "0.1.0"
+description = "Desktop shell (Tauri) hosting the borgesica translation engine sidecar"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2"
+sidecar-logic = { path = "sidecar-logic" }
+
+[lib]
+name = "borgesica_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "borgesica-desktop"
+path = "src/main.rs"
