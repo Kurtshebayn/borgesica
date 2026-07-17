@@ -15,6 +15,7 @@ Test categories:
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Callable
 
@@ -22,7 +23,7 @@ import pytest
 
 from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import CostEstimator
-from borgesica.domain.errors import BudgetExceeded, JobStateError
+from borgesica.domain.errors import BudgetExceeded, JobStateError, MalformedOutput
 from borgesica.domain.models import (
     Chunk,
     ChunkStatus,
@@ -663,6 +664,75 @@ def test_reflective_persisted_text_is_revise_output():
 
     saved = store.load_chunks(job.id)
     assert saved[0].translated_text == "REVISED_TEXT"
+
+
+# ===========================================================================
+# 15b. REL-003: reflective partial cost must survive an exception mid-sequence
+# ===========================================================================
+
+
+@dataclass
+class ReflectiveStepFailProvider(FakeTranslationProvider):
+    """Reflective provider whose Nth call (0=draft, 1=critique, 2=revise)
+    raises MalformedOutput. Every SUCCESSFUL call bills a fixed Usage(10, 5)
+    so the accrued cost of prior steps is known exactly."""
+
+    fail_step: int = 1
+
+    def translate(  # type: ignore[override]
+        self, system: str, user: str, model: str, segment_count: int | None = None
+    ) -> TranslationResult:
+        n = len(self.call_log)
+        self.call_log.append((system, user, model))
+        self.segment_count_log.append(segment_count)
+        if n == self.fail_step:
+            # Transport-style failure: the exception itself carries ZERO usage,
+            # so any usage on it must come from the prior successful step(s).
+            raise MalformedOutput(job_id="fake-job", chunk_index=n)
+        unit = TranslationUnit(translation=f"step{n} text", summary_update="s")
+        return TranslationResult(unit=unit, usage=Usage(input_tokens=10, output_tokens=5))
+
+
+def test_reflective_carries_draft_cost_when_critique_raises():
+    """Draft succeeds, critique (2nd call) raises: the draft call was billed,
+    so its Usage MUST be carried on the propagated exception. Otherwise the
+    caller accrues exc.usage (zero here) and the draft's real spend is lost,
+    undercounting running_cost."""
+    provider = ReflectiveStepFailProvider(fail_step=1)
+    orch, _, _ = make_orchestrator(provider=provider)
+    config = make_config(quality_mode="reflective")
+
+    with pytest.raises(MalformedOutput) as excinfo:
+        orch._translate_reflective(
+            system="sys",
+            user="hello world",
+            config=config,
+            in_price=1.0,
+            out_price=5.0,
+        )
+
+    # Draft billed Usage(10, 5); nothing else succeeded.
+    assert excinfo.value.usage == Usage(input_tokens=10, output_tokens=5)
+
+
+def test_reflective_carries_draft_and_critique_cost_when_revise_raises():
+    """Draft + critique succeed, revise (3rd call) raises: both prior billed
+    calls' Usage MUST be carried on the propagated exception."""
+    provider = ReflectiveStepFailProvider(fail_step=2)
+    orch, _, _ = make_orchestrator(provider=provider)
+    config = make_config(quality_mode="reflective")
+
+    with pytest.raises(MalformedOutput) as excinfo:
+        orch._translate_reflective(
+            system="sys",
+            user="hello world",
+            config=config,
+            in_price=1.0,
+            out_price=5.0,
+        )
+
+    # Draft + critique each billed Usage(10, 5) → summed.
+    assert excinfo.value.usage == Usage(input_tokens=20, output_tokens=10)
 
 
 # ===========================================================================
