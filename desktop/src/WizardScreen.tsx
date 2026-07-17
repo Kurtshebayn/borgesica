@@ -93,6 +93,12 @@ export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
     }
   }
 
+  function handleRecoverFromError() {
+    subscriptionRef.current?.close();
+    subscriptionRef.current = null;
+    dispatch({ type: "RECOVER_FROM_ERROR" });
+  }
+
   async function handleCancel() {
     if (!state.jobId) return;
     dispatch({ type: "CANCEL_REQUESTED" });
@@ -258,6 +264,14 @@ export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
           <button onClick={() => void handleCancel()} disabled={state.cancelRequested}>
             {state.cancelRequested ? "Cancelling… (takes effect between chunks)" : "Cancel"}
           </button>
+        </div>
+      )}
+
+      {state.screen === "error" && (
+        <div>
+          <h2>Connection lost</h2>
+          <p role="alert">{state.connectionError}</p>
+          <button onClick={handleRecoverFromError}>Back to start</button>
         </div>
       )}
 

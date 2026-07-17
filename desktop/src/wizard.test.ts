@@ -3,7 +3,9 @@ import {
   formatBestEffortSummary,
   formatProgress,
   initialWizardState,
+  isPersistentConnectionFailure,
   isRunningStatus,
+  MAX_CONSECUTIVE_CONNECTION_FAILURES,
   parseSseData,
   sseEventToAction,
   validateFilePath,
@@ -246,5 +248,70 @@ describe("wizardReducer", () => {
   it("RESET returns to the initial state", () => {
     const dirty: WizardState = { ...initialWizardState, screen: "glossary" };
     expect(wizardReducer(dirty, { type: "RESET" })).toEqual(initialWizardState);
+  });
+
+  // -------------------------------------------------------------------
+  // RES-001 — sidecar-death dead-end: CONNECTION_LOST / RECOVER_FROM_ERROR
+  // -------------------------------------------------------------------
+
+  it("CONNECTION_LOST moves the run screen to the error screen with a message", () => {
+    const running: WizardState = {
+      ...initialWizardState,
+      screen: "run",
+      jobId: "job-1",
+    };
+    const next = wizardReducer(running, {
+      type: "CONNECTION_LOST",
+      message: "Lost connection to the translation sidecar.",
+    });
+    expect(next.screen).toBe("error");
+    expect(next.connectionError).toBe("Lost connection to the translation sidecar.");
+  });
+
+  it("CONNECTION_LOST is a no-op guard outside the run screen", () => {
+    const next = wizardReducer(initialWizardState, {
+      type: "CONNECTION_LOST",
+      message: "Lost connection to the translation sidecar.",
+    });
+    expect(next.screen).toBe("pick");
+    expect(next.connectionError).toBeNull();
+  });
+
+  it("RECOVER_FROM_ERROR returns from the error screen to pick, clearing the error", () => {
+    const errored: WizardState = {
+      ...initialWizardState,
+      screen: "error",
+      connectionError: "Lost connection to the translation sidecar.",
+      jobId: "job-1",
+    };
+    const next = wizardReducer(errored, { type: "RECOVER_FROM_ERROR" });
+    expect(next.screen).toBe("pick");
+    expect(next.connectionError).toBeNull();
+  });
+
+  it("RECOVER_FROM_ERROR is a no-op guard outside the error screen", () => {
+    const running: WizardState = { ...initialWizardState, screen: "run" };
+    const next = wizardReducer(running, { type: "RECOVER_FROM_ERROR" });
+    expect(next.screen).toBe("run");
+  });
+});
+
+describe("isPersistentConnectionFailure", () => {
+  it("is false below the consecutive-failure threshold", () => {
+    expect(isPersistentConnectionFailure(1)).toBe(false);
+    expect(isPersistentConnectionFailure(MAX_CONSECUTIVE_CONNECTION_FAILURES - 1)).toBe(
+      false,
+    );
+  });
+
+  it("is true at and above the consecutive-failure threshold", () => {
+    expect(isPersistentConnectionFailure(MAX_CONSECUTIVE_CONNECTION_FAILURES)).toBe(true);
+    expect(isPersistentConnectionFailure(MAX_CONSECUTIVE_CONNECTION_FAILURES + 5)).toBe(
+      true,
+    );
+  });
+
+  it("treats a single transient failure as non-persistent (spec: keep retrying blips)", () => {
+    expect(isPersistentConnectionFailure(0)).toBe(false);
   });
 });

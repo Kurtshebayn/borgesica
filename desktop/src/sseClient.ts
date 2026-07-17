@@ -9,6 +9,7 @@
  */
 import { getStatus } from "./apiClient";
 import {
+  isPersistentConnectionFailure,
   isRunningStatus,
   parseSseData,
   sseEventToAction,
@@ -28,6 +29,7 @@ export function subscribeToJobEvents(
 ): SseSubscription {
   let closed = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let consecutiveFailures = 0;
   let source: EventSource | null = new EventSource(
     `${baseUrl}/jobs/${jobId}/events`,
   );
@@ -44,6 +46,7 @@ export function subscribeToJobEvents(
     pollTimer = setInterval(() => {
       getStatus(baseUrl, jobId)
         .then((job) => {
+          consecutiveFailures = 0;
           dispatch({
             type: "PROGRESS_RECEIVED",
             progress: {
@@ -58,8 +61,21 @@ export function subscribeToJobEvents(
           }
         })
         .catch(() => {
-          // Transient network error while polling: keep retrying on the
-          // next tick rather than surfacing every blip as a run error.
+          // RES-001: a single failed poll is a transient network blip — keep
+          // retrying silently. But if the sidecar has actually died, every
+          // subsequent poll will keep failing forever with no user-visible
+          // feedback (the dead end this fixes). Once the failure run is
+          // judged persistent, stop looping and surface a recoverable error
+          // instead of retrying forever.
+          consecutiveFailures += 1;
+          if (isPersistentConnectionFailure(consecutiveFailures)) {
+            stopPolling();
+            dispatch({
+              type: "CONNECTION_LOST",
+              message:
+                "Lost connection to the translation sidecar. The run may still be in progress, but this app can no longer reach it.",
+            });
+          }
         });
     }, POLL_INTERVAL_MS);
   }

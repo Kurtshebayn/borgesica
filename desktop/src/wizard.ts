@@ -13,7 +13,7 @@ import type {
   JobStatus,
 } from "./apiTypes";
 
-export type WizardScreen = "pick" | "estimate" | "glossary" | "run" | "done";
+export type WizardScreen = "pick" | "estimate" | "glossary" | "run" | "done" | "error";
 
 export interface ProgressInfo {
   chunkIndex: number;
@@ -35,6 +35,11 @@ export interface WizardState {
   job: JobResponse | null;
   runError: string | null;
   cancelRequested: boolean;
+  /** RES-001: set when the sidecar connection is judged persistently lost
+   * (see `isPersistentConnectionFailure`) while a run is in flight. Reaching
+   * the "error" screen is the recovery path out of what used to be a silent
+   * dead end (SSE/polling looping forever with no user-visible feedback). */
+  connectionError: string | null;
 }
 
 export const initialWizardState: WizardState = {
@@ -51,7 +56,23 @@ export const initialWizardState: WizardState = {
   job: null,
   runError: null,
   cancelRequested: false,
+  connectionError: null,
 };
+
+// RES-001: number of consecutive status-poll failures (e.g. sidecar
+// connection refused) before the wizard treats the connection as
+// persistently lost rather than a transient network blip. Kept as a named
+// constant + pure predicate so the threshold is unit-testable without any
+// network/timer glue.
+export const MAX_CONSECUTIVE_CONNECTION_FAILURES = 3;
+
+/** Pure classification: transient (keep silently retrying) vs. persistent
+ * (surface a recoverable error to the user) connection failure. Used by the
+ * SSE/polling glue (`sseClient.ts`) so failure-counting logic itself stays
+ * testable here rather than buried in untested DOM/network code. */
+export function isPersistentConnectionFailure(consecutiveFailures: number): boolean {
+  return consecutiveFailures >= MAX_CONSECUTIVE_CONNECTION_FAILURES;
+}
 
 // Serve-api spec: only .epub/.srt are accepted; PDF is rejected with a
 // clear message both here (client-side, before any request is sent) and by
@@ -154,7 +175,9 @@ export type WizardAction =
   | { type: "RUN_TERMINAL"; status: JobStatus; error: string | null }
   | { type: "CANCEL_REQUESTED" }
   | { type: "RESUME_JOB"; job: JobResponse }
-  | { type: "RESET" };
+  | { type: "RESET" }
+  | { type: "CONNECTION_LOST"; message: string }
+  | { type: "RECOVER_FROM_ERROR" };
 
 export function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
@@ -223,6 +246,18 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       };
     case "RESET":
       return { ...initialWizardState };
+    case "CONNECTION_LOST":
+      // Guard: only a run in flight can "lose connection" in the dead-end
+      // sense (RES-001) — no-op elsewhere so this can never clobber an
+      // unrelated screen.
+      if (state.screen !== "run") return state;
+      return { ...state, screen: "error", connectionError: action.message };
+    case "RECOVER_FROM_ERROR":
+      // Guard: only meaningful from the error screen. Recovery returns to
+      // "pick" (in-app, no full app restart required) rather than leaving
+      // the user stranded.
+      if (state.screen !== "error") return state;
+      return { ...initialWizardState, filePath: state.filePath };
     default:
       return state;
   }
