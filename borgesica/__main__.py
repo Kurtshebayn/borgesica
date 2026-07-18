@@ -460,13 +460,22 @@ def _cmd_serve(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     --key-stdin (plain CLI/manual `borgesica serve`), no token was ever read
     and auth stays disabled — a known, documented scope boundary (see
     _stdin_session_token).
+
+    access_log=False (second correction round): uvicorn's default access
+    logger writes the full request line, INCLUDING the query string, to the
+    process log for every request. The SSE stream's `?token=<secret>` query
+    param (needed because native EventSource cannot set custom headers)
+    would otherwise leak the session token into that log on every
+    subscription. Disabling access logging entirely is the minimal, complete
+    fix — no request line is ever emitted, on any route, so the token can
+    never appear in one regardless of which route carries it.
     """
     import uvicorn
 
     from borgesica.serve.app import SERVE_HOST, create_app
 
     app = create_app(engine, session_token=_stdin_session_token)
-    uvicorn.run(app, host=SERVE_HOST, port=args.port)
+    uvicorn.run(app, host=SERVE_HOST, port=args.port, access_log=False)
     return 0
 
 

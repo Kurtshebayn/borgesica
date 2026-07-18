@@ -77,6 +77,32 @@ def test_serve_host_constant_is_loopback() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Session token must never reach the uvicorn access log (RISK-001/002/003,
+# second correction round). uvicorn's default access logger writes the full
+# request line, INCLUDING the query string — so an unmodified `uvicorn.run`
+# call would log the secret on every `GET /jobs/{id}/events?token=<SECRET>`
+# request (the SSE query-param fallback, since EventSource cannot set
+# custom headers).
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_serve_disables_uvicorn_access_log() -> None:
+    """_cmd_serve must pass access_log=False to uvicorn.run — the minimal,
+    complete fix: no access log line is ever emitted, so the token can never
+    appear in one, regardless of route or query string."""
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build, patch(
+        "uvicorn.run"
+    ) as mock_run:
+        mock_build.return_value = MagicMock()
+        with patch("sys.stdin", io.StringIO('{"api_key": "sk-x"}\n')):
+            main(["serve", "--port", "0", "--provider", "anthropic", "--key-stdin"])
+
+    assert mock_run.call_args.kwargs.get("access_log") is False
+
+
+# ---------------------------------------------------------------------------
 # Key intake at boot — never via argv
 # ---------------------------------------------------------------------------
 
