@@ -31,6 +31,25 @@ export default function App() {
     }
   }
 
+  /**
+   * RES-001 (second correction round): the REAL respawn seam behind the
+   * wizard's "Back to start" recovery action after a genuine persistent
+   * connection loss (`runRecoveryAction`/`recoveryRequiresRespawn` in
+   * wizard.ts). A prior version only reset the wizard's own screen state
+   * while this App-level `started` ref stayed true and `state.baseUrl`/
+   * `state.token` kept pointing at the dead process — the next
+   * create/estimate call just hit the same corpse. This tears the old
+   * (possibly already-dead) sidecar down, clears the stale lifecycle
+   * state, and re-spawns a fresh one with the still-held session API key
+   * — no full Tauri app restart is required, only this in-app respawn.
+   */
+  async function handleRestartSidecar() {
+    started.current = false;
+    setState({ baseUrl: null, token: null, error: null });
+    await stopSidecar();
+    await handleStart();
+  }
+
   useEffect(() => {
     return () => {
       if (started.current) {
@@ -58,7 +77,11 @@ export default function App() {
       )}
       {state.error && <p role="alert">{state.error}</p>}
       {status === "ready" && state.baseUrl && state.token && (
-        <WizardScreen baseUrl={state.baseUrl} token={state.token} />
+        <WizardScreen
+          baseUrl={state.baseUrl}
+          token={state.token}
+          onRestartSidecar={() => void handleRestartSidecar()}
+        />
       )}
     </main>
   );

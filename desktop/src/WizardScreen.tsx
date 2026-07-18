@@ -14,6 +14,7 @@ import {
   formatBestEffortSummary,
   formatProgress,
   initialWizardState,
+  runRecoveryAction,
   wizardReducer,
 } from "./wizard";
 import type { GlossaryEntry } from "./apiTypes";
@@ -30,9 +31,15 @@ import type { GlossaryEntry } from "./apiTypes";
 export default function WizardScreen({
   baseUrl,
   token,
+  onRestartSidecar,
 }: {
   baseUrl: string;
   token: string;
+  /** RES-001 (second correction round): the real stop+start sidecar
+   * respawn seam, owned by App.tsx (which alone holds the API key and the
+   * Tauri invoke calls). Called only when recovering from a genuine
+   * persistent-connection-loss "error" screen — see `runRecoveryAction`. */
+  onRestartSidecar: () => void;
 }) {
   const [state, dispatch] = useReducer(wizardReducer, initialWizardState);
   const [model, setModel] = useState("claude-3-5-sonnet-latest");
@@ -103,9 +110,20 @@ export default function WizardScreen({
   }
 
   function handleRecoverFromError() {
-    subscriptionRef.current?.close();
-    subscriptionRef.current = null;
-    dispatch({ type: "RECOVER_FROM_ERROR" });
+    // RES-001 (second correction round): recovery must be REAL, not
+    // cosmetic. `runRecoveryAction` (pure/tested) decides whether the
+    // underlying sidecar needs an actual respawn (only true when *state*
+    // reflects a genuine persistent-failure "error" screen) and drives the
+    // seams accordingly — a plain screen reset alone used to leave the
+    // dead sidecar process, and its stale baseUrl/token, untouched.
+    runRecoveryAction(state, {
+      closeSubscription: () => {
+        subscriptionRef.current?.close();
+        subscriptionRef.current = null;
+      },
+      dispatch,
+      restartSidecar: onRestartSidecar,
+    });
   }
 
   async function handleCancel() {

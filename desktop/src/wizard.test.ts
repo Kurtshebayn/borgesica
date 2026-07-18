@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatBestEffortSummary,
   formatProgress,
@@ -7,6 +7,8 @@ import {
   isRunningStatus,
   MAX_CONSECUTIVE_CONNECTION_FAILURES,
   parseSseData,
+  recoveryRequiresRespawn,
+  runRecoveryAction,
   sseEventToAction,
   validateFilePath,
   wizardReducer,
@@ -313,5 +315,58 @@ describe("isPersistentConnectionFailure", () => {
 
   it("treats a single transient failure as non-persistent (spec: keep retrying blips)", () => {
     expect(isPersistentConnectionFailure(0)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RES-001 (second correction round) — recovery must be REAL, not cosmetic:
+// a permanent connection failure requires an actual sidecar respawn, not
+// just a screen reset back to "pick".
+// ---------------------------------------------------------------------------
+
+describe("recoveryRequiresRespawn", () => {
+  it("is true only from the error screen (a genuine permanent-failure recovery)", () => {
+    const errored: WizardState = { ...initialWizardState, screen: "error" };
+    expect(recoveryRequiresRespawn(errored)).toBe(true);
+  });
+
+  it("is false from every other screen — a transient blip never reaches 'error' " +
+    "in the first place, so recovering from it must never force a respawn", () => {
+    expect(recoveryRequiresRespawn({ ...initialWizardState, screen: "pick" })).toBe(false);
+    expect(recoveryRequiresRespawn({ ...initialWizardState, screen: "run" })).toBe(false);
+    expect(recoveryRequiresRespawn({ ...initialWizardState, screen: "done" })).toBe(false);
+  });
+});
+
+describe("runRecoveryAction", () => {
+  it("invokes the sidecar restart seam when recovering from a genuine connection loss", () => {
+    const errored: WizardState = {
+      ...initialWizardState,
+      screen: "error",
+      connectionError: "Lost connection to the translation sidecar.",
+    };
+    const closeSubscription = vi.fn();
+    const dispatch = vi.fn();
+    const restartSidecar = vi.fn();
+
+    runRecoveryAction(errored, { closeSubscription, dispatch, restartSidecar });
+
+    expect(closeSubscription).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledWith({ type: "RECOVER_FROM_ERROR" });
+    expect(restartSidecar).toHaveBeenCalledOnce();
+  });
+
+  it("does NOT invoke the restart seam when there was no permanent failure to recover from " +
+    "(a transient blip must never trigger a full respawn)", () => {
+    const running: WizardState = { ...initialWizardState, screen: "run" };
+    const restartSidecar = vi.fn();
+
+    runRecoveryAction(running, {
+      closeSubscription: vi.fn(),
+      dispatch: vi.fn(),
+      restartSidecar,
+    });
+
+    expect(restartSidecar).not.toHaveBeenCalled();
   });
 });

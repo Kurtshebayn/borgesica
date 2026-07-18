@@ -74,6 +74,43 @@ export function isPersistentConnectionFailure(consecutiveFailures: number): bool
   return consecutiveFailures >= MAX_CONSECUTIVE_CONNECTION_FAILURES;
 }
 
+/** RES-001 (second correction round): whether recovering from the CURRENT
+ * state requires an actual sidecar respawn rather than merely resetting the
+ * wizard screen. Only the "error" screen (reached exclusively via a
+ * judged-persistent connection loss — see `isPersistentConnectionFailure`)
+ * genuinely implies the underlying sidecar process may be dead; recovering
+ * from any other screen is a normal navigation, never a respawn trigger. */
+export function recoveryRequiresRespawn(state: WizardState): boolean {
+  return state.screen === "error";
+}
+
+/** The seams a real recovery action needs, injected so the decision stays
+ * pure/testable here instead of buried in WizardScreen.tsx's untested glue.
+ * `restartSidecar` is the actual stop+start sidecar-lifecycle seam (owned by
+ * App.tsx, which alone holds the API key + Tauri invoke calls) — called
+ * ONLY when `recoveryRequiresRespawn` is true. */
+export interface RecoveryActions {
+  closeSubscription: () => void;
+  dispatch: (action: WizardAction) => void;
+  restartSidecar: () => void;
+}
+
+/** RES-001 (second correction round): the recovery action, made real. A
+ * cosmetic version merely reset the wizard screen while the underlying
+ * sidecar process (and its stale baseUrl/token) stayed exactly as dead as
+ * before — the next create/estimate call would just hit the same corpse.
+ * This closes the subscription, resets the wizard state, and — ONLY when
+ * recovering from a genuine persistent-failure "error" screen, never a
+ * plain screen navigation — triggers an actual sidecar respawn via the
+ * injected `restartSidecar` seam. */
+export function runRecoveryAction(state: WizardState, actions: RecoveryActions): void {
+  actions.closeSubscription();
+  actions.dispatch({ type: "RECOVER_FROM_ERROR" });
+  if (recoveryRequiresRespawn(state)) {
+    actions.restartSidecar();
+  }
+}
+
 // Serve-api spec: only .epub/.srt are accepted; PDF is rejected with a
 // clear message both here (client-side, before any request is sent) and by
 // the server's own 422 (surfaced via JOB_CREATE_FAILED if it is ever hit).
@@ -253,9 +290,12 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       if (state.screen !== "run") return state;
       return { ...state, screen: "error", connectionError: action.message };
     case "RECOVER_FROM_ERROR":
-      // Guard: only meaningful from the error screen. Recovery returns to
-      // "pick" (in-app, no full app restart required) rather than leaving
-      // the user stranded.
+      // Guard: only meaningful from the error screen. This resets the pure
+      // wizard state back to "pick" only — it deliberately does NOT decide
+      // whether the underlying sidecar process needs restarting (that
+      // decision is `recoveryRequiresRespawn`/`runRecoveryAction`, driven by
+      // the glue layer so the actual stop+start seam stays out of this pure
+      // reducer). Dispatching this action alone is NOT a complete recovery.
       if (state.screen !== "error") return state;
       return { ...initialWizardState, filePath: state.filePath };
     default:
