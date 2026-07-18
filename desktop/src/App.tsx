@@ -13,6 +13,7 @@ export default function App() {
   const [state, setState] = useState<SidecarState>({
     baseUrl: null,
     error: null,
+    token: null,
   });
   const started = useRef(false);
 
@@ -22,10 +23,10 @@ export default function App() {
     if (started.current) return;
     started.current = true;
     try {
-      const baseUrl = await startSidecar(apiKeyInput);
-      setState({ baseUrl, error: null });
+      const { baseUrl, token } = await startSidecar(apiKeyInput);
+      setState({ baseUrl, token, error: null });
     } catch (err) {
-      setState({ baseUrl: null, error: String(err) });
+      setState({ baseUrl: null, token: null, error: String(err) });
       started.current = false;
     }
   }
@@ -56,7 +57,9 @@ export default function App() {
         </div>
       )}
       {state.error && <p role="alert">{state.error}</p>}
-      {status === "ready" && state.baseUrl && <WizardScreen baseUrl={state.baseUrl} />}
+      {status === "ready" && state.baseUrl && state.token && (
+        <WizardScreen baseUrl={state.baseUrl} token={state.token} />
+      )}
     </main>
   );
 }

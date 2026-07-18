@@ -24,14 +24,19 @@ export interface SseSubscription {
 
 export function subscribeToJobEvents(
   baseUrl: string,
+  token: string,
   jobId: string,
   dispatch: (action: WizardAction) => void,
 ): SseSubscription {
   let closed = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let consecutiveFailures = 0;
+  // RISK-001/002/003: native EventSource cannot set custom request headers,
+  // so the auth token travels as a query parameter for this one read-only
+  // route (documented deviation — every mutating route below/elsewhere
+  // requires the X-Borgesica-Token header exclusively).
   let source: EventSource | null = new EventSource(
-    `${baseUrl}/jobs/${jobId}/events`,
+    `${baseUrl}/jobs/${jobId}/events?token=${encodeURIComponent(token)}`,
   );
 
   function stopPolling(): void {
@@ -44,7 +49,7 @@ export function subscribeToJobEvents(
   function startPolling(): void {
     if (closed || pollTimer !== null) return;
     pollTimer = setInterval(() => {
-      getStatus(baseUrl, jobId)
+      getStatus(baseUrl, token, jobId)
         .then((job) => {
           consecutiveFailures = 0;
           dispatch({

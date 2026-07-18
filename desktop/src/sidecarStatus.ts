@@ -12,6 +12,10 @@ export type SidecarStatus = "idle" | "starting" | "ready" | "error";
 export interface SidecarState {
   baseUrl: string | null;
   error: string | null;
+  /** Per-session auth token (RISK-001/002/003), required on every serve API
+   * request once the sidecar is ready. Optional so existing call sites/tests
+   * constructing a SidecarState literal without it keep type-checking. */
+  token?: string | null;
 }
 
 /**

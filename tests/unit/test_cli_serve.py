@@ -98,3 +98,69 @@ def test_serve_key_never_appears_in_argv() -> None:
 
     assert mock_build.call_args.kwargs.get("key_stdin") is True
     assert not any(secret in tok for tok in argv)
+
+
+# ---------------------------------------------------------------------------
+# Session auth token intake — RISK-001/002/003: the same trusted stdin init
+# line that carries the API key also carries the serve API's per-session
+# auth token (see borgesica.__main__._read_key_from_stdin /
+# _stdin_session_token). _cmd_serve reads that module-level value and passes
+# it to create_app — tested directly here (isolated from the unrelated
+# complexity of mocking a full _build_engine/_build_provider call chain,
+# which is exercised separately by the _read_key_from_stdin tests in
+# test_cli.py).
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_serve_passes_stdin_token_to_create_app() -> None:
+    """A "token" captured from the --key-stdin init line reaches
+    create_app's session_token, gating every route behind it."""
+    import argparse
+
+    import borgesica.__main__ as main_module
+
+    original = main_module._stdin_session_token
+    main_module._stdin_session_token = "session-tok-abc"
+    try:
+        with patch("uvicorn.run") as mock_run, patch(
+            "borgesica.serve.app.create_app"
+        ) as mock_create_app:
+            args = argparse.Namespace(port=0)
+            main_module._cmd_serve(args, MagicMock())
+    finally:
+        main_module._stdin_session_token = original
+
+    assert mock_create_app.call_args.kwargs.get("session_token") == "session-tok-abc"
+    assert mock_run.called
+
+
+def test_cmd_serve_without_stdin_token_disables_auth() -> None:
+    """No "token" was ever captured (plain CLI/env-var flow, or --key-stdin
+    not used) — create_app is called with session_token=None, the
+    documented default/backward-compat behavior."""
+    import argparse
+
+    import borgesica.__main__ as main_module
+
+    original = main_module._stdin_session_token
+    main_module._stdin_session_token = None
+    try:
+        with patch("uvicorn.run"), patch(
+            "borgesica.serve.app.create_app"
+        ) as mock_create_app:
+            args = argparse.Namespace(port=0)
+            main_module._cmd_serve(args, MagicMock())
+    finally:
+        main_module._stdin_session_token = original
+
+    assert mock_create_app.call_args.kwargs.get("session_token") is None
+
+
+def test_serve_parser_has_no_token_flag() -> None:
+    """Mirrors test_serve_parser_has_no_host_flag: the token can never be
+    supplied via argv/CLI flags — it only ever arrives over the stdin
+    handshake, structurally impossible to leak into process argv."""
+    from borgesica.__main__ import _build_parser
+
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["serve", "--token", "whatever"])

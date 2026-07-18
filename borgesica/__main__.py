@@ -124,19 +124,38 @@ def _require_env(var: str, provider: str) -> str:
     return value
 
 
+# RISK-001/002/003: the serve API's per-session auth token, captured as a
+# side effect of reading the SAME trusted stdin init line as the provider
+# API key (see _read_key_from_stdin). Module-level because the token must
+# reach _cmd_serve (called later, from main()'s dispatch table) without
+# threading a new parameter through every _build_engine/_build_provider
+# caller — none of which otherwise need to know about serve-layer auth.
+# None when --key-stdin was never used (plain CLI/env-var flow) or the init
+# line carried no "token" field: create_app() then runs with auth disabled,
+# same as it always has.
+_stdin_session_token: str | None = None
+
+
 def _read_key_from_stdin(provider: str) -> str:
     """Read the provider API key from a single JSON init line on stdin.
 
     The desktop shell (Tauri/Rust) reads the key from the OS keyring and writes
-    one newline-delimited JSON message — {"api_key": "..."} — to this
-    subprocess's stdin. Keeping the key off argv (visible via ps/Task Manager to
-    any process) and out of a persisted env var is the whole point: only the
-    SECRET travels this channel. Newline-delimited JSON is the forward-compatible
-    framing for any richer init message added later.
+    one newline-delimited JSON message — {"api_key": "...", "token": "..."} —
+    to this subprocess's stdin. Keeping the key off argv (visible via ps/Task
+    Manager to any process) and out of a persisted env var is the whole point:
+    only secrets travel this channel. Newline-delimited JSON is the
+    forward-compatible framing for any richer init message added later.
+
+    As of RISK-001/002/003, the same init line also carries the serve API's
+    per-session auth "token" (captured into the module-level
+    `_stdin_session_token` for `_cmd_serve` to pick up — see that global's
+    docstring for why it is not threaded through as a return value here).
 
     Exits(1) with a clear message if the line is missing, malformed, or has no
     non-empty api_key — same failure contract as _require_env.
     """
+    global _stdin_session_token
+    _stdin_session_token = None  # reset each read — no stale token across calls
     line = sys.stdin.readline()
     key: str | None = None
     try:
@@ -144,6 +163,9 @@ def _read_key_from_stdin(provider: str) -> str:
         if isinstance(message, dict):
             raw = message.get("api_key")
             key = raw if isinstance(raw, str) and raw else None
+            raw_token = message.get("token")
+            if isinstance(raw_token, str) and raw_token:
+                _stdin_session_token = raw_token
     except json.JSONDecodeError:
         key = None
     if not key:
@@ -432,12 +454,18 @@ def _cmd_serve(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     main() builds *engine* eagerly for every subcommand (including
     --key-stdin key intake), so the key is consumed once at process boot,
     before serving any request (spec: "Key at process boot").
+
+    RISK-001/002/003: when --key-stdin's init line carried a "token", every
+    route is gated behind it (create_app's session_token). Without
+    --key-stdin (plain CLI/manual `borgesica serve`), no token was ever read
+    and auth stays disabled — a known, documented scope boundary (see
+    _stdin_session_token).
     """
     import uvicorn
 
     from borgesica.serve.app import SERVE_HOST, create_app
 
-    app = create_app(engine)
+    app = create_app(engine, session_token=_stdin_session_token)
     uvicorn.run(app, host=SERVE_HOST, port=args.port)
     return 0
 

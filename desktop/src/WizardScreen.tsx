@@ -27,7 +27,13 @@ import type { GlossaryEntry } from "./apiTypes";
  * Presentational restraint (batch instructions): functional, minimal
  * styling — v1 happy path, not a design showcase.
  */
-export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
+export default function WizardScreen({
+  baseUrl,
+  token,
+}: {
+  baseUrl: string;
+  token: string;
+}) {
   const [state, dispatch] = useReducer(wizardReducer, initialWizardState);
   const [model, setModel] = useState("claude-3-5-sonnet-latest");
   const [outPath, setOutPath] = useState("");
@@ -43,9 +49,12 @@ export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
   async function handlePick() {
     if (state.fileError || !state.filePath) return;
     try {
-      const job = await createJob(baseUrl, { source_path: state.filePath, model });
+      const job = await createJob(baseUrl, token, {
+        source_path: state.filePath,
+        model,
+      });
       dispatch({ type: "JOB_CREATED", jobId: job.id });
-      const estimate = await getEstimate(baseUrl, job.id);
+      const estimate = await getEstimate(baseUrl, token, job.id);
       dispatch({ type: "ESTIMATE_RECEIVED", estimate });
     } catch (err) {
       dispatch({ type: "JOB_CREATE_FAILED", message: String(err) });
@@ -56,7 +65,7 @@ export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
     dispatch({ type: "PROCEED_TO_GLOSSARY" });
     if (!state.jobId) return;
     try {
-      const glossary = await getGlossary(baseUrl, state.jobId);
+      const glossary = await getGlossary(baseUrl, token, state.jobId);
       dispatch({ type: "GLOSSARY_LOADED", entries: glossary.entries });
     } catch {
       // Best-effort load; an empty glossary is a valid pre-run state.
@@ -71,7 +80,7 @@ export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
   async function handleLockAndSaveGlossary() {
     if (!state.jobId) return;
     try {
-      await putGlossary(baseUrl, state.jobId, state.glossary);
+      await putGlossary(baseUrl, token, state.jobId, state.glossary);
     } finally {
       dispatch({ type: "GLOSSARY_LOCKED" });
     }
@@ -79,13 +88,13 @@ export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
 
   function startWatching(jobId: string) {
     subscriptionRef.current?.close();
-    subscriptionRef.current = subscribeToJobEvents(baseUrl, jobId, dispatch);
+    subscriptionRef.current = subscribeToJobEvents(baseUrl, token, jobId, dispatch);
   }
 
   async function handleStartRun() {
     if (!state.jobId || !outPath) return;
     try {
-      const job = await runJob(baseUrl, state.jobId, outPath);
+      const job = await runJob(baseUrl, token, state.jobId, outPath);
       dispatch({ type: "RUN_STARTED", job });
       startWatching(state.jobId);
     } catch (err) {
@@ -103,7 +112,7 @@ export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
     if (!state.jobId) return;
     dispatch({ type: "CANCEL_REQUESTED" });
     try {
-      await cancelJob(baseUrl, state.jobId);
+      await cancelJob(baseUrl, token, state.jobId);
     } catch {
       // Cancellation is cooperative (chunk-granular); a transient error
       // here does not need to surface — the SSE/poll stream will reflect
@@ -114,14 +123,16 @@ export default function WizardScreen({ baseUrl }: { baseUrl: string }) {
   async function handleResume() {
     if (!resumeJobId || !outPath) return;
     try {
-      const status = await getStatus(baseUrl, resumeJobId);
-      const estimate = await getEstimate(baseUrl, resumeJobId).catch(() => null);
+      const status = await getStatus(baseUrl, token, resumeJobId);
+      const estimate = await getEstimate(baseUrl, token, resumeJobId).catch(
+        () => null,
+      );
       if (estimate) dispatch({ type: "ESTIMATE_RECEIVED", estimate });
       if (status.status === "DONE") {
         dispatch({ type: "RESUME_JOB", job: status });
         return;
       }
-      const job = await resumeJob(baseUrl, resumeJobId, outPath);
+      const job = await resumeJob(baseUrl, token, resumeJobId, outPath);
       dispatch({ type: "RESUME_JOB", job });
       startWatching(resumeJobId);
     } catch (err) {

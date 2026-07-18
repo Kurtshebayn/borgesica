@@ -13,8 +13,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use sidecar_logic::{
-    args_contain_secret, base_url, build_serve_args, health_check_url, parse_ready_line,
-    ready_deadline_exceeded, should_force_kill,
+    args_contain_secret, base_url, build_serve_args, build_stdin_init_line, format_token,
+    health_check_url, parse_ready_line, ready_deadline_exceeded, should_force_kill,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -51,9 +51,38 @@ impl std::fmt::Display for SidecarError {
 ///
 /// Intentionally holds no copy of the API key: it is written to stdin once,
 /// during `spawn_sidecar`, and never retained afterwards.
+///
+/// `token` (RISK-001/002/003) IS retained here — unlike the API key, the
+/// frontend legitimately needs it for the lifetime of the session to
+/// authenticate every request against the sidecar, so it is exposed to the
+/// caller the same controlled way `base_url` is.
 pub struct SidecarHandle {
     child: Child,
     pub base_url: String,
+    pub token: String,
+}
+
+/// Generates a fresh per-session auth token (RISK-001/002/003) sourced from
+/// OS randomness via `std::collections::hash_map::RandomState` (itself
+/// seeded from the OS RNG) — no extra crate/dependency needed. Formatting is
+/// delegated to the pure, unit-tested `sidecar_logic::format_token`.
+fn generate_session_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    fn seed() -> u64 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        );
+        hasher.write_u32(std::process::id());
+        hasher.finish()
+    }
+
+    format_token(seed(), seed())
 }
 
 /// Resolves the (program, leading-args) pair used to launch the engine.
@@ -98,7 +127,8 @@ pub fn spawn_sidecar(
         .spawn()
         .map_err(|e| SidecarError::SpawnFailed(e.to_string()))?;
 
-    write_key_to_stdin(&mut child, api_key)?;
+    let token = generate_session_token();
+    write_key_to_stdin(&mut child, api_key, &token)?;
 
     let port = read_ready_port(&mut child)?;
     let url = base_url(port);
@@ -108,12 +138,20 @@ pub fn spawn_sidecar(
     Ok(SidecarHandle {
         child,
         base_url: url,
+        token,
     })
 }
 
-fn write_key_to_stdin(child: &mut Child, api_key: &str) -> Result<(), SidecarError> {
+fn write_key_to_stdin(
+    child: &mut Child,
+    api_key: &str,
+    token: &str,
+) -> Result<(), SidecarError> {
     let stdin: &mut ChildStdin = child.stdin.as_mut().ok_or(SidecarError::StdinUnavailable)?;
-    let line = serde_json::json!({ "api_key": api_key }).to_string();
+    // Guard: the token must never end up in argv either (RISK-001/002/003),
+    // mirroring the existing api_key assertion.
+    debug_assert!(!args_contain_secret(&build_serve_args(0), token));
+    let line = build_stdin_init_line(api_key, token);
     stdin
         .write_all(line.as_bytes())
         .and_then(|_| stdin.write_all(b"\n"))

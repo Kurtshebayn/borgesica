@@ -3,8 +3,18 @@ mod sidecar;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use serde::Serialize;
 use sidecar::{shutdown_sidecar, spawn_sidecar, SidecarHandle};
 use tauri::{Manager, State};
+
+/// Returned to the frontend by `start_sidecar`: the base URL AND the
+/// per-session auth token (RISK-001/002/003), exposed together the same
+/// controlled way `base_url` alone used to be.
+#[derive(Serialize)]
+struct SidecarStartResult {
+    base_url: String,
+    token: String,
+}
 
 /// App-managed state holding the (at most one) running sidecar handle.
 /// `None` before the frontend calls `start_sidecar` and after teardown.
@@ -36,7 +46,7 @@ fn start_sidecar(
     app: tauri::AppHandle,
     state: State<SidecarState>,
     api_key: String,
-) -> Result<String, String> {
+) -> Result<SidecarStartResult, String> {
     let mut guard = state.0.lock().map_err(|_| "sidecar state poisoned")?;
     if guard.is_some() {
         return Err("sidecar already running".to_string());
@@ -44,9 +54,12 @@ fn start_sidecar(
 
     let binary = packaged_binary_path(&app);
     let handle = spawn_sidecar(binary.as_ref(), &api_key).map_err(|e| e.to_string())?;
-    let base_url = handle.base_url.clone();
+    let result = SidecarStartResult {
+        base_url: handle.base_url.clone(),
+        token: handle.token.clone(),
+    };
     *guard = Some(handle);
-    Ok(base_url)
+    Ok(result)
 }
 
 /// Gracefully stops the sidecar if one is running. Safe to call multiple

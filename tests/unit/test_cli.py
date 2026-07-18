@@ -535,6 +535,43 @@ def test_read_key_from_stdin_malformed_json_exits() -> None:
     assert exc.value.code == 1
 
 
+def test_read_key_from_stdin_captures_session_token() -> None:
+    """RISK-001/002/003: a "token" field on the same init line is captured
+    into the module-level _stdin_session_token for _cmd_serve to pick up."""
+    import io
+
+    import borgesica.__main__ as main_module
+
+    with patch(
+        "sys.stdin",
+        io.StringIO('{"api_key": "sk-from-stdin", "token": "session-tok-xyz"}\n'),
+    ):
+        main_module._read_key_from_stdin("anthropic")
+
+    assert main_module._stdin_session_token == "session-tok-xyz"
+
+
+def test_read_key_from_stdin_resets_token_when_absent() -> None:
+    """A subsequent read whose init line carries no "token" resets the
+    module-level value to None rather than leaking a stale token from a
+    prior read."""
+    import io
+
+    import borgesica.__main__ as main_module
+
+    with patch(
+        "sys.stdin",
+        io.StringIO('{"api_key": "sk-1", "token": "stale-token"}\n'),
+    ):
+        main_module._read_key_from_stdin("anthropic")
+    assert main_module._stdin_session_token == "stale-token"
+
+    with patch("sys.stdin", io.StringIO('{"api_key": "sk-2"}\n')):
+        main_module._read_key_from_stdin("anthropic")
+
+    assert main_module._stdin_session_token is None
+
+
 def test_build_engine_key_stdin_bypasses_env() -> None:
     """With key_stdin=True the key comes from stdin — a missing env var must
     NOT abort (the whole point: no env dependency in the desktop app)."""

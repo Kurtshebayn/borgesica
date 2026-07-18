@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
 
@@ -49,7 +49,12 @@ def _source_type_for_serve(source_path: str) -> SourceType | None:
     return _EXT_TO_SOURCE_TYPE.get(Path(source_path).suffix.lower())
 
 
-def create_app(engine: TranslatorEngine, *, shutdown_join_timeout: float = 5.0) -> FastAPI:
+def create_app(
+    engine: TranslatorEngine,
+    *,
+    shutdown_join_timeout: float = 5.0,
+    session_token: str | None = None,
+) -> FastAPI:
     """Build the FastAPI app wired to *engine*.
 
     Args:
@@ -58,8 +63,31 @@ def create_app(engine: TranslatorEngine, *, shutdown_join_timeout: float = 5.0) 
         shutdown_join_timeout: Seconds POST /shutdown waits for an active run
             to finish after cancelling it (design: sidecar lifecycle "kill
             after 5s" fallback). Overridable for deterministic tests.
+        session_token: Per-session shared secret (RISK-001/002/003) required
+            on every request via the `X-Borgesica-Token` header (or, for the
+            SSE stream only — native `EventSource` cannot set custom
+            headers — a `?token=` query parameter). `None` (the default)
+            disables auth entirely: this preserves the unauthenticated
+            contract every pre-existing T5/T6 test relies on. Real
+            production boot (`__main__.py`'s `serve` subcommand with
+            `--key-stdin`) always supplies a real token derived from the
+            same trusted stdin handshake as the provider API key.
     """
-    app = FastAPI(title="Borgésica serve API")
+
+    async def _require_session_token(
+        x_borgesica_token: str | None = Header(default=None, alias="X-Borgesica-Token"),
+        token: str | None = Query(default=None),
+    ) -> None:
+        if session_token is None:
+            return
+        supplied = x_borgesica_token if x_borgesica_token is not None else token
+        if supplied != session_token:
+            raise HTTPException(status_code=401, detail="Missing or invalid session token")
+
+    app = FastAPI(
+        title="Borgésica serve API",
+        dependencies=[Depends(_require_session_token)],
+    )
     runner = JobRunner(engine)
     app.state.runner = runner  # exposed for tests/introspection
 

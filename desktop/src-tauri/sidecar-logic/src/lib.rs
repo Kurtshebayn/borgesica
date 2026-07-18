@@ -93,6 +93,23 @@ pub fn health_check_url(base: &str) -> String {
     format!("{}/health", base.trim_end_matches('/'))
 }
 
+/// Formats two OS-sourced pseudo-random u64 seeds into a 32-hex-char session
+/// token (RISK-001/002/003). Pure formatting only — the caller (glue) is
+/// responsible for sourcing the seeds from real entropy
+/// (`std::collections::hash_map::RandomState`, itself OS-seeded).
+pub fn format_token(seed1: u64, seed2: u64) -> String {
+    format!("{seed1:016x}{seed2:016x}")
+}
+
+/// Builds the stdin init line handed to the sidecar process: the API key
+/// (existing "key never in argv" contract) plus the per-session auth token
+/// (RISK-001/002/003), carried over the SAME trusted stdin channel — never
+/// argv, never logged. Returns the raw JSON line (caller appends the
+/// newline when writing).
+pub fn build_stdin_init_line(api_key: &str, token: &str) -> String {
+    serde_json::json!({ "api_key": api_key, "token": token }).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +205,40 @@ mod tests {
             health_check_url("http://127.0.0.1:54321/"),
             "http://127.0.0.1:54321/health"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // RISK-001/002/003 — session token formatting + stdin handshake
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn format_token_produces_a_32_char_lowercase_hex_string() {
+        let token = format_token(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
+        assert_eq!(token.len(), 32);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(token, "0123456789abcdeffedcba9876543210");
+    }
+
+    #[test]
+    fn format_token_differs_for_different_seeds() {
+        assert_ne!(format_token(1, 2), format_token(3, 4));
+    }
+
+    #[test]
+    fn build_stdin_init_line_carries_both_api_key_and_token() {
+        let line = build_stdin_init_line("sk-secret", "tok-12345");
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["api_key"], "sk-secret");
+        assert_eq!(parsed["token"], "tok-12345");
+    }
+
+    #[test]
+    fn session_token_never_leaks_into_serve_argv() {
+        // RISK-001/002/003: the token travels over stdin only (mirrors the
+        // existing api_key contract) — build_serve_args must never be able
+        // to embed it, and args_contain_secret (already generic) confirms it.
+        let token = format_token(0xdead_beef, 0xfeed_face);
+        let args = build_serve_args(54321);
+        assert!(!args_contain_secret(&args, &token));
     }
 }
