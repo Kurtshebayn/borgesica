@@ -22,6 +22,7 @@ openai-compat = ["openai>=1.0"]   # OpenAI-compatible providers (DeepSeek, OpenR
 serve = ["fastapi>=0.110", "uvicorn>=0.29"]  # borgesica.serve driving adapter (desktop sidecar)
 spacy = ["spacy>=3.7"]
 dev = ["pytest>=8", "pytest-cov", "ruff>=0.4", "fpdf2>=2.7", "pyyaml>=6.0"]
+packaging = ["pyinstaller>=6.0"]  # T1 packaging spike — freezing the CLI as a desktop sidecar
 
 [project.scripts]
 borgesica = "borgesica.__main__:main"
