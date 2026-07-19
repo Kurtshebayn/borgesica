@@ -153,6 +153,16 @@ mid-sentence must stay mid-sentence."""
 _INDEX_MARKER_RE = re.compile(r"^\[\d+\]\s*")
 
 
+def _add_usage(a: Usage, b: Usage) -> Usage:
+    """Sum two token-Usage value objects field-wise (immutable — returns a new
+    Usage). Used to fold prior-step usage onto a mid-sequence exception so no
+    billed spend is dropped."""
+    return Usage(
+        input_tokens=a.input_tokens + b.input_tokens,
+        output_tokens=a.output_tokens + b.output_tokens,
+    )
+
+
 def _indexed_segments(cue_batches: list[dict]) -> str:
     """Render cue batch texts as the indexed user prompt: "[k]\\n<text>"
     blocks separated by blank lines. Markers are transport only — they never
@@ -788,6 +798,16 @@ class TranslationOrchestrator:
         """
         total_cost = 0.0
 
+        # Real token usage of the calls that have ALREADY succeeded in this
+        # reflective sequence. If a later step (critique/revise) raises after an
+        # earlier step was billed, the exception must carry this accrued usage so
+        # the caller's `except (MalformedOutput, ProviderError)` handler accrues
+        # the FULL spend — not just the single failing call's usage. Without
+        # this, the draft (and critique) spend is discarded with the unwinding
+        # local `total_cost`, undercounting running_cost and silently weakening
+        # the budget guard (REL-003).
+        accrued_usage = Usage()
+
         # Segmented (SRT) contract applies to the DRAFT and REVISE calls — the
         # calls whose output is a translation. The CRITIQUE call returns notes,
         # not a translation, so it keeps the plain single-string contract.
@@ -795,49 +815,62 @@ class TranslationOrchestrator:
             {} if segment_count is None else {"segment_count": segment_count}
         )
 
-        # Step 1: Draft translation (user prompt has tags)
-        draft_result = self._provider.translate(
-            system=system, user=user, model=config.model, **segment_kwargs
-        )
-        total_cost += self._usage_cost(draft_result.usage, in_price, out_price)
-        draft_unit = draft_result.unit
-        draft_text = draft_unit.translation
-
-        # Step 2: Critique
-        critique_prompt = (
-            f"Source text:\n{user}\n\n"
-            f"Draft translation:\n{draft_text}\n\n"
-            "Please critique the draft translation above."
-        )
-        critique_result = self._provider.translate(
-            system=_CRITIQUE_SYSTEM,
-            user=critique_prompt,
-            model=config.model,
-        )
-        total_cost += self._usage_cost(critique_result.usage, in_price, out_price)
-        critique_text = critique_result.unit.translation
-
-        # Step 3: Revise
-        revise_prompt = (
-            f"Source text:\n{user}\n\n"
-            f"Draft translation:\n{draft_text}\n\n"
-            f"Critique:\n{critique_text}\n\n"
-            "Please produce a revised translation."
-        )
-        revise_system = _REVISE_SYSTEM
-        if segment_count is not None:
-            revise_system = (
-                f"{_REVISE_SYSTEM}\n\n"
-                + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count)
+        try:
+            # Step 1: Draft translation (user prompt has tags)
+            draft_result = self._provider.translate(
+                system=system, user=user, model=config.model, **segment_kwargs
             )
-        revised_result = self._provider.translate(
-            system=revise_system,
-            user=revise_prompt,
-            model=config.model,
-            **segment_kwargs,
-        )
-        total_cost += self._usage_cost(revised_result.usage, in_price, out_price)
-        revised_unit = revised_result.unit
+            accrued_usage = _add_usage(accrued_usage, draft_result.usage)
+            total_cost += self._usage_cost(draft_result.usage, in_price, out_price)
+            draft_unit = draft_result.unit
+            draft_text = draft_unit.translation
+
+            # Step 2: Critique
+            critique_prompt = (
+                f"Source text:\n{user}\n\n"
+                f"Draft translation:\n{draft_text}\n\n"
+                "Please critique the draft translation above."
+            )
+            critique_result = self._provider.translate(
+                system=_CRITIQUE_SYSTEM,
+                user=critique_prompt,
+                model=config.model,
+            )
+            accrued_usage = _add_usage(accrued_usage, critique_result.usage)
+            total_cost += self._usage_cost(critique_result.usage, in_price, out_price)
+            critique_text = critique_result.unit.translation
+
+            # Step 3: Revise
+            revise_prompt = (
+                f"Source text:\n{user}\n\n"
+                f"Draft translation:\n{draft_text}\n\n"
+                f"Critique:\n{critique_text}\n\n"
+                "Please produce a revised translation."
+            )
+            revise_system = _REVISE_SYSTEM
+            if segment_count is not None:
+                revise_system = (
+                    f"{_REVISE_SYSTEM}\n\n"
+                    + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count)
+                )
+            revised_result = self._provider.translate(
+                system=revise_system,
+                user=revise_prompt,
+                model=config.model,
+                **segment_kwargs,
+            )
+            accrued_usage = _add_usage(accrued_usage, revised_result.usage)
+            total_cost += self._usage_cost(revised_result.usage, in_price, out_price)
+            revised_unit = revised_result.unit
+        except (MalformedOutput, ProviderError) as exc:
+            # Fold the already-billed usage of prior successful steps into the
+            # exception's own usage so no reflective spend is lost as the local
+            # frame unwinds. `exc.usage` already carries the failing call's real
+            # billed-but-failed usage; adding `accrued_usage` makes it the true
+            # total for the whole partial sequence. All calls use config.model,
+            # so the caller's single (in_price, out_price) converts it correctly.
+            exc.usage = _add_usage(exc.usage, accrued_usage)
+            raise
 
         # Return the REVISE output directly; caller validates tags.
         return revised_unit, revised_unit.translation, total_cost
