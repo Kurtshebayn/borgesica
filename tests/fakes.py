@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from borgesica.domain.errors import MalformedOutput
 from borgesica.domain.models import (
     Chunk,
+    CorpusSample,
     Glossary,
     GlossaryEntry,
     Job,
@@ -158,3 +159,29 @@ class InMemoryCheckpointStore:
         # Return the summary from the highest-index chunk.
         max_index = max(bucket)
         return bucket[max_index]
+
+
+# ---------------------------------------------------------------------------
+# FakeCorpusStore
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeCorpusStore:
+    """In-memory CorpusStore double for unit tests.
+
+    Attributes:
+        raise_on_save: when True, save_sample() raises RuntimeError instead
+            of recording — used to verify caller-side best-effort handling
+            (T4) never lets a corpus-store failure fail the translation job.
+        samples: keyed by (job_id, chunk_index), upsert semantics mirroring
+            the real SQLite adapter.
+    """
+
+    raise_on_save: bool = False
+    samples: dict[tuple[str, int], CorpusSample] = field(default_factory=dict)
+
+    def save_sample(self, sample: CorpusSample) -> None:
+        if self.raise_on_save:
+            raise RuntimeError("FakeCorpusStore configured to fail")
+        self.samples[(sample.job_id, sample.chunk_index)] = sample

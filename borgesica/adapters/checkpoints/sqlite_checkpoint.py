@@ -79,9 +79,19 @@ CREATE TABLE IF NOT EXISTS chunks (
     translated_text TEXT,
     status          TEXT NOT NULL,
     meta_json       TEXT NOT NULL DEFAULT '{}',
+    passed_validation INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (job_id, chunk_index)
 )
 """
+
+# Columns added after the initial release; existing chunks tables are
+# migrated in-place via ALTER TABLE guarded by PRAGMA table_info (same
+# pattern as _JOBS_MIGRATIONS). Default 1 (True) so pre-existing rows —
+# persisted before validation provenance was tracked — are treated as
+# validated (design decision #8).
+_CHUNKS_MIGRATIONS = {
+    "passed_validation": "INTEGER NOT NULL DEFAULT 1",
+}
 
 _CREATE_GLOSSARY = """
 CREATE TABLE IF NOT EXISTS glossary (
@@ -172,6 +182,10 @@ class SQLiteCheckpointStore:
             for column, ddl in _JOBS_MIGRATIONS.items():
                 if column not in existing:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
+            existing_chunk_cols = {row[1] for row in conn.execute("PRAGMA table_info(chunks)")}
+            for column, ddl in _CHUNKS_MIGRATIONS.items():
+                if column not in existing_chunk_cols:
+                    conn.execute(f"ALTER TABLE chunks ADD COLUMN {column} {ddl}")
 
     def __del__(self) -> None:
         if self._mem_conn is not None:
@@ -291,13 +305,20 @@ class SQLiteCheckpointStore:
     def save_chunk(self, job_id: str, chunk: Chunk) -> None:
         """Idempotent upsert keyed by (job_id, chunk.index)."""
         sql = """
-        INSERT INTO chunks (job_id, chunk_index, source_text, translated_text, status, meta_json)
-        VALUES (:job_id, :chunk_index, :source_text, :translated_text, :status, :meta_json)
+        INSERT INTO chunks (
+            job_id, chunk_index, source_text, translated_text, status, meta_json,
+            passed_validation
+        )
+        VALUES (
+            :job_id, :chunk_index, :source_text, :translated_text, :status, :meta_json,
+            :passed_validation
+        )
         ON CONFLICT(job_id, chunk_index) DO UPDATE SET
             source_text=excluded.source_text,
             translated_text=excluded.translated_text,
             status=excluded.status,
-            meta_json=excluded.meta_json
+            meta_json=excluded.meta_json,
+            passed_validation=excluded.passed_validation
         """
         with self._connect() as conn:
             conn.execute(sql, {
@@ -307,6 +328,7 @@ class SQLiteCheckpointStore:
                 "translated_text": chunk.translated_text,
                 "status": str(chunk.status),
                 "meta_json": json.dumps(chunk.meta),
+                "passed_validation": 1 if chunk.passed_validation else 0,
             })
 
     def load_chunks(self, job_id: str) -> list[Chunk]:
@@ -321,6 +343,7 @@ class SQLiteCheckpointStore:
                 translated_text=row["translated_text"],
                 status=ChunkStatus(row["status"]),
                 meta=json.loads(row["meta_json"]),
+                passed_validation=bool(row["passed_validation"]),
             )
             for row in rows
         ]

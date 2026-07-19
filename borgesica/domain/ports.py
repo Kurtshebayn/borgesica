@@ -11,6 +11,7 @@ from typing import Protocol, runtime_checkable
 
 from borgesica.domain.models import (
     Chunk,
+    CorpusSample,
     Glossary,
     Job,
     JobConfig,
@@ -116,6 +117,31 @@ class CheckpointStore(Protocol):
         ...
 
     def load_summary(self, job_id: str) -> RollingSummary:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Corpus store port (write-only, best-effort — see design decision #6/#10)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class CorpusStore(Protocol):
+    """Write-only corpus capture store.
+
+    Captures per-chunk translation samples for later mining/curation (out of
+    scope for v1). Distinct from CheckpointStore: no load methods are
+    exposed by this port — corpus.db is never read back by the engine.
+
+    Callers (orchestrator hook, T4) are responsible for best-effort
+    semantics: a raised exception from save_sample() MUST be caught and
+    logged by the caller, never allowed to fail the translation job. The
+    adapter itself only guarantees that a failed write does not leave the
+    store in a corrupted state (atomic per-call transaction).
+    """
+
+    def save_sample(self, sample: CorpusSample) -> None:
+        """Persist one corpus sample, upserting on (job_id, chunk_index)."""
         ...
 
 

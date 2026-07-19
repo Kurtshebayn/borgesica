@@ -39,7 +39,7 @@ from borgesica.domain.models import (
     Usage,
 )
 from borgesica.domain.orchestrator import TranslationOrchestrator
-from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
+from tests.fakes import FakeCorpusStore, FakeTranslationProvider, InMemoryCheckpointStore
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +83,8 @@ def make_chunks(n: int, status: ChunkStatus = ChunkStatus.PENDING) -> list[Chunk
 def make_orchestrator(
     provider: FakeTranslationProvider | None = None,
     store: InMemoryCheckpointStore | None = None,
+    corpus_store: FakeCorpusStore | None = None,
+    provider_name: str = "unknown",
 ) -> tuple[TranslationOrchestrator, FakeTranslationProvider, InMemoryCheckpointStore]:
     if provider is None:
         provider = FakeTranslationProvider()
@@ -95,6 +97,8 @@ def make_orchestrator(
         checkpoint=store,
         context_manager=ctx,
         cost_estimator=cost_est,
+        provider_name=provider_name,
+        corpus_store=corpus_store,
     )
     return orch, provider, store
 
@@ -2634,3 +2638,339 @@ def test_srt_reflective_passes_segment_count_to_draft_and_revise_only():
     assert saved[0].status == ChunkStatus.DONE
     assert saved[0].translated_text == "uno\n\ndos"
     assert result.status == JobStatus.DONE
+
+
+# ===========================================================================
+# T2 — passed_validation provenance threading through _translate_with_retry's
+# four return paths (spec: job-execution-core/"passed_validation persisted
+# per chunk"; design decision #7, orchestrator.py:612-621).
+# ===========================================================================
+
+
+def test_passed_validation_true_on_first_try_success():
+    """Return path 1 (happy): translation passes tag+segment validation on the
+    FIRST attempt → persisted chunk.passed_validation is True."""
+    orch, provider, store = make_orchestrator()
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 1
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].passed_validation is True
+
+
+def test_passed_validation_false_on_best_effort_segment_mismatch():
+    """Return path 2 (best-effort accepted): a prose chunk that never produces
+    a segment-compliant output is accepted DONE after 3 attempts (design
+    decision #7 / orchestrator.py:612-621) with passed_validation=False."""
+    store = InMemoryCheckpointStore()
+
+    class AlwaysMergeProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="Párrafo uno. Párrafo dos.",
+                summary_update="Summary.",
+            )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = AlwaysMergeProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 3
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].passed_validation is False
+    assert result.status == JobStatus.DONE
+
+
+def test_passed_validation_true_on_fallback_success():
+    """Return path 4 (strip/reinsert fallback): all 3 tags-in-text attempts
+    fail, but the deterministic fallback call passes validate_tags → chunk
+    DONE with passed_validation=True (fallback success IS a validation pass,
+    distinct from the best-effort segment-mismatch acceptance)."""
+    store = InMemoryCheckpointStore()
+
+    class AllTagsFailThenPlainProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="El zorro rápido.",
+                summary_update="Summary.",
+            )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = AllTagsFailThenPlainProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="The <i>quick</i> fox.")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 4  # 3 primary + 1 fallback
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].passed_validation is True
+    assert result.status == JobStatus.DONE
+
+
+def test_passed_validation_false_on_chunk_failed_tag_mismatch():
+    """Return path 3 (FAILED): both primary and fallback exhaust without a
+    tag-valid output → chunk FAILED with passed_validation=False."""
+    store = InMemoryCheckpointStore()
+    provider = _always_mismatch_except({"Chunk 0 text."})()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Chunk 0 text.")]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[0].passed_validation is False
+    assert result.status == JobStatus.DONE
+
+
+def test_passed_validation_false_on_segmented_misalignment_failed():
+    """Return path 3 (FAILED), segmented-cue variant: a translations array
+    that never aligns with the cue count ends the chunk FAILED (not
+    best-effort — SRT cue batches cannot absorb a misalignment) with
+    passed_validation=False."""
+    store = InMemoryCheckpointStore()
+
+    class MisalignedSegmentsProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            # Always return ONE fewer translation than requested — permanently
+            # misaligned with the cue count.
+            unit = TranslationUnit(
+                translations=["uno"] if segment_count else ["uno", "dos"],
+                summary_update="Summary.",
+            )
+            return TranslationResult(unit=unit, usage=Usage())
+
+    provider = MisalignedSegmentsProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["a", "b"])]
+
+    result = run_job(orch, job, chunks, store=store)
+
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[0].passed_validation is False
+    assert result.status == JobStatus.DONE
+
+
+def test_orchestrator_accepts_provider_name_default_unknown():
+    """Orchestrator ctor gains an additive provider_name kwarg (design decision
+    #6) defaulting to 'unknown' so existing call sites are unaffected."""
+    provider = FakeTranslationProvider()
+    store = InMemoryCheckpointStore()
+    ctx = ContextManager(provider)
+    cost_est = CostEstimator(provider)
+    orch = TranslationOrchestrator(
+        provider=provider,
+        checkpoint=store,
+        context_manager=ctx,
+        cost_estimator=cost_est,
+    )
+    assert orch._provider_name == "unknown"
+
+
+def test_orchestrator_accepts_provider_name_explicit_value():
+    """Triangulation: explicit provider_name is stored verbatim."""
+    provider = FakeTranslationProvider()
+    store = InMemoryCheckpointStore()
+    ctx = ContextManager(provider)
+    cost_est = CostEstimator(provider)
+    orch = TranslationOrchestrator(
+        provider=provider,
+        checkpoint=store,
+        context_manager=ctx,
+        cost_estimator=cost_est,
+        provider_name="anthropic",
+    )
+    assert orch._provider_name == "anthropic"
+
+
+# ===========================================================================
+# T4 — corpus capture hook (design decision #6/#10): a CorpusSample is
+# written at the real chunk-DONE point (translated, not passthrough/FAILED).
+# Best-effort: a raising CorpusStore never fails the job. No store → no
+# behavior change.
+# ===========================================================================
+
+
+def test_corpus_store_receives_sample_on_chunk_done():
+    """A DONE (translated) chunk writes a CorpusSample carrying provenance
+    (source/translated text, provider, model, quality_mode, passed_validation)."""
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+    orch, provider, _ = make_orchestrator(store=store, corpus_store=corpus, provider_name="anthropic")
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    sample = corpus.samples[(job.id, 0)]
+    assert sample.source_text == chunks[0].source_text
+    assert sample.translated_text is not None
+    assert sample.provider == "anthropic"
+    assert sample.model == config.model
+    assert sample.quality_mode == config.quality_mode
+    assert sample.passed_validation is True
+
+
+def test_corpus_store_failure_does_not_fail_job():
+    """A raising CorpusStore.save_sample() MUST NOT fail, pause, or otherwise
+    affect the translation job (design decision #10 — silent best-effort)."""
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore(raise_on_save=True)
+    orch, provider, _ = make_orchestrator(store=store, corpus_store=corpus)
+    config = make_config()
+    job = make_job(config, total=3)
+    chunks = make_chunks(3)
+
+    result = run_job(orch, job, chunks, config=config, store=store)
+
+    assert result.status == JobStatus.DONE
+    assert provider.call_count == 3
+    assert corpus.samples == {}
+
+
+def test_no_corpus_store_no_writes():
+    """Omitting corpus_store (default None) is a pure no-op — no attribute
+    error, job completes exactly as before T4."""
+    orch, provider, store = make_orchestrator()
+    config = make_config()
+    job = make_job(config, total=2)
+    chunks = make_chunks(2)
+
+    result = run_job(orch, job, chunks, config=config, store=store)
+
+    assert result.status == JobStatus.DONE
+    assert provider.call_count == 2
+
+
+def test_corpus_store_skips_passthrough_chunk():
+    """A pass-through chunk (no translatable prose) makes zero provider calls
+    and MUST NOT be captured to the corpus store (design decision #10)."""
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+    orch, provider, _ = make_orchestrator(store=store, corpus_store=corpus)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="<span></span>")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    assert provider.call_count == 0
+    assert corpus.samples == {}
+
+
+def test_corpus_store_skips_failed_chunk():
+    """A chunk that ends FAILED (no translated_text) MUST NOT be captured to
+    the corpus store (design decision #10)."""
+    store = InMemoryCheckpointStore()
+    provider = _AlwaysMismatchProvider()
+    corpus = FakeCorpusStore()
+    orch, _, _ = make_orchestrator(provider=provider, store=store, corpus_store=corpus)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="No tags here.")]
+
+    result = run_job(orch, job, chunks, config=config, store=store)
+
+    assert result.status == JobStatus.DONE
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.FAILED
+    assert corpus.samples == {}
+
+
+# ===========================================================================
+# T4b amendment — validation failure detail (spec-conformance gap): a
+# best-effort corpus sample MUST carry the actual validator issue messages
+# in validation_errors; a cleanly-passing sample MUST have validation_errors
+# None; a FAILED chunk still makes zero corpus writes (unchanged from T4).
+# ===========================================================================
+
+
+def test_corpus_store_best_effort_chunk_carries_validator_messages():
+    """A prose chunk accepted as best-effort (segment-count mismatch on every
+    attempt) is captured with validation_errors populated with the actual
+    validator issue messages (JSON list of strings)."""
+    import json
+
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+
+    class AlwaysMergeProvider(FakeTranslationProvider):
+        def translate(self, system: str, user: str, model: str) -> TranslationResult:
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="Párrafo uno. Párrafo dos.",
+                summary_update="Summary.",
+            )
+            in_tok = self.count_tokens(system + " " + user, model)
+            out_tok = self.count_tokens(unit.translation, model)
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+
+    provider = AlwaysMergeProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store, corpus_store=corpus)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.DONE
+    assert saved.passed_validation is False
+
+    sample = corpus.samples[(job.id, 0)]
+    assert sample.passed_validation is False
+    assert sample.validation_errors is not None
+    issues = json.loads(sample.validation_errors)
+    assert isinstance(issues, list) and len(issues) > 0
+    assert any("segment" in issue.lower() for issue in issues)
+
+
+def test_corpus_store_passing_chunk_validation_errors_none():
+    """A chunk that passes validation cleanly (first attempt) is captured
+    with validation_errors=None."""
+    store = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+    orch, _, _ = make_orchestrator(store=store, corpus_store=corpus)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    sample = corpus.samples[(job.id, 0)]
+    assert sample.passed_validation is True
+    assert sample.validation_errors is None

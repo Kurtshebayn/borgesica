@@ -471,3 +471,57 @@ def test_translation_result_accepts_explicit_usage() -> None:
     result = TranslationResult(unit=unit, usage=usage)
     assert result.usage.input_tokens == 200
     assert result.usage.output_tokens == 80
+
+
+def test_corpus_sample_defaults_passed_validation_true_and_no_errors() -> None:
+    """A CorpusSample built without overriding provenance fields defaults to
+    passed_validation=True and validation_errors=None (spec: 'Validated chunk
+    has no validation errors')."""
+    from borgesica.domain.models import CorpusSample
+
+    sample = CorpusSample(
+        job_id="job-1",
+        chunk_index=0,
+        source_text="hello",
+        translated_text="hola",
+        provider="anthropic",
+        model="claude-x",
+        quality_mode="reflective",
+    )
+    assert sample.passed_validation is True
+    assert sample.validation_errors is None
+
+
+def test_corpus_sample_accepts_best_effort_provenance() -> None:
+    """A CorpusSample MUST accept passed_validation=False with validation_errors
+    populated (spec: 'Best-effort chunk records validation errors')."""
+    from borgesica.domain.models import CorpusSample
+
+    sample = CorpusSample(
+        job_id="job-1",
+        chunk_index=1,
+        source_text="hello",
+        translated_text="best effort translation",
+        provider="anthropic",
+        model="claude-x",
+        quality_mode="reflective",
+        passed_validation=False,
+        validation_errors="tag mismatch after 3 attempts",
+    )
+    assert sample.passed_validation is False
+    assert sample.validation_errors == "tag mismatch after 3 attempts"
+
+
+def test_corpus_sample_translated_text_optional() -> None:
+    """translated_text MUST be optional (FAILED chunks have no translation)."""
+    from borgesica.domain.models import CorpusSample
+
+    sample = CorpusSample(
+        job_id="job-1",
+        chunk_index=2,
+        source_text="hello",
+        provider="anthropic",
+        model="claude-x",
+        quality_mode="fast",
+    )
+    assert sample.translated_text is None

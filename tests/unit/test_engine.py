@@ -27,7 +27,7 @@ from borgesica.domain.models import (
     SourceType,
     TranslationUnit,
 )
-from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
+from tests.fakes import FakeCorpusStore, FakeTranslationProvider, InMemoryCheckpointStore
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +211,45 @@ def test_run_job_completes_and_calls_provider_per_chunk(
 
 
 # ---------------------------------------------------------------------------
+# T4 — corpus_store/provider_name ctor kwargs are threaded through to the
+# orchestrator during run_job (design decision #6: engine-wide capture, CLI
+# included, since api.py is the CLI's driving adapter's composition root).
+# ---------------------------------------------------------------------------
+
+
+def test_run_job_threads_corpus_store_to_orchestrator(tmp_path: Path) -> None:
+    """Injecting corpus_store + provider_name into TranslatorEngine results in
+    corpus samples being captured during run_job, with provenance carrying
+    the configured provider_name."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=1)
+    provider = FakeTranslationProvider()
+    checkpoint = InMemoryCheckpointStore()
+    corpus = FakeCorpusStore()
+    from borgesica.adapters.readers.srt_reader import SrtReader
+    from borgesica.adapters.writers.srt_writer import SrtWriter
+    from borgesica.domain.glossary import NullGlossaryExtractor
+
+    engine = TranslatorEngine(
+        provider=provider,
+        checkpoint=checkpoint,
+        readers={SourceType.SRT: SrtReader()},
+        writers={SourceType.SRT: SrtWriter()},
+        extractor=NullGlossaryExtractor(),
+        corpus_store=corpus,
+        provider_name="anthropic",
+    )
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    out_path = str(tmp_path / "out.srt")
+    engine.run_job(job.id, out_path=out_path)
+
+    assert corpus.samples
+    sample = next(iter(corpus.samples.values()))
+    assert sample.provider == "anthropic"
+
+
+# ---------------------------------------------------------------------------
 # M1-12 — Test 7: status(job_id) returns Job matching checkpoint state
 # ---------------------------------------------------------------------------
 
@@ -385,6 +424,76 @@ def test_on_progress_callback_receives_progress(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# REL-002 — cancel_job racing concurrently with run_job()'s _execute_job start
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_race_before_execute_installs_fresh_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel_job() landing in the window between run_job() loading the job
+    and _execute_job installing its fresh cancel Event must not be silently
+    lost. Regression: _execute_job used to unconditionally overwrite
+    self._cancel_flags[job.id] with a brand-new (unset) Event, discarding any
+    concurrent cancel signal — the job would then run to completion instead
+    of observing the cancellation."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    engine, provider, checkpoint = _make_engine()
+    config = _make_config(chunk_size=1)
+    job = engine.create_job(srt_path, config)
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    original_execute = engine._execute_job
+
+    def _blocking_execute(job_arg, *, out_path, on_progress):
+        entered.set()
+        proceed.wait(timeout=5)
+        return original_execute(job_arg, out_path=out_path, on_progress=on_progress)
+
+    monkeypatch.setattr(engine, "_execute_job", _blocking_execute)
+
+    out_path = str(tmp_path / "out.srt")
+    result: dict[str, Job] = {}
+
+    def _run() -> None:
+        result["job"] = engine.run_job(job.id, out_path=out_path)
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    assert entered.wait(timeout=2)
+
+    # Concurrent cancel lands here — before the real _execute_job body runs.
+    engine.cancel_job(job.id)
+
+    proceed.set()
+    thread.join(timeout=5)
+
+    assert result["job"].status == JobStatus.CANCELLED
+    assert provider.call_count == 0
+
+
+def test_cancel_then_resume_still_reaches_done(tmp_path: Path) -> None:
+    """Companion to test_cancel_then_resume: guards against a fix for the
+    concurrent-cancel race (REL-002) accidentally making a fresh, deliberate
+    resume-after-cancel inherit a stale set cancel-flag from the prior
+    cancelled run."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, provider, checkpoint = _make_engine()
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    engine.cancel_job(job.id)
+    assert engine.status(job.id).status == JobStatus.CANCELLED
+
+    out_path = str(tmp_path / "out.srt")
+    final_job = engine.resume_job(job.id, out_path=out_path)
+
+    assert final_job.status == JobStatus.DONE
+    assert provider.call_count == 3
+
+
+# ---------------------------------------------------------------------------
 # continue-on-error WU3-1 — TranslatorEngine.failed_chunk_indices(job_id)
 # Spec: job-lifecycle/"skip report surfaces FAILED chunk indices at end of run"
 # ---------------------------------------------------------------------------
@@ -444,3 +553,55 @@ def test_failed_chunk_indices_raises_for_unknown_job_id() -> None:
     engine, _, _ = _make_engine()
     with pytest.raises(JobNotFoundError):
         engine.failed_chunk_indices("unknown-id")
+
+
+# ---------------------------------------------------------------------------
+# T4 — TranslatorEngine.best_effort_chunk_indices(job_id)
+# Spec: "End-of-run best-effort summary" — DONE chunks with
+# passed_validation=False, sorted 0-based (design decision #9).
+# ---------------------------------------------------------------------------
+
+
+def test_best_effort_chunk_indices_empty_when_all_validated(tmp_path: Path) -> None:
+    """best_effort_chunk_indices returns [] when every DONE chunk validated."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    engine, _, _ = _make_engine()
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    out_path = str(tmp_path / "out.srt")
+    engine.run_job(job.id, out_path=out_path)
+
+    assert engine.best_effort_chunk_indices(job.id) == []
+
+
+def test_best_effort_chunk_indices_returns_sorted_indices(tmp_path: Path) -> None:
+    """DONE chunks persisted with passed_validation=False are surfaced,
+    sorted 0-based; a DONE chunk with passed_validation=True is excluded."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    engine, _, checkpoint = _make_engine()
+    config = _make_config(chunk_size=1)
+
+    job = engine.create_job(srt_path, config)
+    chunks = {c.index: c for c in checkpoint.load_chunks(job.id)}
+    checkpoint.save_chunk(
+        job.id,
+        chunks[0].model_copy(
+            update={"status": ChunkStatus.DONE, "passed_validation": False}
+        ),
+    )
+    checkpoint.save_chunk(
+        job.id,
+        chunks[1].model_copy(
+            update={"status": ChunkStatus.DONE, "passed_validation": True}
+        ),
+    )
+
+    assert engine.best_effort_chunk_indices(job.id) == [0]
+
+
+def test_best_effort_chunk_indices_raises_for_unknown_job_id() -> None:
+    """best_effort_chunk_indices raises JobNotFoundError for an unknown job_id."""
+    engine, _, _ = _make_engine()
+    with pytest.raises(JobNotFoundError):
+        engine.best_effort_chunk_indices("unknown-id")

@@ -124,19 +124,38 @@ def _require_env(var: str, provider: str) -> str:
     return value
 
 
+# RISK-001/002/003: the serve API's per-session auth token, captured as a
+# side effect of reading the SAME trusted stdin init line as the provider
+# API key (see _read_key_from_stdin). Module-level because the token must
+# reach _cmd_serve (called later, from main()'s dispatch table) without
+# threading a new parameter through every _build_engine/_build_provider
+# caller — none of which otherwise need to know about serve-layer auth.
+# None when --key-stdin was never used (plain CLI/env-var flow) or the init
+# line carried no "token" field: create_app() then runs with auth disabled,
+# same as it always has.
+_stdin_session_token: str | None = None
+
+
 def _read_key_from_stdin(provider: str) -> str:
     """Read the provider API key from a single JSON init line on stdin.
 
     The desktop shell (Tauri/Rust) reads the key from the OS keyring and writes
-    one newline-delimited JSON message — {"api_key": "..."} — to this
-    subprocess's stdin. Keeping the key off argv (visible via ps/Task Manager to
-    any process) and out of a persisted env var is the whole point: only the
-    SECRET travels this channel. Newline-delimited JSON is the forward-compatible
-    framing for any richer init message added later.
+    one newline-delimited JSON message — {"api_key": "...", "token": "..."} —
+    to this subprocess's stdin. Keeping the key off argv (visible via ps/Task
+    Manager to any process) and out of a persisted env var is the whole point:
+    only secrets travel this channel. Newline-delimited JSON is the
+    forward-compatible framing for any richer init message added later.
+
+    As of RISK-001/002/003, the same init line also carries the serve API's
+    per-session auth "token" (captured into the module-level
+    `_stdin_session_token` for `_cmd_serve` to pick up — see that global's
+    docstring for why it is not threaded through as a return value here).
 
     Exits(1) with a clear message if the line is missing, malformed, or has no
     non-empty api_key — same failure contract as _require_env.
     """
+    global _stdin_session_token
+    _stdin_session_token = None  # reset each read — no stale token across calls
     line = sys.stdin.readline()
     key: str | None = None
     try:
@@ -144,6 +163,9 @@ def _read_key_from_stdin(provider: str) -> str:
         if isinstance(message, dict):
             raw = message.get("api_key")
             key = raw if isinstance(raw, str) and raw else None
+            raw_token = message.get("token")
+            if isinstance(raw_token, str) and raw_token:
+                _stdin_session_token = raw_token
     except json.JSONDecodeError:
         key = None
     if not key:
@@ -236,6 +258,16 @@ def _build_engine(
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = str(db_dir / "jobs.db")
 
+    # Corpus capture is engine-wide (design decision #6/#10): CLI runs get it
+    # from day one, in a separate corpus.db next to jobs.db. Mirrors db_path's
+    # ":memory:" escape hatch so tests exercising the real _build_engine path
+    # never touch the filesystem.
+    from borgesica.adapters.corpus.sqlite_corpus import SQLiteCorpusStore
+
+    corpus_db_path = (
+        ":memory:" if db_path == ":memory:" else str(Path(db_path).parent / "corpus.db")
+    )
+
     return TranslatorEngine(
         provider=translation_provider,
         checkpoint=SQLiteCheckpointStore(db_path=db_path),
@@ -250,6 +282,8 @@ def _build_engine(
             SourceType.PDF: PdfWriter(),
         },
         extractor=NullGlossaryExtractor(),  # default: no LLM glossary seed on CLI
+        corpus_store=SQLiteCorpusStore(corpus_db_path),
+        provider_name=provider,
     )
 
 
@@ -338,6 +372,20 @@ def _print_skip_summary(args: argparse.Namespace, engine: TranslatorEngine) -> N
         )
 
 
+def _print_best_effort_summary(args: argparse.Namespace, engine: TranslatorEngine) -> None:
+    """Print an end-of-run best-effort summary, analogous to
+    _print_skip_summary (spec: "End-of-run best-effort summary" — v1). Prints
+    nothing when there are zero best-effort chunks (no noise on the happy
+    path). Best-effort chunks ARE translated (unlike FAILED skips) but did
+    not pass tag/segment validation on any attempt."""
+    best_effort = engine.best_effort_chunk_indices(args.job_id)
+    if best_effort:
+        print(
+            f"NOTE: {len(best_effort)} chunk(s) remained best-effort "
+            f"(translated, but did not pass validation): {best_effort}"
+        )
+
+
 def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         out_path = _resolve_out(args, engine)
@@ -345,6 +393,7 @@ def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         final_job = engine.run_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
         _print_skip_summary(args, engine)
+        _print_best_effort_summary(args, engine)
         return 0
     except BorgesicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -358,6 +407,7 @@ def _cmd_resume(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         final_job = engine.resume_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
         _print_skip_summary(args, engine)
+        _print_best_effort_summary(args, engine)
         return 0
     except BorgesicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -396,6 +446,37 @@ def _cmd_glossary_show(args: argparse.Namespace, engine: TranslatorEngine) -> in
     except JobNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+
+def _cmd_serve(args: argparse.Namespace, engine: TranslatorEngine) -> int:
+    """Boot the local HTTP API (borgesica.serve) bound to loopback only.
+
+    main() builds *engine* eagerly for every subcommand (including
+    --key-stdin key intake), so the key is consumed once at process boot,
+    before serving any request (spec: "Key at process boot").
+
+    RISK-001/002/003: when --key-stdin's init line carried a "token", every
+    route is gated behind it (create_app's session_token). Without
+    --key-stdin (plain CLI/manual `borgesica serve`), no token was ever read
+    and auth stays disabled — a known, documented scope boundary (see
+    _stdin_session_token).
+
+    access_log=False (second correction round): uvicorn's default access
+    logger writes the full request line, INCLUDING the query string, to the
+    process log for every request. The SSE stream's `?token=<secret>` query
+    param (needed because native EventSource cannot set custom headers)
+    would otherwise leak the session token into that log on every
+    subscription. Disabling access logging entirely is the minimal, complete
+    fix — no request line is ever emitted, on any route, so the token can
+    never appear in one regardless of which route carries it.
+    """
+    import uvicorn
+
+    from borgesica.serve.app import SERVE_HOST, create_app
+
+    app = create_app(engine, session_token=_stdin_session_token)
+    uvicorn.run(app, host=SERVE_HOST, port=args.port, access_log=False)
+    return 0
 
 
 def _cmd_glossary_update(args: argparse.Namespace, engine: TranslatorEngine) -> int:
@@ -530,6 +611,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_gupdate.add_argument("--lock", action="store_true", default=False)
     _add_provider(p_gupdate)
 
+    # serve — local HTTP API (design decision #1/#5). No --host flag: the
+    # server always binds loopback only (borgesica.serve.app.SERVE_HOST);
+    # non-loopback binding can never be configured via this CLI.
+    p_serve = sub.add_parser(
+        "serve", help="Start the local HTTP API (127.0.0.1 only) for the desktop app"
+    )
+    p_serve.add_argument(
+        "--port", type=int, default=0, help="Port to listen on (default: 0, ephemeral)"
+    )
+    _add_provider(p_serve)
+
     return parser
 
 
@@ -589,6 +681,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "status": _cmd_status,
         "cancel": _cmd_cancel,
+        "serve": _cmd_serve,
     }
 
     if args.command == "glossary":
