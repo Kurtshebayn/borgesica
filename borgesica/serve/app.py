@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
 
@@ -95,6 +96,20 @@ def create_app(
         title="Borgésica serve API",
         dependencies=[Depends(_require_session_token)],
     )
+    # CORS for the Tauri webview: its fetch() calls carry X-Borgesica-Token +
+    # a JSON body, so they are non-simple cross-origin requests and the
+    # browser preflights them. Without this the preflight is unanswered and
+    # the app fails with "Failed to fetch". Origins are restricted to the
+    # app's own webview (dev: http://localhost:<port>; bundled Tauri:
+    # tauri://localhost and http(s)://tauri.localhost) — never "*" — and the
+    # per-session token still gates every route, so RISK-001/002/003 hold.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^(https?://localhost(:\d+)?|https?://tauri\.localhost|tauri://localhost)$",
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Borgesica-Token"],
+    )
+
     runner = JobRunner(engine)
     app.state.runner = runner  # exposed for tests/introspection
 
