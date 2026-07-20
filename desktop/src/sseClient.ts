@@ -8,6 +8,7 @@
  * covered by `wizard.test.ts`.
  */
 import { getStatus } from "./apiClient";
+import type { JobStatus } from "./apiTypes";
 import {
   isPersistentConnectionFailure,
   isRunningStatus,
@@ -46,6 +47,27 @@ export function subscribeToJobEvents(
     }
   }
 
+  /** On a terminal SSE event, re-fetch GET /jobs/{id} so the done screen sees
+   * the accurate failed_count/best_effort_count (the RUNNING run-ack that
+   * seeded state.job carried zeros). The SSE event's own `error` string is
+   * preserved — the status payload does not carry it. Falls back to a
+   * status-less terminal dispatch if the fetch fails, so a done screen still
+   * appears rather than the run hanging. */
+  function finalizeTerminal(
+    statusFromEvent: JobStatus,
+    errorFromEvent: string | null,
+  ): void {
+    getStatus(baseUrl, token, jobId)
+      .then((job) => {
+        if (closed) return;
+        dispatch({ type: "RUN_TERMINAL", status: job.status, error: errorFromEvent, job });
+      })
+      .catch(() => {
+        if (closed) return;
+        dispatch({ type: "RUN_TERMINAL", status: statusFromEvent, error: errorFromEvent });
+      });
+  }
+
   function startPolling(): void {
     if (closed || pollTimer !== null) return;
     pollTimer = setInterval(() => {
@@ -61,7 +83,9 @@ export function subscribeToJobEvents(
             },
           });
           if (!isRunningStatus(job.status)) {
-            dispatch({ type: "RUN_TERMINAL", status: job.status, error: null });
+            // Poll already holds the full job — pass it so failed/best-effort
+            // counts reach the done screen (error-surfacing).
+            dispatch({ type: "RUN_TERMINAL", status: job.status, error: null, job });
             stopPolling();
           }
         })
@@ -89,11 +113,15 @@ export function subscribeToJobEvents(
     source.onmessage = (event: MessageEvent<string>) => {
       const parsed = parseSseData(event.data);
       if (!parsed) return;
-      dispatch(sseEventToAction(parsed));
       if (parsed.type === "terminal") {
         source?.close();
         source = null;
+        // Do NOT dispatch the count-less terminal event directly — re-fetch
+        // status first so the done screen surfaces failed/best-effort chunks.
+        finalizeTerminal(parsed.status as JobStatus, parsed.error);
+        return;
       }
+      dispatch(sseEventToAction(parsed));
     };
     source.onerror = () => {
       // The stream dropped before a terminal event arrived. Do not rely on

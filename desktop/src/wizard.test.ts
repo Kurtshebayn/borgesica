@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   formatBestEffortSummary,
+  formatFailureSummary,
   formatProgress,
   initialWizardState,
   isPersistentConnectionFailure,
@@ -14,6 +15,7 @@ import {
   wizardReducer,
   type WizardState,
 } from "./wizard";
+import type { JobResponse } from "./apiTypes";
 
 describe("validateFilePath", () => {
   it("rejects .pdf with a clear message (spec: PDF rejected in picker)", () => {
@@ -48,6 +50,23 @@ describe("formatBestEffortSummary", () => {
 
   it("reports multiple chunks in plural form", () => {
     expect(formatBestEffortSummary(3)).toBe("3 chunks remained best-effort");
+  });
+});
+
+describe("formatFailureSummary", () => {
+  it("is null when no chunks failed (a clean success shows no alarm)", () => {
+    expect(formatFailureSummary(0, 10)).toBeNull();
+  });
+
+  it("warns that the output contains untranslated text when chunks failed", () => {
+    const msg = formatFailureSummary(3, 10);
+    expect(msg).toMatch(/3 of 10/);
+    expect(msg).toMatch(/failed to translate/i);
+    expect(msg).toMatch(/untranslated/i);
+  });
+
+  it("reports a single failed chunk too (one failure is still not a success)", () => {
+    expect(formatFailureSummary(1, 4)).toMatch(/1 of 4/);
   });
 });
 
@@ -209,6 +228,8 @@ describe("wizardReducer", () => {
         cost_usd: 0,
         best_effort_count: 0,
         best_effort_indices: [],
+        failed_count: 0,
+        failed_indices: [],
       },
     });
     expect(next.screen).toBe("pick");
@@ -236,6 +257,8 @@ describe("wizardReducer", () => {
         cost_usd: 0.4,
         best_effort_count: 0,
         best_effort_indices: [],
+        failed_count: 0,
+        failed_indices: [],
       },
     };
     const next = wizardReducer(running, {
@@ -245,6 +268,45 @@ describe("wizardReducer", () => {
     });
     expect(next.screen).toBe("done");
     expect(next.job?.status).toBe("DONE");
+  });
+
+  it("RUN_TERMINAL replaces the job with the refreshed status when provided " +
+    "(so failed/best-effort counts reach the done screen, not the stale run ack)", () => {
+    const running: WizardState = {
+      ...initialWizardState,
+      screen: "run",
+      job: {
+        id: "job-1",
+        status: "RUNNING",
+        total_chunks: 5,
+        completed_chunks: 0,
+        cost_usd: 0,
+        best_effort_count: 0,
+        best_effort_indices: [],
+        failed_count: 0,
+        failed_indices: [],
+      },
+    };
+    const refreshed: JobResponse = {
+      id: "job-1",
+      status: "DONE",
+      total_chunks: 5,
+      completed_chunks: 0,
+      cost_usd: 0,
+      best_effort_count: 0,
+      best_effort_indices: [],
+      failed_count: 5,
+      failed_indices: [0, 1, 2, 3, 4],
+    };
+    const next = wizardReducer(running, {
+      type: "RUN_TERMINAL",
+      status: "DONE",
+      error: null,
+      job: refreshed,
+    });
+    expect(next.screen).toBe("done");
+    expect(next.job).toEqual(refreshed);
+    expect(next.job?.failed_count).toBe(5);
   });
 
   it("RESET returns to the initial state", () => {

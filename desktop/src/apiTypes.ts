@@ -29,6 +29,12 @@ export interface JobResponse {
   cost_usd: number;
   best_effort_count: number;
   best_effort_indices: number[];
+  /** Chunks the provider could never translate (all retries + fallback
+   * failed). Under continue_on_error=true the job still ends DONE at $0
+   * shipping SOURCE text, so a non-zero failed_count is the only signal that
+   * a "DONE" run actually produced untranslated output. */
+  failed_count: number;
+  failed_indices: number[];
 }
 
 export interface EstimateResponse {

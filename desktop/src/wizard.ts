@@ -132,6 +132,24 @@ export function formatBestEffortSummary(count: number): string | null {
   return `${count} chunk${count === 1 ? "" : "s"} remained best-effort`;
 }
 
+/** Error-surfacing: a run with FAILED chunks (provider auth/model error, bad
+ * key, etc.) still ends DONE at $0 under continue_on_error=true, but the
+ * output file holds untranslated SOURCE text for those chunks. Returns a
+ * user-facing alert when any chunk failed, or null for a clean run so a real
+ * success shows no false alarm. Kept pure/tested here rather than inlined in
+ * WizardScreen.tsx's untested render glue. */
+export function formatFailureSummary(
+  failedCount: number,
+  totalChunks: number,
+): string | null {
+  if (failedCount <= 0) return null;
+  return (
+    `${failedCount} of ${totalChunks} chunks failed to translate — ` +
+    `the output file contains untranslated source text for ` +
+    `${failedCount === 1 ? "it" : "them"}.`
+  );
+}
+
 export function formatProgress(progress: ProgressInfo): string {
   return `Chunk ${progress.chunkIndex}/${progress.totalChunks} — $${progress.costUsd.toFixed(4)}`;
 }
@@ -209,7 +227,16 @@ export type WizardAction =
   | { type: "RUN_STARTED"; job: JobResponse }
   | { type: "RUN_START_FAILED"; message: string }
   | { type: "PROGRESS_RECEIVED"; progress: ProgressInfo }
-  | { type: "RUN_TERMINAL"; status: JobStatus; error: string | null }
+  | {
+      type: "RUN_TERMINAL";
+      status: JobStatus;
+      error: string | null;
+      /** Refreshed final job status fetched on terminal (carries accurate
+       * failed_count/best_effort_count that the RUNNING run-ack lacked). When
+       * omitted (e.g. the status re-fetch failed), the reducer falls back to
+       * updating only the status on the existing job. */
+      job?: JobResponse;
+    }
   | { type: "CANCEL_REQUESTED" }
   | { type: "RESUME_JOB"; job: JobResponse }
   | { type: "RESET" }
@@ -266,7 +293,10 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       return {
         ...state,
         screen: "done",
-        job: state.job ? { ...state.job, status: action.status } : state.job,
+        // Prefer the refreshed job (accurate failed/best-effort counts); fall
+        // back to stamping just the final status onto the run-ack when the
+        // status re-fetch was unavailable.
+        job: action.job ?? (state.job ? { ...state.job, status: action.status } : state.job),
         runError: action.error,
       };
     case "CANCEL_REQUESTED":
