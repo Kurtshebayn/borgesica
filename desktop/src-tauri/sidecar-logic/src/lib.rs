@@ -50,12 +50,21 @@ pub fn parse_ready_line(line: &str) -> Result<u16, ReadyLineError> {
 /// never included here: it is written to the child's stdin by the caller
 /// after spawn, per the desktop-shell spec's "key never in argv/env"
 /// requirement.
-pub fn build_serve_args(port: u16) -> Vec<String> {
+///
+/// `provider` selects the translation backend (`anthropic`, `deepseek`,
+/// `ollama`). It is passed to the engine's `serve --provider` flag so the
+/// desktop app is no longer hardwired to Anthropic; the provider is bound to
+/// the sidecar process at spawn (changing it requires a respawn). The value
+/// is a plain identifier, never a secret, so it is safe in argv (unlike the
+/// key/token, which travel over stdin only).
+pub fn build_serve_args(port: u16, provider: &str) -> Vec<String> {
     vec![
         "serve".to_string(),
         "--port".to_string(),
         port.to_string(),
         "--key-stdin".to_string(),
+        "--provider".to_string(),
+        provider.to_string(),
     ]
 }
 
@@ -158,9 +167,23 @@ mod tests {
 
     #[test]
     fn build_serve_args_never_includes_the_key() {
-        let args = build_serve_args(54321);
-        assert_eq!(args, vec!["serve", "--port", "54321", "--key-stdin"]);
+        let args = build_serve_args(54321, "anthropic");
+        assert_eq!(
+            args,
+            vec!["serve", "--port", "54321", "--key-stdin", "--provider", "anthropic"]
+        );
         assert!(!args_contain_secret(&args, "sk-super-secret-key"));
+    }
+
+    #[test]
+    fn build_serve_args_carries_the_selected_provider() {
+        // The desktop app must be able to launch the engine against a
+        // non-Anthropic backend; the provider name is a plain (non-secret)
+        // argv token forwarded to `serve --provider`.
+        let args = build_serve_args(0, "deepseek");
+        assert!(args.windows(2).any(|w| w == ["--provider", "deepseek"]));
+        let ollama = build_serve_args(0, "ollama");
+        assert!(ollama.windows(2).any(|w| w == ["--provider", "ollama"]));
     }
 
     #[test]
@@ -171,7 +194,7 @@ mod tests {
 
     #[test]
     fn args_contain_secret_ignores_empty_secret() {
-        let args = build_serve_args(1234);
+        let args = build_serve_args(1234, "anthropic");
         assert!(!args_contain_secret(&args, ""));
     }
 
@@ -238,7 +261,7 @@ mod tests {
         // existing api_key contract) — build_serve_args must never be able
         // to embed it, and args_contain_secret (already generic) confirms it.
         let token = format_token(0xdead_beef, 0xfeed_face);
-        let args = build_serve_args(54321);
+        let args = build_serve_args(54321, "anthropic");
         assert!(!args_contain_secret(&args, &token));
     }
 }

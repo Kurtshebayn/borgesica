@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  defaultModelForProvider,
   formatBestEffortSummary,
   formatFailureSummary,
   formatProgress,
@@ -8,6 +9,7 @@ import {
   isRunningStatus,
   MAX_CONSECUTIVE_CONNECTION_FAILURES,
   parseSseData,
+  PROVIDERS,
   recoveryRequiresRespawn,
   runRecoveryAction,
   sseEventToAction,
@@ -67,6 +69,26 @@ describe("formatFailureSummary", () => {
 
   it("reports a single failed chunk too (one failure is still not a success)", () => {
     expect(formatFailureSummary(1, 4)).toMatch(/1 of 4/);
+  });
+});
+
+describe("provider selection", () => {
+  it("offers the three engine-supported providers", () => {
+    expect(PROVIDERS).toEqual(["anthropic", "deepseek", "ollama"]);
+  });
+
+  it("defaults Anthropic to a current (non-retired) model id", () => {
+    expect(defaultModelForProvider("anthropic")).toBe("claude-sonnet-5");
+  });
+
+  it("defaults DeepSeek to a DeepSeek model id, not an Anthropic one", () => {
+    const model = defaultModelForProvider("deepseek");
+    expect(model).toMatch(/deepseek/);
+    expect(model).not.toMatch(/claude/);
+  });
+
+  it("leaves the model blank for Ollama (models are user-local, not fixed)", () => {
+    expect(defaultModelForProvider("ollama")).toBe("");
   });
 });
 

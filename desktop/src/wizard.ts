@@ -15,6 +15,28 @@ import type {
 
 export type WizardScreen = "pick" | "estimate" | "glossary" | "run" | "done" | "error";
 
+/** Translation backends the engine's `serve --provider` accepts. The provider
+ * is chosen before the sidecar spawns (it is bound to that process); changing
+ * it requires a sidecar respawn, so it lives at the App shell, not per job. */
+export type Provider = "anthropic" | "deepseek" | "ollama";
+
+export const PROVIDERS: Provider[] = ["anthropic", "deepseek", "ollama"];
+
+/** A sensible default model id for a freshly selected provider, so the user
+ * is not left with an Anthropic model id after switching to DeepSeek (which
+ * would fail at create/estimate). Ollama returns "" on purpose: local models
+ * are user-specific, so the user must type whichever tag they have pulled. */
+export function defaultModelForProvider(provider: Provider): string {
+  switch (provider) {
+    case "anthropic":
+      return "claude-sonnet-5";
+    case "deepseek":
+      return "deepseek-v4-flash";
+    case "ollama":
+      return "";
+  }
+}
+
 export interface ProgressInfo {
   chunkIndex: number;
   totalChunks: number;

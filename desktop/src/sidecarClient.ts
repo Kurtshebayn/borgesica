@@ -4,6 +4,7 @@
  * IPC/process boundary is not disguised as tested logic.
  */
 import { invoke } from "@tauri-apps/api/core";
+import type { Provider } from "./wizard";
 
 export interface SidecarStartResult {
   baseUrl: string;
@@ -11,20 +12,25 @@ export interface SidecarStartResult {
 }
 
 /**
- * Starts the sidecar for this session, passing the API key once. The key
- * is never stored by this module; the caller is responsible for holding it
- * only in memory for the lifetime of the session (spec: desktop-shell "Key
- * not persisted").
+ * Starts the sidecar for this session against the chosen *provider*, passing
+ * the API key once. The key is never stored by this module; the caller is
+ * responsible for holding it only in memory for the lifetime of the session
+ * (spec: desktop-shell "Key not persisted"). The provider is bound to the
+ * spawned process (the engine builds its provider once at boot), so switching
+ * providers means tearing the sidecar down and starting a new one.
  *
  * Returns both the base URL and the per-session auth token
  * (RISK-001/002/003) — the Rust side generates the token and exposes it
  * here the same controlled way base_url always was; the frontend must
  * attach it to every subsequent serve API request.
  */
-export async function startSidecar(apiKey: string): Promise<SidecarStartResult> {
+export async function startSidecar(
+  provider: Provider,
+  apiKey: string,
+): Promise<SidecarStartResult> {
   const result = await invoke<{ base_url: string; token: string }>(
     "start_sidecar",
-    { apiKey },
+    { provider, apiKey },
   );
   return { baseUrl: result.base_url, token: result.token };
 }
