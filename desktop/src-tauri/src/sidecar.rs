@@ -109,10 +109,11 @@ pub fn resolve_engine_command(packaged_binary: Option<&PathBuf>) -> (String, Vec
 /// line, and health-checks the resulting base URL before returning.
 pub fn spawn_sidecar(
     packaged_binary: Option<&PathBuf>,
+    provider: &str,
     api_key: &str,
 ) -> Result<SidecarHandle, SidecarError> {
     let (program, mut leading_args) = resolve_engine_command(packaged_binary);
-    let mut args = build_serve_args(0);
+    let mut args = build_serve_args(0, provider);
     // Guard: the key must never end up in argv. This is a defensive runtime
     // assertion backing the "key never in argv" spec requirement, mirrored
     // by sidecar_logic's own unit tests.
@@ -128,7 +129,7 @@ pub fn spawn_sidecar(
         .map_err(|e| SidecarError::SpawnFailed(e.to_string()))?;
 
     let token = generate_session_token();
-    write_key_to_stdin(&mut child, api_key, &token)?;
+    write_key_to_stdin(&mut child, provider, api_key, &token)?;
 
     let port = read_ready_port(&mut child)?;
     let url = base_url(port);
@@ -144,13 +145,14 @@ pub fn spawn_sidecar(
 
 fn write_key_to_stdin(
     child: &mut Child,
+    provider: &str,
     api_key: &str,
     token: &str,
 ) -> Result<(), SidecarError> {
     let stdin: &mut ChildStdin = child.stdin.as_mut().ok_or(SidecarError::StdinUnavailable)?;
     // Guard: the token must never end up in argv either (RISK-001/002/003),
     // mirroring the existing api_key assertion.
-    debug_assert!(!args_contain_secret(&build_serve_args(0), token));
+    debug_assert!(!args_contain_secret(&build_serve_args(0, provider), token));
     let line = build_stdin_init_line(api_key, token);
     stdin
         .write_all(line.as_bytes())

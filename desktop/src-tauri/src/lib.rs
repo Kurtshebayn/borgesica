@@ -45,6 +45,7 @@ fn packaged_binary_path(app: &tauri::AppHandle) -> Option<PathBuf> {
 fn start_sidecar(
     app: tauri::AppHandle,
     state: State<SidecarState>,
+    provider: String,
     api_key: String,
 ) -> Result<SidecarStartResult, String> {
     let mut guard = state.0.lock().map_err(|_| "sidecar state poisoned")?;
@@ -53,7 +54,8 @@ fn start_sidecar(
     }
 
     let binary = packaged_binary_path(&app);
-    let handle = spawn_sidecar(binary.as_ref(), &api_key).map_err(|e| e.to_string())?;
+    let handle =
+        spawn_sidecar(binary.as_ref(), &provider, &api_key).map_err(|e| e.to_string())?;
     let result = SidecarStartResult {
         base_url: handle.base_url.clone(),
         token: handle.token.clone(),

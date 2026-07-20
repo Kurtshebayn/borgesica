@@ -11,11 +11,13 @@ import {
 } from "./apiClient";
 import { subscribeToJobEvents, type SseSubscription } from "./sseClient";
 import {
+  defaultModelForProvider,
   formatBestEffortSummary,
   formatProgress,
   initialWizardState,
   runRecoveryAction,
   wizardReducer,
+  type Provider,
 } from "./wizard";
 import type { GlossaryEntry } from "./apiTypes";
 
@@ -31,10 +33,15 @@ import type { GlossaryEntry } from "./apiTypes";
 export default function WizardScreen({
   baseUrl,
   token,
+  provider,
   onRestartSidecar,
 }: {
   baseUrl: string;
   token: string;
+  /** The provider the sidecar was launched with — seeds a provider-appropriate
+   * default model so a DeepSeek/Ollama session is not stuck with an Anthropic
+   * model id (which would fail at create/estimate). */
+  provider: Provider;
   /** RES-001 (second correction round): the real stop+start sidecar
    * respawn seam, owned by App.tsx (which alone holds the API key and the
    * Tauri invoke calls). Called only when recovering from a genuine
@@ -42,7 +49,7 @@ export default function WizardScreen({
   onRestartSidecar: () => void;
 }) {
   const [state, dispatch] = useReducer(wizardReducer, initialWizardState);
-  const [model, setModel] = useState("claude-3-5-sonnet-latest");
+  const [model, setModel] = useState(() => defaultModelForProvider(provider));
   const [outPath, setOutPath] = useState("");
   const [resumeJobId, setResumeJobId] = useState("");
   const subscriptionRef = useRef<SseSubscription | null>(null);

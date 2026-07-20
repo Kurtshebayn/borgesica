@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { deriveSidecarStatus, type SidecarState } from "./sidecarStatus";
 import { startSidecar, stopSidecar } from "./sidecarClient";
+import { PROVIDERS, type Provider } from "./wizard";
 import WizardScreen from "./WizardScreen";
 
 /**
@@ -10,6 +11,7 @@ import WizardScreen from "./WizardScreen";
  */
 export default function App() {
   const [apiKeyInput, setApiKeyInput] = useState("");
+  const [provider, setProvider] = useState<Provider>("anthropic");
   const [state, setState] = useState<SidecarState>({
     baseUrl: null,
     error: null,
@@ -23,7 +25,7 @@ export default function App() {
     if (started.current) return;
     started.current = true;
     try {
-      const { baseUrl, token } = await startSidecar(apiKeyInput);
+      const { baseUrl, token } = await startSidecar(provider, apiKeyInput);
       setState({ baseUrl, token, error: null });
     } catch (err) {
       setState({ baseUrl: null, token: null, error: String(err) });
@@ -64,9 +66,26 @@ export default function App() {
       <p>Sidecar status: {status}</p>
       {status !== "ready" && (
         <div>
+          <label>
+            Provider:{" "}
+            <select
+              value={provider}
+              onChange={(e) => setProvider(e.target.value as Provider)}
+            >
+              {PROVIDERS.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </label>
           <input
             type="password"
-            placeholder="API key (session only, never saved)"
+            placeholder={
+              provider === "ollama"
+                ? "API key (not needed for Ollama)"
+                : "API key (session only, never saved)"
+            }
             value={apiKeyInput}
             onChange={(e) => setApiKeyInput(e.target.value)}
           />
@@ -80,6 +99,7 @@ export default function App() {
         <WizardScreen
           baseUrl={state.baseUrl}
           token={state.token}
+          provider={provider}
           onRestartSidecar={() => void handleRestartSidecar()}
         />
       )}

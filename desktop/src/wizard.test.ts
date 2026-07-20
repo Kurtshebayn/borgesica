@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  defaultModelForProvider,
   formatBestEffortSummary,
   formatProgress,
   initialWizardState,
@@ -7,6 +8,7 @@ import {
   isRunningStatus,
   MAX_CONSECUTIVE_CONNECTION_FAILURES,
   parseSseData,
+  PROVIDERS,
   recoveryRequiresRespawn,
   runRecoveryAction,
   sseEventToAction,
@@ -48,6 +50,26 @@ describe("formatBestEffortSummary", () => {
 
   it("reports multiple chunks in plural form", () => {
     expect(formatBestEffortSummary(3)).toBe("3 chunks remained best-effort");
+  });
+});
+
+describe("provider selection", () => {
+  it("offers the three engine-supported providers", () => {
+    expect(PROVIDERS).toEqual(["anthropic", "deepseek", "ollama"]);
+  });
+
+  it("defaults Anthropic to a current (non-retired) model id", () => {
+    expect(defaultModelForProvider("anthropic")).toBe("claude-sonnet-5");
+  });
+
+  it("defaults DeepSeek to a DeepSeek model id, not an Anthropic one", () => {
+    const model = defaultModelForProvider("deepseek");
+    expect(model).toMatch(/deepseek/);
+    expect(model).not.toMatch(/claude/);
+  });
+
+  it("leaves the model blank for Ollama (models are user-local, not fixed)", () => {
+    expect(defaultModelForProvider("ollama")).toBe("");
   });
 });
 
