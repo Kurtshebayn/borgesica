@@ -475,8 +475,41 @@ def _cmd_serve(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     from borgesica.serve.app import SERVE_HOST, create_app
 
     app = create_app(engine, session_token=_stdin_session_token)
-    uvicorn.run(app, host=SERVE_HOST, port=args.port, access_log=False)
+    config = uvicorn.Config(app, host=SERVE_HOST, port=args.port, access_log=False)
+    _run_server(config)
     return 0
+
+
+def _run_server(config: Any) -> None:
+    """Run a uvicorn server, announcing the actually-bound port on stdout.
+
+    With ``--port 0`` (the default, and what the Tauri sidecar spawns) the OS
+    assigns an ephemeral port; the Rust handshake (``read_ready_port`` in
+    sidecar.rs) discovers it by parsing this exact line from stdout:
+    ``{"event": "ready", "port": N}``. ``flush=True`` is mandatory — the
+    parent reads the pipe line-by-line and would otherwise block on buffering.
+
+    Isolated behind this seam so unit tests can drive ``_cmd_serve`` (and
+    assert on the ``uvicorn.Config`` it builds) without booting a real server.
+    """
+    import asyncio
+
+    import uvicorn
+
+    server = uvicorn.Server(config)
+
+    async def _serve_and_announce() -> None:
+        serve_task = asyncio.ensure_future(server.serve())
+        try:
+            while not server.started:
+                await asyncio.sleep(0.02)
+            bound_port = server.servers[0].sockets[0].getsockname()[1]
+            print(json.dumps({"event": "ready", "port": bound_port}), flush=True)
+            await serve_task
+        finally:
+            server.should_exit = True
+
+    asyncio.run(_serve_and_announce())
 
 
 def _cmd_glossary_update(args: argparse.Namespace, engine: TranslatorEngine) -> int:
