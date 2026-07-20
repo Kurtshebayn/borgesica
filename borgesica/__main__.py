@@ -461,14 +461,12 @@ def _cmd_serve(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     and auth stays disabled — a known, documented scope boundary (see
     _stdin_session_token).
 
-    access_log=False (second correction round): uvicorn's default access
-    logger writes the full request line, INCLUDING the query string, to the
-    process log for every request. The SSE stream's `?token=<secret>` query
-    param (needed because native EventSource cannot set custom headers)
-    would otherwise leak the session token into that log on every
-    subscription. Disabling access logging entirely is the minimal, complete
-    fix — no request line is ever emitted, on any route, so the token can
-    never appear in one regardless of which route carries it.
+    access_log=False: defense-in-depth. The session token now travels in the
+    X-Borgesica-Token header on every route (the SSE stream is read with
+    `fetch`, not native EventSource, so it no longer needs a `?token=` query
+    fallback), so it never appears in a request line to begin with. Disabling
+    the access log keeps it that way even if a URL ever carried a secret again,
+    and cuts per-request log noise for a loopback-only local API.
     """
     import uvicorn
 

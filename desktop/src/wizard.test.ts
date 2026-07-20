@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   defaultModelForProvider,
+  extractSseData,
   formatBestEffortSummary,
   formatFailureSummary,
   formatProgress,
@@ -143,6 +144,28 @@ describe("parseSseData", () => {
 
   it("returns null on an unrecognized event type", () => {
     expect(parseSseData(JSON.stringify({ type: "mystery" }))).toBeNull();
+  });
+});
+
+describe("extractSseData", () => {
+  it("returns the payload of a single data: line (leading space stripped)", () => {
+    expect(extractSseData("data: {\"type\":\"terminal\"}")).toBe('{"type":"terminal"}');
+  });
+
+  it("tolerates a data: line with no space after the colon", () => {
+    expect(extractSseData("data:{\"x\":1}")).toBe('{"x":1}');
+  });
+
+  it("ignores comment/heartbeat frames (no data field)", () => {
+    expect(extractSseData(": heartbeat")).toBeNull();
+  });
+
+  it("joins multiple data: lines with newlines (SSE spec)", () => {
+    expect(extractSseData("data: a\ndata: b")).toBe("a\nb");
+  });
+
+  it("tolerates CRLF line endings", () => {
+    expect(extractSseData("data: {\"ok\":true}\r")).toBe('{"ok":true}');
   });
 });
 
