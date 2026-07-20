@@ -50,6 +50,28 @@ def _make_srt_fixture(tmp_path: Path) -> str:
     return str(srt_path)
 
 
+def test_health_returns_ok_without_token_when_auth_configured() -> None:
+    """The sidecar handshake (`wait_for_health` in sidecar.rs) probes GET
+    /health with NO token before auth is established, so /health MUST be
+    exempt from the session-token gate — otherwise the probe 401s and the
+    sidecar never reports ready."""
+    engine = _make_engine()
+    client = TestClient(create_app(engine, session_token=TOKEN))
+
+    resp = client.get("/health")
+
+    assert resp.status_code == 200
+
+
+def test_health_returns_ok_on_default_unauthenticated_app() -> None:
+    engine = _make_engine()
+    client = TestClient(create_app(engine))
+
+    resp = client.get("/health")
+
+    assert resp.status_code == 200
+
+
 def test_request_without_token_rejected_when_configured(tmp_path: Path) -> None:
     engine = _make_engine()
     client = TestClient(create_app(engine, session_token=TOKEN))
