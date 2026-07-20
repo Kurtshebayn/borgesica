@@ -1,15 +1,21 @@
 /**
- * `EventSource`-based SSE consumer (design decision #13) for a single job's
- * progress stream, with a status-polling fallback on connection drop
- * (spec: "Reconnection after drop" — must resume via a status poll without
- * restarting the job). Untested by design: this module is pure DOM/network
- * glue; the event parsing and action mapping it delegates to
- * (`parseSseData`, `sseEventToAction`, `isRunningStatus`) are pure and
- * covered by `wizard.test.ts`.
+ * `fetch`-stream SSE consumer for a single job's progress stream, with a
+ * status-polling fallback on connection drop (spec: "Reconnection after drop"
+ * — must resume via a status poll without restarting the job).
+ *
+ * Why not native `EventSource`: it cannot set request headers, which forced
+ * the auth token into a `?token=` query parameter (RISK-001/002/003). Reading
+ * the stream with `fetch` + a `ReadableStream` reader lets the token ride the
+ * `X-Borgesica-Token` header like every other route, so it never appears in a
+ * URL. Untested by design: this module is pure DOM/network glue; the frame
+ * parsing and action mapping it delegates to (`extractSseData`, `parseSseData`,
+ * `sseEventToAction`, `isRunningStatus`) are pure and covered by
+ * `wizard.test.ts`.
  */
 import { getStatus } from "./apiClient";
 import type { JobStatus } from "./apiTypes";
 import {
+  extractSseData,
   isPersistentConnectionFailure,
   isRunningStatus,
   parseSseData,
@@ -18,6 +24,7 @@ import {
 } from "./wizard";
 
 const POLL_INTERVAL_MS = 2000;
+const TOKEN_HEADER = "X-Borgesica-Token";
 
 export interface SseSubscription {
   close(): void;
@@ -30,15 +37,10 @@ export function subscribeToJobEvents(
   dispatch: (action: WizardAction) => void,
 ): SseSubscription {
   let closed = false;
+  let terminalSeen = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let consecutiveFailures = 0;
-  // RISK-001/002/003: native EventSource cannot set custom request headers,
-  // so the auth token travels as a query parameter for this one read-only
-  // route (documented deviation — every mutating route below/elsewhere
-  // requires the X-Borgesica-Token header exclusively).
-  let source: EventSource | null = new EventSource(
-    `${baseUrl}/jobs/${jobId}/events?token=${encodeURIComponent(token)}`,
-  );
+  const controller = new AbortController();
 
   function stopPolling(): void {
     if (pollTimer !== null) {
@@ -69,7 +71,7 @@ export function subscribeToJobEvents(
   }
 
   function startPolling(): void {
-    if (closed || pollTimer !== null) return;
+    if (closed || terminalSeen || pollTimer !== null) return;
     pollTimer = setInterval(() => {
       getStatus(baseUrl, token, jobId)
         .then((job) => {
@@ -85,6 +87,7 @@ export function subscribeToJobEvents(
           if (!isRunningStatus(job.status)) {
             // Poll already holds the full job — pass it so failed/best-effort
             // counts reach the done screen (error-surfacing).
+            terminalSeen = true;
             dispatch({ type: "RUN_TERMINAL", status: job.status, error: null, job });
             stopPolling();
           }
@@ -109,37 +112,72 @@ export function subscribeToJobEvents(
     }, POLL_INTERVAL_MS);
   }
 
-  if (source) {
-    source.onmessage = (event: MessageEvent<string>) => {
-      const parsed = parseSseData(event.data);
-      if (!parsed) return;
-      if (parsed.type === "terminal") {
-        source?.close();
-        source = null;
-        // Do NOT dispatch the count-less terminal event directly — re-fetch
-        // status first so the done screen surfaces failed/best-effort chunks.
-        finalizeTerminal(parsed.status as JobStatus, parsed.error);
-        return;
-      }
-      dispatch(sseEventToAction(parsed));
-    };
-    source.onerror = () => {
-      // The stream dropped before a terminal event arrived. Do not rely on
-      // EventSource's own auto-reconnect (it would re-open the SSE
-      // handshake against a job that may already have finished) — fall
-      // back to polling GET /jobs/{id} instead (spec: reconnection falls
-      // back to status polling).
-      source?.close();
-      source = null;
-      startPolling();
-    };
+  /** Handle one complete SSE frame. Returns true once a terminal event was
+   * seen, so the reader loop can stop. */
+  function handleFrame(frame: string): boolean {
+    const data = extractSseData(frame);
+    if (data === null) return false; // heartbeat / comment — ignore
+    const parsed = parseSseData(data);
+    if (!parsed) return false; // malformed / unknown — ignore, keep streaming
+    if (parsed.type === "terminal") {
+      terminalSeen = true;
+      // Re-fetch status so the done screen surfaces failed/best-effort chunks
+      // (the count-less terminal frame is not dispatched directly).
+      finalizeTerminal(parsed.status as JobStatus, parsed.error);
+      return true;
+    }
+    dispatch(sseEventToAction(parsed));
+    return false;
   }
+
+  async function streamEvents(): Promise<void> {
+    const resp = await fetch(`${baseUrl}/jobs/${jobId}/events`, {
+      headers: { [TOKEN_HEADER]: token },
+      signal: controller.signal,
+    });
+    // A non-OK response (e.g. auth/404) or a bodiless response cannot be
+    // streamed — fall back to polling, which surfaces a recoverable error if
+    // the sidecar is truly unreachable.
+    if (!resp.ok || !resp.body) {
+      startPolling();
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // Events are separated by a blank line (server emits "\n\n"). Process
+      // every complete frame; keep the trailing partial in the buffer.
+      let sep = buffer.indexOf("\n\n");
+      while (sep !== -1) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        if (handleFrame(frame)) {
+          controller.abort(); // stop the stream once terminal is seen
+          return;
+        }
+        sep = buffer.indexOf("\n\n");
+      }
+    }
+    // The stream ended before a terminal event: reconnect via status polling
+    // (spec: reconnection falls back to status polling), unless we're closing.
+    if (!closed && !terminalSeen) startPolling();
+  }
+
+  streamEvents().catch(() => {
+    // The fetch/stream errored (dropped connection, abort). If we aborted on
+    // purpose (terminal seen or close()) there is nothing to do; otherwise
+    // fall back to polling like EventSource's onerror did.
+    if (!closed && !terminalSeen) startPolling();
+  });
 
   return {
     close(): void {
       closed = true;
-      source?.close();
-      source = null;
+      controller.abort();
       stopPolling();
     },
   };

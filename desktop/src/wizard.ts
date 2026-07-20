@@ -199,10 +199,30 @@ export interface SseTerminalEvent {
 
 export type SseParsedEvent = SseProgressEvent | SseTerminalEvent;
 
-/** Parses one SSE `data:` payload (already extracted by EventSource/the
- * fetch-stream glue). Never throws — malformed or unrecognized payloads
- * (e.g. transient noise) become `null` so the caller can safely ignore
- * them instead of crashing the stream. */
+/** Extracts the `data:` payload from one raw SSE frame (the text between two
+ * blank lines). The fetch-stream client hand-parses frames because it reads
+ * the token-authenticated stream via `fetch` (which, unlike `EventSource`,
+ * can set the `X-Borgesica-Token` header — keeping the token out of the URL).
+ *
+ * Follows the SSE wire format: lines starting with `data:` contribute the
+ * payload (optional single leading space stripped), multiple `data:` lines
+ * are joined with `\n`, and a frame with no `data:` line (e.g. a
+ * `: heartbeat` comment) yields `null` so the caller ignores it. Never
+ * throws — pure string handling only. */
+export function extractSseData(frame: string): string | null {
+  const dataLines = frame
+    .split("\n")
+    .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).replace(/^ /, ""));
+  if (dataLines.length === 0) return null;
+  return dataLines.join("\n");
+}
+
+/** Parses one SSE `data:` payload (already extracted by `extractSseData`).
+ * Never throws — malformed or unrecognized payloads (e.g. transient noise)
+ * become `null` so the caller can safely ignore them instead of crashing the
+ * stream. */
 export function parseSseData(raw: string): SseParsedEvent | null {
   let parsed: unknown;
   try {

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
@@ -65,20 +65,20 @@ def create_app(
             to finish after cancelling it (design: sidecar lifecycle "kill
             after 5s" fallback). Overridable for deterministic tests.
         session_token: Per-session shared secret (RISK-001/002/003) required
-            on every request via the `X-Borgesica-Token` header (or, for the
-            SSE stream only — native `EventSource` cannot set custom
-            headers — a `?token=` query parameter). `None` (the default)
-            disables auth entirely: this preserves the unauthenticated
-            contract every pre-existing T5/T6 test relies on. Real
-            production boot (`__main__.py`'s `serve` subcommand with
-            `--key-stdin`) always supplies a real token derived from the
-            same trusted stdin handshake as the provider API key.
+            on every request via the `X-Borgesica-Token` header — including
+            the SSE stream, which the desktop app reads with `fetch` (not
+            native `EventSource`) precisely so the token rides the header and
+            never appears in a URL/query string. `None` (the default) disables
+            auth entirely: this preserves the unauthenticated contract every
+            pre-existing T5/T6 test relies on. Real production boot
+            (`__main__.py`'s `serve` subcommand with `--key-stdin`) always
+            supplies a real token derived from the same trusted stdin
+            handshake as the provider API key.
     """
 
     async def _require_session_token(
         request: Request,
         x_borgesica_token: str | None = Header(default=None, alias="X-Borgesica-Token"),
-        token: str | None = Query(default=None),
     ) -> None:
         # /health is an unauthenticated liveness probe: the sidecar handshake
         # (wait_for_health in sidecar.rs) hits it with no token before auth is
@@ -88,8 +88,11 @@ def create_app(
             return
         if session_token is None:
             return
-        supplied = x_borgesica_token if x_borgesica_token is not None else token
-        if supplied != session_token:
+        # Header only — no query-parameter fallback. Every route, the SSE
+        # stream included, authenticates via the X-Borgesica-Token header, so
+        # the secret is never carried in a URL where it could be logged,
+        # cached, or land in browser history.
+        if x_borgesica_token != session_token:
             raise HTTPException(status_code=401, detail="Missing or invalid session token")
 
     app = FastAPI(

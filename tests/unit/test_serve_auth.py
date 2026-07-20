@@ -139,12 +139,12 @@ def test_cancel_and_shutdown_also_require_the_token(tmp_path: Path) -> None:
     assert resp2.status_code == 401
 
 
-def test_sse_stream_accepts_token_via_query_param(tmp_path: Path) -> None:
-    """Deviation (documented): native browser EventSource cannot set custom
-    request headers, so the SSE route additionally accepts the token as a
-    `?token=` query parameter. All mutating routes still require the header
-    exclusively (covered above) — only this read-only stream has the
-    fallback."""
+def test_sse_stream_requires_the_header_and_rejects_a_query_token(tmp_path: Path) -> None:
+    """The SSE route authenticates via the X-Borgesica-Token header ONLY, like
+    every other route — the old `?token=` query-parameter fallback (a
+    concession to native EventSource) is gone. The desktop app now reads the
+    stream with `fetch`, which can set the header, so the token never rides a
+    URL where it could be logged, cached, or land in history."""
     engine = _make_engine()
     client = TestClient(create_app(engine, session_token=TOKEN))
     resp = client.post(
@@ -154,11 +154,19 @@ def test_sse_stream_accepts_token_via_query_param(tmp_path: Path) -> None:
     )
     job_id = resp.json()["id"]
 
+    # No credentials at all -> rejected.
     no_token_resp = client.get(f"/jobs/{job_id}/events")
     assert no_token_resp.status_code == 401
 
+    # Token supplied ONLY in the query string -> still rejected (fallback removed).
     with_query_resp = client.get(f"/jobs/{job_id}/events?token={TOKEN}")
-    assert with_query_resp.status_code == 200
+    assert with_query_resp.status_code == 401
+
+    # Token in the header -> accepted.
+    with_header_resp = client.get(
+        f"/jobs/{job_id}/events", headers={"X-Borgesica-Token": TOKEN}
+    )
+    assert with_header_resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
