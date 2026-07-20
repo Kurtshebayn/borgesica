@@ -4,7 +4,8 @@ Covers: localhost-only binding (non-loopback host can never be configured),
 key intake via the existing --key-stdin mechanism (never argv), and that the
 subcommand is wired into main()'s dispatch using the existing pattern.
 
-No live server is ever started: uvicorn.run() is mocked in every test that
+No live server is ever started: _run_server() (the seam _cmd_serve delegates
+the uvicorn boot + ready-line announce to) is mocked in every test that
 reaches _cmd_serve.
 """
 from __future__ import annotations
@@ -61,13 +62,16 @@ def test_cmd_serve_binds_loopback_host_to_uvicorn() -> None:
     from borgesica.__main__ import main
 
     with patch("borgesica.__main__._build_engine") as mock_build, patch(
-        "uvicorn.run"
+        "borgesica.__main__._run_server"
     ) as mock_run:
         mock_build.return_value = MagicMock()
         with patch("sys.stdin", io.StringIO('{"api_key": "sk-x"}\n')):
             main(["serve", "--port", "0", "--provider", "anthropic", "--key-stdin"])
 
-    assert mock_run.call_args.kwargs["host"] == "127.0.0.1"
+    # _cmd_serve builds the uvicorn.Config and hands it to _run_server; the
+    # loopback host is on that config (a non-loopback bind is unconfigurable).
+    config = mock_run.call_args.args[0]
+    assert config.host == "127.0.0.1"
 
 
 def test_serve_host_constant_is_loopback() -> None:
@@ -87,19 +91,20 @@ def test_serve_host_constant_is_loopback() -> None:
 
 
 def test_cmd_serve_disables_uvicorn_access_log() -> None:
-    """_cmd_serve must pass access_log=False to uvicorn.run — the minimal,
-    complete fix: no access log line is ever emitted, so the token can never
-    appear in one, regardless of route or query string."""
+    """_cmd_serve must build the uvicorn.Config with access_log=False — the
+    minimal, complete fix: no access log line is ever emitted, so the token
+    can never appear in one, regardless of route or query string."""
     from borgesica.__main__ import main
 
     with patch("borgesica.__main__._build_engine") as mock_build, patch(
-        "uvicorn.run"
+        "borgesica.__main__._run_server"
     ) as mock_run:
         mock_build.return_value = MagicMock()
         with patch("sys.stdin", io.StringIO('{"api_key": "sk-x"}\n')):
             main(["serve", "--port", "0", "--provider", "anthropic", "--key-stdin"])
 
-    assert mock_run.call_args.kwargs.get("access_log") is False
+    config = mock_run.call_args.args[0]
+    assert config.access_log is False
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +122,9 @@ def test_serve_key_never_appears_in_argv() -> None:
     argv = ["serve", "--port", "0", "--provider", "anthropic", "--key-stdin"]
     assert not any(secret in tok for tok in argv)
 
-    with patch("borgesica.__main__._build_engine") as mock_build, patch("uvicorn.run"):
+    with patch("borgesica.__main__._build_engine") as mock_build, patch(
+        "borgesica.__main__._run_server"
+    ):
         mock_build.return_value = MagicMock()
         with patch("sys.stdin", io.StringIO(f'{{"api_key": "{secret}"}}\n')):
             main(argv)
@@ -148,7 +155,7 @@ def test_cmd_serve_passes_stdin_token_to_create_app() -> None:
     original = main_module._stdin_session_token
     main_module._stdin_session_token = "session-tok-abc"
     try:
-        with patch("uvicorn.run") as mock_run, patch(
+        with patch("borgesica.__main__._run_server") as mock_run, patch(
             "borgesica.serve.app.create_app"
         ) as mock_create_app:
             args = argparse.Namespace(port=0)
@@ -171,7 +178,7 @@ def test_cmd_serve_without_stdin_token_disables_auth() -> None:
     original = main_module._stdin_session_token
     main_module._stdin_session_token = None
     try:
-        with patch("uvicorn.run"), patch(
+        with patch("borgesica.__main__._run_server"), patch(
             "borgesica.serve.app.create_app"
         ) as mock_create_app:
             args = argparse.Namespace(port=0)

@@ -75,9 +75,16 @@ def create_app(
     """
 
     async def _require_session_token(
+        request: Request,
         x_borgesica_token: str | None = Header(default=None, alias="X-Borgesica-Token"),
         token: str | None = Query(default=None),
     ) -> None:
+        # /health is an unauthenticated liveness probe: the sidecar handshake
+        # (wait_for_health in sidecar.rs) hits it with no token before auth is
+        # established. It exposes no state and has no side effects, so exempting
+        # it does not weaken RISK-001/002/003.
+        if request.url.path == "/health":
+            return
         if session_token is None:
             return
         supplied = x_borgesica_token if x_borgesica_token is not None else token
@@ -105,6 +112,12 @@ def create_app(
     @app.exception_handler(BorgesicaError)
     async def _borgesica_error_handler(_request: Request, exc: BorgesicaError) -> JSONResponse:
         return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        """Unauthenticated liveness probe consumed by the Tauri sidecar
+        handshake (wait_for_health). Returns 200 as soon as the app is up."""
+        return {"status": "ok"}
 
     def _status_response(job_id: str) -> JobResponse:
         job = engine.status(job_id)
