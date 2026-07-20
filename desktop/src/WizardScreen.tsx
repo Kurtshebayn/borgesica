@@ -12,6 +12,7 @@ import {
 import { subscribeToJobEvents, type SseSubscription } from "./sseClient";
 import {
   formatBestEffortSummary,
+  formatFailureSummary,
   formatProgress,
   initialWizardState,
   runRecoveryAction,
@@ -42,7 +43,10 @@ export default function WizardScreen({
   onRestartSidecar: () => void;
 }) {
   const [state, dispatch] = useReducer(wizardReducer, initialWizardState);
-  const [model, setModel] = useState("claude-3-5-sonnet-latest");
+  // Default to a current Anthropic model id. `claude-3-5-sonnet-latest` is
+  // retired (2026) and every call against it fails — which, before
+  // error-surfacing, looked like a silent $0 "success" on untranslated output.
+  const [model, setModel] = useState("claude-sonnet-5");
   const [outPath, setOutPath] = useState("");
   const [resumeJobId, setResumeJobId] = useState("");
   const subscriptionRef = useRef<SseSubscription | null>(null);
@@ -160,6 +164,9 @@ export default function WizardScreen({
 
   const bestEffortSummary = state.job
     ? formatBestEffortSummary(state.job.best_effort_count)
+    : null;
+  const failureSummary = state.job
+    ? formatFailureSummary(state.job.failed_count, state.job.total_chunks)
     : null;
 
   return (
@@ -306,8 +313,13 @@ export default function WizardScreen({
 
       {state.screen === "done" && (
         <div>
-          <h2>5. Done</h2>
+          <h2>{failureSummary ? "5. Finished with errors" : "5. Done"}</h2>
           <p>Status: {state.job?.status ?? "unknown"}</p>
+          {/* Error-surfacing: a run can end status=DONE at $0 while every
+              chunk FAILED (provider auth/model error) and the output holds
+              untranslated source text. This alert makes that the headline
+              instead of a silent success. */}
+          {failureSummary && <p role="alert">⚠ {failureSummary}</p>}
           {state.runError && <p role="alert">{state.runError}</p>}
           {bestEffortSummary && <p>{bestEffortSummary}</p>}
           <p>Output written to: {outPath || "(destination chosen at run start)"}</p>

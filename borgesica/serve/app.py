@@ -137,7 +137,8 @@ def create_app(
     def _status_response(job_id: str) -> JobResponse:
         job = engine.status(job_id)
         best_effort_indices = engine.best_effort_chunk_indices(job_id)
-        return job_to_response(job, best_effort_indices)
+        failed_indices = engine.failed_chunk_indices(job_id)
+        return job_to_response(job, best_effort_indices, failed_indices)
 
     @app.post("/jobs", response_model=JobResponse, status_code=201)
     def create_job(payload: CreateJobRequest) -> JobResponse:

@@ -32,8 +32,14 @@ class CreateJobRequest(BaseModel):
 
 
 class JobResponse(BaseModel):
-    """Job status payload + best-effort count/indices (spec: best-effort
-    count exposed in job status)."""
+    """Job status payload + best-effort and FAILED count/indices.
+
+    best_effort_* (spec: best-effort count exposed in job status) reports DONE
+    chunks that were accepted despite failing validation. failed_* reports
+    chunks the provider could never translate (all retries + fallback failed):
+    critically, under continue_on_error=True a run with FAILED chunks still
+    ends DONE at $0 shipping SOURCE text, so failed_count is the only signal
+    that distinguishes a genuine success from a silent untranslated one."""
 
     id: str
     status: JobStatus
@@ -42,10 +48,17 @@ class JobResponse(BaseModel):
     cost_usd: float
     best_effort_count: int
     best_effort_indices: list[int]
+    failed_count: int
+    failed_indices: list[int]
 
 
-def job_to_response(job: Job, best_effort_indices: list[int]) -> JobResponse:
-    """Pure mapping from Job + best-effort indices to JobResponse."""
+def job_to_response(
+    job: Job,
+    best_effort_indices: list[int],
+    failed_indices: list[int] | None = None,
+) -> JobResponse:
+    """Pure mapping from Job + best-effort/failed indices to JobResponse."""
+    failed_indices = failed_indices or []
     return JobResponse(
         id=job.id,
         status=job.status,
@@ -54,6 +67,8 @@ def job_to_response(job: Job, best_effort_indices: list[int]) -> JobResponse:
         cost_usd=job.cost_usd,
         best_effort_count=len(best_effort_indices),
         best_effort_indices=best_effort_indices,
+        failed_count=len(failed_indices),
+        failed_indices=failed_indices,
     )
 
 

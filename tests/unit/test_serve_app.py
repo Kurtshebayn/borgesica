@@ -147,6 +147,45 @@ def test_status_endpoint_reports_best_effort_chunks(tmp_path: Path) -> None:
     assert body["best_effort_indices"] == [best_effort_chunk.index]
 
 
+def test_create_response_reports_zero_failed_chunks(tmp_path: Path) -> None:
+    engine, _ = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+
+    resp = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"})
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["failed_count"] == 0
+    assert body["failed_indices"] == []
+
+
+def test_status_endpoint_reports_failed_chunks(tmp_path: Path) -> None:
+    """Error-surfacing: a FAILED chunk (e.g. provider auth/model error under
+    continue_on_error=True, which ends the job DONE at $0 shipping source
+    text) MUST be visible in the job status payload — otherwise the desktop
+    UI reports a silent success on untranslated output."""
+    engine, checkpoint = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    client = _client(engine)
+
+    create_resp = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"})
+    job_id = create_resp.json()["id"]
+
+    # Simulate a chunk the provider could never translate (all retries + the
+    # fallback raised) — the orchestrator persists it FAILED.
+    chunks = checkpoint.load_chunks(job_id)
+    failed_chunk = chunks[0].model_copy(update={"status": ChunkStatus.FAILED})
+    checkpoint.save_chunk(job_id, failed_chunk)
+
+    resp = client.get(f"/jobs/{job_id}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["failed_count"] == 1
+    assert body["failed_indices"] == [failed_chunk.index]
+
+
 # ---------------------------------------------------------------------------
 # GET /jobs/{id}/estimate
 # ---------------------------------------------------------------------------
