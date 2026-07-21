@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { deriveSidecarStatus, type SidecarState } from "./sidecarStatus";
 import { startSidecar, stopSidecar } from "./sidecarClient";
-import { PROVIDERS, type Provider } from "./wizard";
+import { PROVIDERS, providerRequiresKey, type Provider } from "./wizard";
 import WizardScreen from "./WizardScreen";
 
 /**
@@ -23,6 +23,14 @@ export default function App() {
 
   async function handleStart() {
     if (started.current) return;
+    // Pre-spawn guard: hosted providers (anthropic/deepseek) authenticate with
+    // an API key. Spawning the sidecar with an empty key just crashes it
+    // (serve --key-stdin exits(1) on a keyless init line) and surfaces a raw
+    // handshake error. Block Start with a clear inline message instead.
+    if (providerRequiresKey(provider) && apiKeyInput.trim() === "") {
+      setState({ baseUrl: null, token: null, error: "This provider needs an API key." });
+      return;
+    }
     started.current = true;
     try {
       const { baseUrl, token } = await startSidecar(provider, apiKeyInput);

@@ -10,6 +10,7 @@ import {
   isRunningStatus,
   MAX_CONSECUTIVE_CONNECTION_FAILURES,
   parseSseData,
+  providerRequiresKey,
   PROVIDERS,
   recoveryRequiresRespawn,
   runRecoveryAction,
@@ -90,6 +91,20 @@ describe("provider selection", () => {
 
   it("leaves the model blank for Ollama (models are user-local, not fixed)", () => {
     expect(defaultModelForProvider("ollama")).toBe("");
+  });
+});
+
+describe("providerRequiresKey", () => {
+  it("requires a key for anthropic (hosted, key-authenticated)", () => {
+    expect(providerRequiresKey("anthropic")).toBe(true);
+  });
+
+  it("requires a key for deepseek (hosted, key-authenticated)", () => {
+    expect(providerRequiresKey("deepseek")).toBe(true);
+  });
+
+  it("does not require a key for ollama (runs locally)", () => {
+    expect(providerRequiresKey("ollama")).toBe(false);
   });
 });
 
