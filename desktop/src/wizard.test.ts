@@ -49,11 +49,11 @@ describe("formatBestEffortSummary", () => {
   });
 
   it("reports a single chunk in singular form", () => {
-    expect(formatBestEffortSummary(1)).toBe("1 chunk remained best-effort");
+    expect(formatBestEffortSummary(1)).toBe("1 fragmento quedó en modo best-effort");
   });
 
   it("reports multiple chunks in plural form", () => {
-    expect(formatBestEffortSummary(3)).toBe("3 chunks remained best-effort");
+    expect(formatBestEffortSummary(3)).toBe("3 fragmentos quedaron en modo best-effort");
   });
 });
 
@@ -64,13 +64,13 @@ describe("formatFailureSummary", () => {
 
   it("warns that the output contains untranslated text when chunks failed", () => {
     const msg = formatFailureSummary(3, 10);
-    expect(msg).toMatch(/3 of 10/);
-    expect(msg).toMatch(/failed to translate/i);
-    expect(msg).toMatch(/untranslated/i);
+    expect(msg).toMatch(/3 de 10/);
+    expect(msg).toMatch(/no se pudieron traducir/i);
+    expect(msg).toMatch(/sin traducir/i);
   });
 
   it("reports a single failed chunk too (one failure is still not a success)", () => {
-    expect(formatFailureSummary(1, 4)).toMatch(/1 of 4/);
+    expect(formatFailureSummary(1, 4)).toMatch(/1 de 4/);
   });
 });
 
@@ -112,7 +112,7 @@ describe("formatProgress", () => {
   it("renders chunk counter and cost", () => {
     expect(
       formatProgress({ chunkIndex: 4, totalChunks: 10, costUsd: 1.5 }),
-    ).toBe("Chunk 4/10 — $1.5000");
+    ).toBe("Fragmento 4/10 — $1.5000");
   });
 });
 

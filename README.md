@@ -31,7 +31,7 @@ Además:
 
 ## Estado del proyecto
 
-🚧 **En construcción.** El motor funciona de punta a punta, pero la API pública todavía puede cambiar y no hay interfaz gráfica (existe una CLI mínima para ejercitar el motor).
+El motor funciona de punta a punta y hoy tiene dos formas de usarlo: una **CLI** y una **aplicación de escritorio** con interfaz gráfica.
 
 | Componente | Estado |
 |---|---|
@@ -41,24 +41,63 @@ Además:
 | Providers: Anthropic, OpenAI-compatible (DeepSeek, OpenRouter…), Ollama (local) | ✅ |
 | Glosario + resumen rodante | ✅ |
 | Checkpointing y reanudación | ✅ |
-| Interfaz gráfica | 🔜 Fase posterior |
-| Otros pares de idiomas | 🔜 Hoy: inglés → español neutro |
+| CLI | ✅ Funcional |
+| API HTTP local (`serve`, FastAPI, autenticada por token de sesión) | ✅ Funcional |
+| Aplicación de escritorio (Tauri + React) | ✅ Funcional — flujo completo de traducción con progreso en vivo |
+| Otros pares de idiomas | Hoy: solo inglés → español neutro |
 
 Fuera de alcance: e-books con DRM (técnica y legalmente) y OCR de PDFs escaneados como camino por defecto.
+
+## Aplicación de escritorio
+
+Además de la CLI, borgésica tiene una app de escritorio (Tauri + React) que levanta el motor como un proceso local ("sidecar") y lo consume por una API HTTP autenticada con un token de sesión propio.
+
+El uso es un asistente de un solo flujo:
+
+1. **Elegir proveedor y clave** — Anthropic, DeepSeek u Ollama (local, sin clave). La clave se pide por sesión y nunca se guarda en disco.
+2. **Elegir archivo y estimar costo** — antes de traducir una sola palabra.
+3. **Revisar y bloquear el glosario** — se edita y se fija antes de correr el trabajo.
+4. **Traducir con progreso en vivo** — chunk por chunk, con cancelación cooperativa entre chunks.
+5. **Exportar el resultado** — o reanudar un trabajo interrumpido desde su job id.
+
+La app también recupera la conexión si el proceso del motor se cae en medio de una sesión.
+
+## Elegir modelo
+
+borgésica es agnóstica de proveedor, pero el modelo elegido cambia mucho el resultado. Precios verificados en la tabla de precios del proveedor (USD por millón de tokens, input/output); la calidad es una observación de uso real traduciendo con el motor, no un benchmark formal:
+
+| Proveedor | Modelo | Precio (input / output por Mtok) | Calidad observada |
+|---|---|---|---|
+| DeepSeek | `deepseek-v4-flash` | $0.14 / $0.28 | Muy buena — la mejor relación calidad-precio |
+| Anthropic | `claude-haiku-4-5` | $1.00 / $5.00 | Algo más caro que flash y de calidad inferior |
+| Anthropic | `claude-sonnet-5` | $3.00 / $15.00 | La mejor calidad del grupo, al precio más alto |
+| Ollama (local) | `Tower-Plus-9B-GGUF:Q4_K_M` | Gratis (cómputo local) | Muy baja |
+| Ollama (local) | `qwen3:14b` | Gratis (cómputo local) | Muy baja |
+
+Los modelos de Ollama no tienen costo de API — corren en la propia máquina, sin conexión — pero a este tamaño todavía quedan lejos en calidad de traducción de las opciones hospedadas.
 
 ## Instalación
 
 Requiere Python 3.11+.
 
 ```bash
-pip install -e .            # núcleo (SRT)
-pip install -e ".[epub]"    # + soporte EPUB
-pip install -e ".[pdf]"     # + soporte PDF
+pip install -e .              # núcleo (SRT)
+pip install -e ".[epub]"      # + soporte EPUB
+pip install -e ".[pdf]"       # + soporte PDF
+pip install -e ".[serve]"     # + API HTTP local (necesaria para la app de escritorio)
+```
+
+Para correr la app de escritorio en modo desarrollo hace falta además Node.js y el toolchain de Rust (Tauri):
+
+```bash
+cd desktop
+npm install
+npm run tauri dev
 ```
 
 ## Arquitectura
 
-Motor primero, UI después. El núcleo es una arquitectura hexagonal: el dominio (chunking, glosario, resumen rodante, orquestación, costos) no conoce ningún proveedor ni formato concreto — todo entra y sale por puertos (`DocumentReader`, `DocumentWriter`, `TranslationProvider`, `Checkpoint`) con adaptadores intercambiables. La API pública es `TranslatorEngine`.
+Motor primero, UI después. El núcleo es una arquitectura hexagonal: el dominio (chunking, glosario, resumen rodante, orquestación, costos) no conoce ningún proveedor ni formato concreto — todo entra y sale por puertos (`DocumentReader`, `DocumentWriter`, `TranslationProvider`, `Checkpoint`) con adaptadores intercambiables. La API pública es `TranslatorEngine`. La CLI, la API HTTP y la app de escritorio son tres formas distintas de llegar al mismo motor.
 
 ```
 borgesica/
@@ -68,7 +107,10 @@ borgesica/
 │   ├── writers/   # SRT, EPUB, PDF
 │   ├── providers/ # Anthropic, OpenAI-compatible, Ollama
 │   └── checkpoints/ # SQLite
+├── serve/         # API HTTP (FastAPI) — consumida por la app de escritorio
 └── api.py         # TranslatorEngine — la superficie pública
+
+desktop/           # app de escritorio (Tauri + React), habla con serve/ vía sidecar local
 ```
 
 ## Contribuir

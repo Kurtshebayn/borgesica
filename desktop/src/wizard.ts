@@ -151,17 +151,19 @@ const ACCEPTED_EXTENSIONS = [".epub", ".srt"];
 export function validateFilePath(path: string): string | null {
   const lower = path.toLowerCase();
   if (lower.endsWith(".pdf")) {
-    return "PDF files are not supported for translation input. Please choose an EPUB or SRT file.";
+    return "Los archivos PDF no se admiten como entrada de traducción. Elegí un archivo EPUB o SRT.";
   }
   if (!ACCEPTED_EXTENSIONS.some((ext) => lower.endsWith(ext))) {
-    return "Only .epub and .srt files are supported.";
+    return "Solo se admiten archivos .epub y .srt.";
   }
   return null;
 }
 
 export function formatBestEffortSummary(count: number): string | null {
   if (count <= 0) return null;
-  return `${count} chunk${count === 1 ? "" : "s"} remained best-effort`;
+  return count === 1
+    ? "1 fragmento quedó en modo best-effort"
+    : `${count} fragmentos quedaron en modo best-effort`;
 }
 
 /** Error-surfacing: a run with FAILED chunks (provider auth/model error, bad
@@ -176,14 +178,14 @@ export function formatFailureSummary(
 ): string | null {
   if (failedCount <= 0) return null;
   return (
-    `${failedCount} of ${totalChunks} chunks failed to translate — ` +
-    `the output file contains untranslated source text for ` +
-    `${failedCount === 1 ? "it" : "them"}.`
+    `${failedCount} de ${totalChunks} fragmentos no se pudieron traducir — ` +
+    `el archivo de salida contiene texto original sin traducir para ` +
+    `${failedCount === 1 ? "ese fragmento" : "esos fragmentos"}.`
   );
 }
 
 export function formatProgress(progress: ProgressInfo): string {
-  return `Chunk ${progress.chunkIndex}/${progress.totalChunks} — $${progress.costUsd.toFixed(4)}`;
+  return `Fragmento ${progress.chunkIndex}/${progress.totalChunks} — $${progress.costUsd.toFixed(4)}`;
 }
 
 /** True only while the job is actively RUNNING (used to decide whether SSE

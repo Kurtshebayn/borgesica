@@ -15,6 +15,7 @@ import pytest
 
 from borgesica.adapters.providers.anthropic_provider import (
     _MAX_OUTPUT_TOKENS,
+    _PRICE_TABLE,
     AnthropicProvider,
 )
 from borgesica.domain.errors import MalformedOutput, ProviderError
@@ -461,6 +462,21 @@ class TestPrice:
         """
         provider = AnthropicProvider(api_key="fake-key")
         assert provider.price("claude-opus-4-8") == (5.00, 25.00)
+
+    def test_price_sonnet_5_is_a_tracked_table_entry(self):
+        """claude-sonnet-5 (the desktop app's Anthropic default model, see
+        desktop/src/wizard.ts defaultModelForProvider) must be a real entry in
+        _PRICE_TABLE, not merely rely on the (3.0, 15.0) unknown-model
+        fallback. Asserting through price() alone can't tell the two apart
+        (the fallback happens to equal the Sonnet-tier rate), so this checks
+        the table directly."""
+        assert "claude-sonnet-5" in _PRICE_TABLE
+
+    def test_price_sonnet_5_matches_current_published_rate(self):
+        """claude-sonnet-5 is billed at the same Sonnet-tier rate
+        ($3.00, $15.00)/Mtok every Sonnet generation in this table carries."""
+        provider = AnthropicProvider(api_key="fake-key")
+        assert provider.price("claude-sonnet-5") == (3.00, 15.00)
 
     def test_price_table_is_user_overridable(self):
         """A caller can inject a price_table to override/extend the built-in

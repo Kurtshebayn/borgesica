@@ -105,7 +105,7 @@ export function subscribeToJobEvents(
             dispatch({
               type: "CONNECTION_LOST",
               message:
-                "Lost connection to the translation sidecar. The run may still be in progress, but this app can no longer reach it.",
+                "Se perdió la conexión con el motor de traducción. La traducción puede seguir en curso, pero esta app ya no puede comunicarse con ella.",
             });
           }
         });

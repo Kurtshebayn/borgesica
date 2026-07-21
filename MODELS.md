@@ -13,8 +13,8 @@ output is the primary concern. Higher cost and latency.
 
 | Model | Provider | Notes |
 |-------|----------|-------|
-| `claude-opus-4-5` | Anthropic | Top-quality reasoning; best for reflective mode |
-| `claude-opus-4-0` | Anthropic | Previous generation Max model |
+| `claude-opus-4-8` | Anthropic | Top-quality reasoning; best for reflective mode |
+| `claude-3-opus-20240229` | Anthropic | Previous-generation Opus, still available |
 
 ### Best Value
 
@@ -22,24 +22,30 @@ Strong quality at significantly lower cost. Recommended default for most jobs.
 
 | Model | Provider | Notes |
 |-------|----------|-------|
-| `claude-sonnet-4-5` | Anthropic | Best price/quality for translation tasks |
-| `claude-haiku-4-5` | Anthropic | Fastest and cheapest; good for drafts and estimation |
-| `claude-3-5-sonnet-20241022` | Anthropic | Previous Sonnet generation, still solid |
-| `deepseek-v4-flash` | DeepSeek (`https://api.deepseek.com`) | ~$0.14/Mtok input (cache miss), ~$0.0028/Mtok cache hit, ~$0.28/Mtok output — roughly 10× cheaper than Sonnet. Recommended cheap default for OpenAICompatibleProvider (M4). |
+| `claude-sonnet-5` | Anthropic | Current Sonnet generation; default for the desktop app's Anthropic provider |
+| `claude-sonnet-4-6` | Anthropic | Previous Sonnet generation, still solid |
+| `claude-haiku-4-5-20251001` | Anthropic | Cheaper than Sonnet; noticeably lower translation quality in practice |
+| `claude-3-7-sonnet-20250219` | Anthropic | Previous Sonnet generation, still solid |
+| `claude-3-5-sonnet-20241022` / `claude-3-5-sonnet-20240620` | Anthropic | Older Sonnet snapshots, still solid |
+| `deepseek-v4-flash` | DeepSeek (`https://api.deepseek.com`) | ~$0.14/Mtok input (cache miss), ~$0.0028/Mtok cache hit, ~$0.28/Mtok output — roughly 10× cheaper than Sonnet, with very good translation quality. The recommended default for most jobs. |
 | `deepseek-v4-pro` | DeepSeek (`https://api.deepseek.com`) | ~$0.435/Mtok input, ~$0.87/Mtok output. Higher quality than Flash; still significantly cheaper than Anthropic frontier models. |
 
 > **NOTE — DeepSeek model-id deprecation (2026-07-24)**: the legacy identifiers `deepseek-chat` and `deepseek-reasoner` continue to work as aliases after that date but are deprecated. Use `deepseek-v4-flash` and `deepseek-v4-pro` for new jobs. Borgésica passes model strings unchanged so no library update is needed — update your `--model` argument only.
 
 ### Private / Free / Offline
 
-Run locally with no API key required. Quality varies by model size.
-Requires Ollama (M4 — not yet implemented in this release).
+Runs locally through Ollama, with no API key and no connection required — supported today,
+including from the desktop app's provider selector. Quality varies a lot by model size: in
+practice, small (~9-14B) local models produced very low translation quality compared to any
+hosted option above.
 
 | Model | Provider | Notes |
 |-------|----------|-------|
 | `llama3.2:latest` | Ollama | Strong general-purpose open-weights model |
 | `mistral:latest` | Ollama | Fast and capable; good multilingual baseline |
 | `gemma2:9b` | Ollama | Google Gemma; competitive with larger models |
+| `Tower-Plus-9B-GGUF:Q4_K_M` | Ollama | Tested in practice; translation quality was very low at this size |
+| `qwen3:14b` | Ollama | Tested in practice; translation quality was very low at this size |
 
 ## Note on model strings
 

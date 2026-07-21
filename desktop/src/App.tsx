@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { deriveSidecarStatus, type SidecarState } from "./sidecarStatus";
+import { deriveSidecarStatus, type SidecarState, type SidecarStatus } from "./sidecarStatus";
 import { startSidecar, stopSidecar } from "./sidecarClient";
 import { PROVIDERS, providerRequiresKey, type Provider } from "./wizard";
 import WizardScreen from "./WizardScreen";
+
+const SIDECAR_STATUS_LABELS: Record<SidecarStatus, string> = {
+  idle: "inactivo",
+  starting: "iniciando",
+  ready: "listo",
+  error: "error",
+};
 
 /**
  * App shell: session-only API key entry + sidecar lifecycle (T7a), then
@@ -28,7 +35,7 @@ export default function App() {
     // (serve --key-stdin exits(1) on a keyless init line) and surfaces a raw
     // handshake error. Block Start with a clear inline message instead.
     if (providerRequiresKey(provider) && apiKeyInput.trim() === "") {
-      setState({ baseUrl: null, token: null, error: "This provider needs an API key." });
+      setState({ baseUrl: null, token: null, error: "Este proveedor necesita una clave de API." });
       return;
     }
     started.current = true;
@@ -70,12 +77,12 @@ export default function App() {
 
   return (
     <main>
-      <h1>Borgesica</h1>
-      <p>Sidecar status: {status}</p>
+      <h1>Borgésica</h1>
+      <p>Estado del motor: {SIDECAR_STATUS_LABELS[status]}</p>
       {status !== "ready" && (
         <div>
           <label>
-            Provider:{" "}
+            Proveedor:{" "}
             <select
               value={provider}
               onChange={(e) => setProvider(e.target.value as Provider)}
@@ -91,14 +98,14 @@ export default function App() {
             type="password"
             placeholder={
               provider === "ollama"
-                ? "API key (not needed for Ollama)"
-                : "API key (session only, never saved)"
+                ? "Clave de API (no hace falta para Ollama)"
+                : "Clave de API (solo para esta sesión, nunca se guarda)"
             }
             value={apiKeyInput}
             onChange={(e) => setApiKeyInput(e.target.value)}
           />
           <button onClick={handleStart} disabled={status === "starting" && started.current}>
-            Start
+            Iniciar
           </button>
         </div>
       )}

@@ -20,7 +20,17 @@ import {
   wizardReducer,
   type Provider,
 } from "./wizard";
-import type { GlossaryEntry } from "./apiTypes";
+import type { GlossaryEntry, JobStatus } from "./apiTypes";
+
+const JOB_STATUS_LABELS: Record<JobStatus, string> = {
+  CREATED: "creado",
+  ESTIMATING: "estimando",
+  RUNNING: "en curso",
+  PAUSED: "pausado",
+  DONE: "listo",
+  FAILED: "con errores",
+  CANCELLED: "cancelado",
+};
 
 /**
  * The T7b translation wizard: pick -> estimate -> glossary -> run -> done,
@@ -180,10 +190,10 @@ export default function WizardScreen({
     <section>
       {state.screen === "pick" && (
         <div>
-          <h2>1. Choose a file</h2>
+          <h2>1. Elegir un archivo</h2>
           <input
             type="text"
-            placeholder="Path to .epub or .srt file"
+            placeholder="Ruta al archivo .epub o .srt"
             value={state.filePath}
             onChange={(e) =>
               dispatch({ type: "FILE_PATH_CHANGED", path: e.target.value })
@@ -192,7 +202,7 @@ export default function WizardScreen({
           {state.fileError && <p role="alert">{state.fileError}</p>}
           <input
             type="text"
-            placeholder="Model"
+            placeholder="Modelo"
             value={model}
             onChange={(e) => setModel(e.target.value)}
           />
@@ -200,48 +210,48 @@ export default function WizardScreen({
             onClick={() => void handlePick()}
             disabled={!state.filePath || !!state.fileError}
           >
-            Create job &amp; estimate
+            Crear trabajo y estimar
           </button>
           {state.createError && <p role="alert">{state.createError}</p>}
 
-          <h3>Resume an interrupted job</h3>
+          <h3>Reanudar un trabajo interrumpido</h3>
           <input
             type="text"
-            placeholder="Existing job id"
+            placeholder="Id de un trabajo existente"
             value={resumeJobId}
             onChange={(e) => setResumeJobId(e.target.value)}
           />
           <input
             type="text"
-            placeholder="Output destination path"
+            placeholder="Ruta de destino de salida"
             value={outPath}
             onChange={(e) => setOutPath(e.target.value)}
           />
           <button onClick={() => void handleResume()} disabled={!resumeJobId || !outPath}>
-            Resume
+            Reanudar
           </button>
         </div>
       )}
 
       {state.screen === "estimate" && state.estimate && (
         <div>
-          <h2>2. Estimate</h2>
+          <h2>2. Estimación</h2>
           <p>
-            Estimated cost: ${state.estimate.usd_low.toFixed(2)} – $
+            Costo estimado: ${state.estimate.usd_low.toFixed(2)} – $
             {state.estimate.usd_high.toFixed(2)}
           </p>
           {!state.estimate.within_budget && (
-            <p role="alert">This estimate exceeds the configured budget.</p>
+            <p role="alert">Esta estimación supera el presupuesto configurado.</p>
           )}
           <button onClick={() => void handleProceedToGlossary()}>
-            Continue to glossary
+            Continuar al glosario
           </button>
         </div>
       )}
 
       {state.screen === "glossary" && (
         <div>
-          <h2>3. Glossary (locked before run)</h2>
+          <h2>3. Glosario (se bloquea antes de traducir)</h2>
           <ul>
             {state.glossary.map((entry, index) => (
               <li key={entry.term}>
@@ -276,23 +286,23 @@ export default function WizardScreen({
             }
             disabled={state.glossaryLocked}
           >
-            Add entry
+            Agregar entrada
           </button>
           {!state.glossaryLocked && (
             <button onClick={() => void handleLockAndSaveGlossary()}>
-              Lock glossary &amp; continue
+              Bloquear glosario y continuar
             </button>
           )}
           {state.glossaryLocked && (
             <div>
               <input
                 type="text"
-                placeholder="Output destination path"
+                placeholder="Ruta de destino de salida"
                 value={outPath}
                 onChange={(e) => setOutPath(e.target.value)}
               />
               <button onClick={() => void handleStartRun()} disabled={!outPath}>
-                Start run
+                Iniciar traducción
               </button>
               {state.runError && <p role="alert">{state.runError}</p>}
             </div>
@@ -302,26 +312,26 @@ export default function WizardScreen({
 
       {state.screen === "run" && (
         <div>
-          <h2>4. Running</h2>
-          <p>{state.progress ? formatProgress(state.progress) : "Starting…"}</p>
+          <h2>4. Traduciendo</h2>
+          <p>{state.progress ? formatProgress(state.progress) : "Iniciando…"}</p>
           <button onClick={() => void handleCancel()} disabled={state.cancelRequested}>
-            {state.cancelRequested ? "Cancelling… (takes effect between chunks)" : "Cancel"}
+            {state.cancelRequested ? "Cancelando… (se aplica entre fragmentos)" : "Cancelar"}
           </button>
         </div>
       )}
 
       {state.screen === "error" && (
         <div>
-          <h2>Connection lost</h2>
+          <h2>Se perdió la conexión</h2>
           <p role="alert">{state.connectionError}</p>
-          <button onClick={handleRecoverFromError}>Back to start</button>
+          <button onClick={handleRecoverFromError}>Volver al inicio</button>
         </div>
       )}
 
       {state.screen === "done" && (
         <div>
-          <h2>{failureSummary ? "5. Finished with errors" : "5. Done"}</h2>
-          <p>Status: {state.job?.status ?? "unknown"}</p>
+          <h2>{failureSummary ? "5. Terminado con errores" : "5. Listo"}</h2>
+          <p>Estado: {state.job ? JOB_STATUS_LABELS[state.job.status] : "desconocido"}</p>
           {/* Error-surfacing: a run can end status=DONE at $0 while every
               chunk FAILED (provider auth/model error) and the output holds
               untranslated source text. This alert makes that the headline
@@ -329,7 +339,7 @@ export default function WizardScreen({
           {failureSummary && <p role="alert">⚠ {failureSummary}</p>}
           {state.runError && <p role="alert">{state.runError}</p>}
           {bestEffortSummary && <p>{bestEffortSummary}</p>}
-          <p>Output written to: {outPath || "(destination chosen at run start)"}</p>
+          <p>Salida escrita en: {outPath || "(el destino se elige al iniciar la traducción)"}</p>
           <ExportPanel outPath={outPath} />
         </div>
       )}
@@ -354,17 +364,17 @@ function ExportPanel({ outPath }: { outPath: string }) {
     <div>
       <input
         type="text"
-        placeholder="Copy destination"
+        placeholder="Ruta de destino para copiar"
         value={destination}
         onChange={(e) => setDestination(e.target.value)}
       />
       <button onClick={() => setAcknowledged(true)} disabled={!destination}>
-        Export
+        Exportar
       </button>
       {acknowledged && (
         <p>
-          The translated output is available at <code>{outPath}</code>. Copy it to{" "}
-          <code>{destination}</code> using your file manager (no re-translation occurs).
+          La traducción está disponible en <code>{outPath}</code>. Copiala a{" "}
+          <code>{destination}</code> con tu administrador de archivos (no se vuelve a traducir).
         </p>
       )}
     </div>
