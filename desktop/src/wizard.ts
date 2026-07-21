@@ -37,6 +37,16 @@ export function defaultModelForProvider(provider: Provider): string {
   }
 }
 
+/** Whether the given provider needs a non-empty API key before the sidecar
+ * may be spawned. anthropic/deepseek are hosted APIs that authenticate with a
+ * key, so the engine's `serve --key-stdin` exits(1) if the init line carries
+ * no api_key — spawning with an empty key produces a doomed sidecar and a raw
+ * handshake error. Ollama runs locally and needs no key. Kept pure/tested here
+ * so App.tsx stays thin glue. */
+export function providerRequiresKey(provider: Provider): boolean {
+  return provider !== "ollama";
+}
+
 export interface ProgressInfo {
   chunkIndex: number;
   totalChunks: number;
