@@ -75,8 +75,8 @@ describe("formatFailureSummary", () => {
 });
 
 describe("provider selection", () => {
-  it("offers the three engine-supported providers", () => {
-    expect(PROVIDERS).toEqual(["anthropic", "deepseek", "ollama"]);
+  it("offers the four engine-supported providers", () => {
+    expect(PROVIDERS).toEqual(["anthropic", "deepseek", "openai", "ollama"]);
   });
 
   it("defaults Anthropic to a current (non-retired) model id", () => {
@@ -87,6 +87,10 @@ describe("provider selection", () => {
     const model = defaultModelForProvider("deepseek");
     expect(model).toMatch(/deepseek/);
     expect(model).not.toMatch(/claude/);
+  });
+
+  it("defaults OpenAI to gpt-5.6-luna", () => {
+    expect(defaultModelForProvider("openai")).toBe("gpt-5.6-luna");
   });
 
   it("leaves the model blank for Ollama (models are user-local, not fixed)", () => {
@@ -101,6 +105,10 @@ describe("providerRequiresKey", () => {
 
   it("requires a key for deepseek (hosted, key-authenticated)", () => {
     expect(providerRequiresKey("deepseek")).toBe(true);
+  });
+
+  it("requires a key for openai (hosted, key-authenticated)", () => {
+    expect(providerRequiresKey("openai")).toBe(true);
   });
 
   it("does not require a key for ollama (runs locally)", () => {

@@ -113,6 +113,16 @@ _DEFAULT_DEEPSEEK_PRICE_TABLE: dict[str, tuple[float, float]] = {
 
 _FALLBACK_PRICE: tuple[float, float] = (3.0, 15.0)
 
+# OpenAI price table — (input_usd_per_mtok, output_usd_per_mtok).
+# NOT used for billing; only for pre-flight cost estimates. o-series
+# (o1/o3/o4-mini) models are intentionally NOT listed — they are out of
+# scope (need max_completion_tokens instead of max_tokens; see .openai()).
+_OPENAI_PRICE_TABLE: dict[str, tuple[float, float]] = {
+    "gpt-5.6-sol": (5.00, 30.00),
+    "gpt-5.6-terra": (2.50, 15.00),
+    "gpt-5.6-luna": (1.00, 6.00),
+}
+
 
 # ---------------------------------------------------------------------------
 # OpenAICompatibleProvider
@@ -201,6 +211,44 @@ class OpenAICompatibleProvider:
             price_table=table,
             _client=_client,
         )
+
+    @classmethod
+    def openai(
+        cls,
+        api_key: str,
+        default_model: str = "gpt-5.6-luna",
+        extra_price_table: dict[str, tuple[float, float]] | None = None,
+        _client: Any | None = None,
+    ) -> "OpenAICompatibleProvider":
+        """Preset for OpenAI (https://api.openai.com).
+
+        Prices: gpt-5.6-sol   = ($5.00, $30.00)/Mtok,
+                gpt-5.6-terra = ($2.50, $15.00)/Mtok,
+                gpt-5.6-luna  = ($1.00, $6.00)/Mtok.
+        The model string passed to translate() is forwarded unchanged.
+
+        retry_waste_factor is overridden to 1.5 as an INSTANCE attribute (set
+        here, after construction) — GPT models are Tier-1-reliable, so the
+        class-level 3.0 default (tuned for DeepSeek's heavier tier-fallthrough)
+        would over-estimate the worst-case cost ceiling. This does NOT touch
+        the class attribute: DeepSeek/Ollama instances keep 3.0.
+
+        o-series (o1/o3/o4-mini) models are out of scope: they require
+        max_completion_tokens instead of max_tokens and are not special-cased
+        here — selecting one surfaces the raw OpenAI API error.
+        """
+        table = dict(_OPENAI_PRICE_TABLE)
+        if extra_price_table:
+            table.update(extra_price_table)
+        provider = cls(
+            base_url="https://api.openai.com",
+            api_key=api_key,
+            default_model=default_model,
+            price_table=table,
+            _client=_client,
+        )
+        provider.retry_waste_factor = 1.5  # instance attr; GPT is Tier-1-reliable
+        return provider
 
     # ------------------------------------------------------------------
     # TranslationProvider Protocol

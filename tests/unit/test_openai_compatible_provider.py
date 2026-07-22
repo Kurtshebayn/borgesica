@@ -25,6 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from borgesica.adapters.providers.openai_compatible_provider import (
+    _FALLBACK_PRICE,
     _MAX_OUTPUT_TOKENS,
     OpenAICompatibleProvider,
 )
@@ -648,6 +649,60 @@ class TestConfigurableAndDeepSeekPreset:
             _client=fake_client,
         )
         assert "openrouter.ai" in provider.base_url
+
+
+# ---------------------------------------------------------------------------
+# Test 9b: OpenAI preset (M-openai-provider) — base_url, default model, price
+# table, retry_waste_factor tuning.
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAIPreset:
+    def test_openai_preset_sets_correct_base_url(self):
+        """OpenAI preset uses base_url='https://api.openai.com'."""
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider.base_url == "https://api.openai.com"
+
+    def test_openai_preset_sets_correct_default_model(self):
+        """OpenAI preset defaults to model='gpt-5.6-luna'."""
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider.default_model == "gpt-5.6-luna"
+
+    def test_openai_preset_prices_sol(self):
+        """gpt-5.6-sol is priced at $5.00/$30.00 per Mtok."""
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider.price("gpt-5.6-sol") == (5.00, 30.00)
+
+    def test_openai_preset_prices_terra(self):
+        """gpt-5.6-terra is priced at $2.50/$15.00 per Mtok."""
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider.price("gpt-5.6-terra") == (2.50, 15.00)
+
+    def test_openai_preset_prices_luna(self):
+        """gpt-5.6-luna is priced at $1.00/$6.00 per Mtok."""
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider.price("gpt-5.6-luna") == (1.00, 6.00)
+
+    def test_openai_preset_unknown_model_falls_back_to_default_price(self):
+        """A model string not in the OpenAI price table falls back to _FALLBACK_PRICE,
+        not an error (spec: 'Unrecognized model falls back')."""
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider.price("gpt-9000-mystery") == _FALLBACK_PRICE
+
+    def test_openai_preset_sets_tuned_retry_waste_factor(self):
+        """OpenAI preset overrides retry_waste_factor to 1.5 (Tier-1-reliable GPT
+        models), distinct from the 3.0 class default inherited by DeepSeek."""
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider.retry_waste_factor == 1.5
+
+    def test_openai_preset_does_not_mutate_the_class_default(self):
+        """A plain (non-openai-preset) instance MUST keep the 3.0 class default —
+        the preset's retry_waste_factor override must be an instance attribute,
+        not a mutation of the class attribute (design decision: instance-attr
+        override, DeepSeek/Ollama unaffected)."""
+        OpenAICompatibleProvider.openai(api_key="sk-fake")  # construct + discard
+        plain_provider, _ = _make_provider([], price_table={})
+        assert plain_provider.retry_waste_factor == 3.0
 
 
 # ---------------------------------------------------------------------------

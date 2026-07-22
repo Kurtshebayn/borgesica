@@ -203,6 +203,58 @@ def test_default_provider_resolution() -> None:
         assert _default_provider() == "anthropic"
 
 
+def test_default_provider_resolution_selects_openai_when_only_key_present() -> None:
+    """_default_provider: OPENAI_API_KEY alone (no Anthropic/DeepSeek keys, no
+    BORGESICA_PROVIDER) auto-selects openai (spec: 'OpenAI selected when it is
+    the only lower-precedence key present')."""
+    import os
+
+    from borgesica.__main__ import _default_provider
+
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-oa"}, clear=True):
+        assert _default_provider() == "openai"
+
+
+def test_default_provider_resolution_anthropic_beats_openai() -> None:
+    """_default_provider: ANTHROPIC_API_KEY still wins over OPENAI_API_KEY —
+    existing precedence unaffected by adding OpenAI (spec scenario)."""
+    import os
+
+    from borgesica.__main__ import _default_provider
+
+    with patch.dict(
+        os.environ, {"ANTHROPIC_API_KEY": "sk-a", "OPENAI_API_KEY": "sk-oa"}, clear=True
+    ):
+        assert _default_provider() == "anthropic"
+
+
+def test_build_engine_openai_requires_openai_key() -> None:
+    """provider=openai requires OPENAI_API_KEY (not ANTHROPIC_API_KEY)."""
+    import os
+
+    from borgesica.__main__ import _build_engine
+
+    env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+    with patch.dict(os.environ, env, clear=True):
+        with pytest.raises((SystemExit, ValueError, KeyError)):
+            _build_engine(provider="openai", model="gpt-5.6-luna", db_path=":memory:")
+
+
+def test_build_provider_openai_resolves_key_and_targets_openai_base_url() -> None:
+    """_build_provider('openai', ...) resolves OPENAI_API_KEY and dispatches to
+    OpenAICompatibleProvider.openai() (spec: 'Explicit selection dispatches to
+    OpenAI')."""
+    import os
+
+    from borgesica.__main__ import _build_provider
+
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-oa"}, clear=True):
+        provider = _build_provider("openai")
+
+    assert provider.base_url == "https://api.openai.com"
+    assert provider.default_model == "gpt-5.6-luna"
+
+
 def test_estimate_resolves_provider_from_env_not_hardcoded_anthropic() -> None:
     """`estimate <id>` with only DEEPSEEK_API_KEY set must NOT demand ANTHROPIC_API_KEY.
 

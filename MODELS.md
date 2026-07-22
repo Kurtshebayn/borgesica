@@ -32,6 +32,25 @@ Strong quality at significantly lower cost. Recommended default for most jobs.
 
 > **NOTE — DeepSeek model-id deprecation (2026-07-24)**: the legacy identifiers `deepseek-chat` and `deepseek-reasoner` continue to work as aliases after that date but are deprecated. Use `deepseek-v4-flash` and `deepseek-v4-pro` for new jobs. Borgésica passes model strings unchanged so no library update is needed — update your `--model` argument only.
 
+### OpenAI (ChatGPT)
+
+Reuses the same `OpenAICompatibleProvider` adapter as DeepSeek via a dedicated `.openai()`
+preset (`--provider openai`, `OPENAI_API_KEY`). Retry-waste ceiling factor is tuned to `1.5`
+(vs `3.0` for DeepSeek) — GPT models are Tier-1-reliable, so tool-calling rarely falls
+through to the JSON-mode/prompt-parse fallback tiers.
+
+| Model | Provider | Notes |
+|-------|----------|-------|
+| `gpt-5.6-luna` | OpenAI (`https://api.openai.com`) | $1.00/Mtok input, $6.00/Mtok output. Default model for `--provider openai`. |
+| `gpt-5.6-terra` | OpenAI (`https://api.openai.com`) | $2.50/Mtok input, $15.00/Mtok output. Mid-tier quality/cost. |
+| `gpt-5.6-sol` | OpenAI (`https://api.openai.com`) | $5.00/Mtok input, $30.00/Mtok output. Highest-quality GPT tier. |
+
+> **NOTE — o-series (reasoning) models not supported**: `o1`, `o3`, `o4-mini`, and other
+> o-series models require the `max_completion_tokens` parameter instead of `max_tokens`,
+> which this adapter does not send. Selecting an o-series `--model` is not special-cased or
+> validated — the raw OpenAI API error is surfaced unmodified. This is an explicit,
+> documented scope boundary, not a bug.
+
 ### Private / Free / Offline
 
 Runs locally through Ollama, with no API key and no connection required — supported today,

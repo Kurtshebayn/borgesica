@@ -54,7 +54,7 @@ Además de la CLI, borgésica tiene una app de escritorio (Tauri + React) que le
 
 El uso es un asistente de un solo flujo:
 
-1. **Elegir proveedor y clave** — Anthropic, DeepSeek u Ollama (local, sin clave). La clave se pide por sesión y nunca se guarda en disco.
+1. **Elegir proveedor y clave** — Anthropic, DeepSeek, OpenAI u Ollama (local, sin clave). La clave se pide por sesión y nunca se guarda en disco.
 2. **Elegir archivo y estimar costo** — antes de traducir una sola palabra.
 3. **Revisar y bloquear el glosario** — se edita y se fija antes de correr el trabajo.
 4. **Traducir con progreso en vivo** — chunk por chunk, con cancelación cooperativa entre chunks.
@@ -69,6 +69,7 @@ borgésica es agnóstica de proveedor, pero el modelo elegido cambia mucho el re
 | Proveedor | Modelo | Precio (input / output por Mtok) | Calidad observada |
 |---|---|---|---|
 | DeepSeek | `deepseek-v4-flash` | $0.14 / $0.28 | Muy buena — la mejor relación calidad-precio |
+| OpenAI | `gpt-5.6-luna` | $1.00 / $6.00 | Modelo por defecto de OpenAI; no evaluado en uso real todavía |
 | Anthropic | `claude-haiku-4-5` | $1.00 / $5.00 | Algo más caro que flash y de calidad inferior |
 | Anthropic | `claude-sonnet-5` | $3.00 / $15.00 | La mejor calidad del grupo, al precio más alto |
 | Ollama (local) | `Tower-Plus-9B-GGUF:Q4_K_M` | Gratis (cómputo local) | Muy baja |

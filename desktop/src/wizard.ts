@@ -18,9 +18,9 @@ export type WizardScreen = "pick" | "estimate" | "glossary" | "run" | "done" | "
 /** Translation backends the engine's `serve --provider` accepts. The provider
  * is chosen before the sidecar spawns (it is bound to that process); changing
  * it requires a sidecar respawn, so it lives at the App shell, not per job. */
-export type Provider = "anthropic" | "deepseek" | "ollama";
+export type Provider = "anthropic" | "deepseek" | "openai" | "ollama";
 
-export const PROVIDERS: Provider[] = ["anthropic", "deepseek", "ollama"];
+export const PROVIDERS: Provider[] = ["anthropic", "deepseek", "openai", "ollama"];
 
 /** A sensible default model id for a freshly selected provider, so the user
  * is not left with an Anthropic model id after switching to DeepSeek (which
@@ -32,6 +32,8 @@ export function defaultModelForProvider(provider: Provider): string {
       return "claude-sonnet-5";
     case "deepseek":
       return "deepseek-v4-flash";
+    case "openai":
+      return "gpt-5.6-luna";
     case "ollama":
       return "";
   }
