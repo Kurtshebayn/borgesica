@@ -115,8 +115,9 @@ _FALLBACK_PRICE: tuple[float, float] = (3.0, 15.0)
 
 # OpenAI price table — (input_usd_per_mtok, output_usd_per_mtok).
 # NOT used for billing; only for pre-flight cost estimates. o-series
-# (o1/o3/o4-mini) models are intentionally NOT listed — they are out of
-# scope (need max_completion_tokens instead of max_tokens; see .openai()).
+# (o1/o3/o4-mini) models are intentionally NOT listed — they remain out of
+# scope for other, unverified API differences (unrelated to the
+# max_completion_tokens handling .openai() already covers for gpt-5.6).
 _OPENAI_PRICE_TABLE: dict[str, tuple[float, float]] = {
     "gpt-5.6-sol": (5.00, 30.00),
     "gpt-5.6-terra": (2.50, 15.00),
@@ -149,6 +150,14 @@ class OpenAICompatibleProvider:
     # $0.0395) — a heavy ceiling. Subclasses (Ollama) inherit it; local models
     # are free, so the factor is inert there.
     retry_waste_factor: float = 3.0
+
+    # Completion-tokens parameter name sent to the API for the output-length
+    # cap. OpenAI's newer gpt-5.6 family (sol/terra/luna) rejects the legacy
+    # `max_tokens` kwarg and requires `max_completion_tokens` instead; the
+    # `.openai()` preset overrides this as an INSTANCE attribute (same pattern
+    # as retry_waste_factor). DeepSeek/Ollama/plain instances keep this class
+    # default and are unaffected.
+    _completion_tokens_param_name: str = "max_tokens"
 
     def __init__(
         self,
@@ -220,7 +229,7 @@ class OpenAICompatibleProvider:
         extra_price_table: dict[str, tuple[float, float]] | None = None,
         _client: Any | None = None,
     ) -> "OpenAICompatibleProvider":
-        """Preset for OpenAI (https://api.openai.com).
+        """Preset for OpenAI (https://api.openai.com/v1).
 
         Prices: gpt-5.6-sol   = ($5.00, $30.00)/Mtok,
                 gpt-5.6-terra = ($2.50, $15.00)/Mtok,
@@ -233,21 +242,27 @@ class OpenAICompatibleProvider:
         would over-estimate the worst-case cost ceiling. This does NOT touch
         the class attribute: DeepSeek/Ollama instances keep 3.0.
 
-        o-series (o1/o3/o4-mini) models are out of scope: they require
-        max_completion_tokens instead of max_tokens and are not special-cased
-        here — selecting one surfaces the raw OpenAI API error.
+        _completion_tokens_param_name is overridden to "max_completion_tokens"
+        as an INSTANCE attribute — the whole gpt-5.6 family (sol/terra/luna)
+        rejects the legacy max_tokens kwarg. DeepSeek/Ollama/plain instances
+        keep the class default "max_tokens" (unaffected by this override).
+
+        o-series (o1/o3/o4-mini) models remain out of scope for OTHER,
+        unverified API differences — this override does not enable them;
+        selecting one surfaces the raw OpenAI API error.
         """
         table = dict(_OPENAI_PRICE_TABLE)
         if extra_price_table:
             table.update(extra_price_table)
         provider = cls(
-            base_url="https://api.openai.com",
+            base_url="https://api.openai.com/v1",
             api_key=api_key,
             default_model=default_model,
             price_table=table,
             _client=_client,
         )
         provider.retry_waste_factor = 1.5  # instance attr; GPT is Tier-1-reliable
+        provider._completion_tokens_param_name = "max_completion_tokens"  # instance attr
         return provider
 
     # ------------------------------------------------------------------
@@ -453,7 +468,7 @@ class OpenAICompatibleProvider:
             ],
             tools=_translation_tools(segment_count),
             tool_choice="auto",
-            max_tokens=_MAX_OUTPUT_TOKENS,
+            **{self._completion_tokens_param_name: _MAX_OUTPUT_TOKENS},
         )
         choice = response.choices[0]
         message = choice.message
@@ -493,7 +508,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             response_format={"type": "json_object"},
-            max_tokens=_MAX_OUTPUT_TOKENS,
+            **{self._completion_tokens_param_name: _MAX_OUTPUT_TOKENS},
         )
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""
@@ -533,7 +548,7 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user + json_instruction},
             ],
-            max_tokens=_MAX_OUTPUT_TOKENS,
+            **{self._completion_tokens_param_name: _MAX_OUTPUT_TOKENS},
         )
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""

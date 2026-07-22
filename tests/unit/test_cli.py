@@ -251,7 +251,7 @@ def test_build_provider_openai_resolves_key_and_targets_openai_base_url() -> Non
     with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-oa"}, clear=True):
         provider = _build_provider("openai")
 
-    assert provider.base_url == "https://api.openai.com"
+    assert provider.base_url == "https://api.openai.com/v1"
     assert provider.default_model == "gpt-5.6-luna"
 
 

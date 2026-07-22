@@ -41,15 +41,20 @@ through to the JSON-mode/prompt-parse fallback tiers.
 
 | Model | Provider | Notes |
 |-------|----------|-------|
-| `gpt-5.6-luna` | OpenAI (`https://api.openai.com`) | $1.00/Mtok input, $6.00/Mtok output. Default model for `--provider openai`. |
-| `gpt-5.6-terra` | OpenAI (`https://api.openai.com`) | $2.50/Mtok input, $15.00/Mtok output. Mid-tier quality/cost. |
-| `gpt-5.6-sol` | OpenAI (`https://api.openai.com`) | $5.00/Mtok input, $30.00/Mtok output. Highest-quality GPT tier. |
+| `gpt-5.6-luna` | OpenAI (`https://api.openai.com/v1`) | $1.00/Mtok input, $6.00/Mtok output. Default model for `--provider openai`. |
+| `gpt-5.6-terra` | OpenAI (`https://api.openai.com/v1`) | $2.50/Mtok input, $15.00/Mtok output. Mid-tier quality/cost. |
+| `gpt-5.6-sol` | OpenAI (`https://api.openai.com/v1`) | $5.00/Mtok input, $30.00/Mtok output. Highest-quality GPT tier. |
+
+> **`max_completion_tokens` handling**: the entire gpt-5.6 family (`sol`/`terra`/`luna`)
+> rejects the legacy `max_tokens` parameter and requires `max_completion_tokens` instead.
+> The `.openai()` preset now sends this automatically, so no action is needed when using
+> `--provider openai`.
 
 > **NOTE — o-series (reasoning) models not supported**: `o1`, `o3`, `o4-mini`, and other
-> o-series models require the `max_completion_tokens` parameter instead of `max_tokens`,
-> which this adapter does not send. Selecting an o-series `--model` is not special-cased or
-> validated — the raw OpenAI API error is surfaced unmodified. This is an explicit,
-> documented scope boundary, not a bug.
+> o-series models remain excluded for other, still-unverified API differences — this is
+> unrelated to the `max_completion_tokens` handling above and is NOT resolved by it.
+> Selecting an o-series `--model` is not special-cased or validated — the raw OpenAI API
+> error is surfaced unmodified. This is an explicit, documented scope boundary, not a bug.
 
 ### Private / Free / Offline
 

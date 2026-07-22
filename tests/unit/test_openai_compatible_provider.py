@@ -604,6 +604,55 @@ class TestPriceAndCountTokens:
 
 
 # ---------------------------------------------------------------------------
+# Test 8b: Completion-tokens parameter name (class default + per-preset override)
+# ---------------------------------------------------------------------------
+
+
+class TestCompletionTokensParamName:
+    def test_class_default_is_max_tokens(self):
+        """The class-level default for _completion_tokens_param_name is 'max_tokens'
+        (DeepSeek/Ollama/plain instances rely on this default)."""
+        assert OpenAICompatibleProvider._completion_tokens_param_name == "max_tokens"
+
+
+# ---------------------------------------------------------------------------
+# Test 8c: Tiers honor the configured completion-tokens parameter name
+# (regression: .openai() presets must send max_completion_tokens, not
+# max_tokens; .deepseek() must keep sending max_tokens unchanged — guards
+# against the param-name change leaking across presets).
+# ---------------------------------------------------------------------------
+
+
+class TestTiersHonorCompletionTokensParamName:
+    def test_openai_preset_sends_max_completion_tokens(self):
+        """A .openai()-preset instance sends max_completion_tokens, not max_tokens."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "gpt-5.6-luna")
+
+        assert len(fake_client.call_log) == 1
+        call_kwargs = fake_client.call_log[0]
+        assert call_kwargs.get("max_completion_tokens") == _MAX_OUTPUT_TOKENS
+        assert "max_tokens" not in call_kwargs
+
+    def test_deepseek_preset_still_sends_max_tokens(self):
+        """A .deepseek()-preset instance keeps sending max_tokens unchanged
+        (must NOT leak the OpenAI param-name override across presets)."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert len(fake_client.call_log) == 1
+        call_kwargs = fake_client.call_log[0]
+        assert call_kwargs.get("max_tokens") == _MAX_OUTPUT_TOKENS
+        assert "max_completion_tokens" not in call_kwargs
+
+
+# ---------------------------------------------------------------------------
 # Test 9: Configurable base_url / api_key / price-table + DeepSeek preset + request inspection
 # ---------------------------------------------------------------------------
 
@@ -659,9 +708,10 @@ class TestConfigurableAndDeepSeekPreset:
 
 class TestOpenAIPreset:
     def test_openai_preset_sets_correct_base_url(self):
-        """OpenAI preset uses base_url='https://api.openai.com'."""
+        """OpenAI preset uses base_url='https://api.openai.com/v1' (the bare host
+        without the `/v1` path 404s on every real request — regression test)."""
         provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
-        assert provider.base_url == "https://api.openai.com"
+        assert provider.base_url == "https://api.openai.com/v1"
 
     def test_openai_preset_sets_correct_default_model(self):
         """OpenAI preset defaults to model='gpt-5.6-luna'."""
@@ -694,6 +744,12 @@ class TestOpenAIPreset:
         models), distinct from the 3.0 class default inherited by DeepSeek."""
         provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
         assert provider.retry_waste_factor == 1.5
+
+    def test_openai_preset_overrides_completion_tokens_param_name(self):
+        """.openai() overrides _completion_tokens_param_name to 'max_completion_tokens'
+        as an instance attribute (gpt-5.6 family rejects the legacy 'max_tokens' kwarg)."""
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider._completion_tokens_param_name == "max_completion_tokens"
 
     def test_openai_preset_does_not_mutate_the_class_default(self):
         """A plain (non-openai-preset) instance MUST keep the 3.0 class default —
