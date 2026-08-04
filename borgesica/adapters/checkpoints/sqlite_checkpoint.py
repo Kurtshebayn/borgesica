@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import Generator
 
 from borgesica.domain.models import (
+    DEFAULT_GLOSSARY_BUDGET_TOKENS,
     Chunk,
     ChunkStatus,
     Glossary,
@@ -39,7 +40,7 @@ from borgesica.domain.models import (
 # DDL
 # ---------------------------------------------------------------------------
 
-_CREATE_JOBS = """
+_CREATE_JOBS = f"""
 CREATE TABLE IF NOT EXISTS jobs (
     id              TEXT PRIMARY KEY,
     source_type     TEXT NOT NULL,
@@ -59,7 +60,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at      TEXT NOT NULL,
     prose_chunk_tokens INTEGER NOT NULL DEFAULT 800,
     prose_segmentation TEXT NOT NULL DEFAULT 'batch',
-    continue_on_error INTEGER NOT NULL DEFAULT 1
+    continue_on_error INTEGER NOT NULL DEFAULT 1,
+    glossary_budget_tokens INTEGER NOT NULL DEFAULT {DEFAULT_GLOSSARY_BUDGET_TOKENS}
 )
 """
 
@@ -69,6 +71,14 @@ _JOBS_MIGRATIONS = {
     "prose_chunk_tokens": "INTEGER NOT NULL DEFAULT 800",
     "prose_segmentation": "TEXT NOT NULL DEFAULT 'batch'",
     "continue_on_error": "INTEGER NOT NULL DEFAULT 1",
+    # Read at RUN time by build_system_prompt, so it must survive save/load or
+    # `resume` would silently revert a tuned job to the default budget and
+    # change the prompt mid-book. (extract_chunks/extract_offset are NOT
+    # persisted: they only shape which chunks get created, and that outcome is
+    # already baked into the persisted chunk rows.)
+    "glossary_budget_tokens": (
+        f"INTEGER NOT NULL DEFAULT {DEFAULT_GLOSSARY_BUDGET_TOKENS}"
+    ),
 }
 
 _CREATE_CHUNKS = """
@@ -230,12 +240,14 @@ class SQLiteCheckpointStore:
             id, source_type, source_path, target_lang, model, status,
             budget_usd, chunk_size, line_length, glossary_strategy, quality_mode,
             total_chunks, completed_chunks, cost_usd, created_at, updated_at,
-            prose_chunk_tokens, prose_segmentation, continue_on_error
+            prose_chunk_tokens, prose_segmentation, continue_on_error,
+            glossary_budget_tokens
         ) VALUES (
             :id, :source_type, :source_path, :target_lang, :model, :status,
             :budget_usd, :chunk_size, :line_length, :glossary_strategy, :quality_mode,
             :total_chunks, :completed_chunks, :cost_usd, :created_at, :updated_at,
-            :prose_chunk_tokens, :prose_segmentation, :continue_on_error
+            :prose_chunk_tokens, :prose_segmentation, :continue_on_error,
+            :glossary_budget_tokens
         )
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
@@ -265,6 +277,7 @@ class SQLiteCheckpointStore:
                 "prose_chunk_tokens": job.config.prose_chunk_tokens,
                 "prose_segmentation": job.config.prose_segmentation,
                 "continue_on_error": 1 if job.config.continue_on_error else 0,
+                "glossary_budget_tokens": job.config.glossary_budget_tokens,
             })
 
     def load_job(self, job_id: str) -> Job | None:
@@ -287,6 +300,7 @@ class SQLiteCheckpointStore:
             prose_chunk_tokens=row["prose_chunk_tokens"],
             prose_segmentation=row["prose_segmentation"],
             continue_on_error=bool(row["continue_on_error"]),
+            glossary_budget_tokens=row["glossary_budget_tokens"],
         )
         return Job(
             id=row["id"],

@@ -245,6 +245,30 @@ class TestSQLiteCheckpointStore:
         assert loaded.config.prose_chunk_tokens == 400
         assert loaded.config.continue_on_error is False
 
+    def test_glossary_budget_tokens_round_trip(self):
+        """A tuned glossary budget must survive save/load.
+
+        It is read at RUN time (build_system_prompt), so if it does not
+        persist, `resume` silently reverts an expensive-provider job to the
+        default budget and quietly changes the prompt mid-book.
+        """
+        now = datetime.now(tz=timezone.utc)
+        job = Job(
+            id="job-glossary-budget",
+            config=JobConfig(
+                source_type=SourceType.EPUB,
+                model="claude-3-5-haiku-20241022",
+                glossary_budget_tokens=400,
+            ),
+            source_path="/tmp/test.epub",
+            created_at=now,
+            updated_at=now,
+        )
+        self.store.save_job(job)
+        loaded = self.store.load_job(job.id)
+        assert loaded is not None
+        assert loaded.config.glossary_budget_tokens == 400
+
     def test_migrates_existing_db_without_config_columns(self):
         """Opening a DB created with the pre-migration schema adds the new columns
         and old rows load with JobConfig defaults."""
