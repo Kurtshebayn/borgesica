@@ -17,6 +17,9 @@ env/
 htmlcov/
 .ruff_cache/
 .mypy_cache/
+# Local code-intelligence index: rebuilt per checkout, and its contents depend
+# on the working tree, so it must never be shared between checkouts.
+.codegraph/
 
 # Secrets / API keys
 .env
