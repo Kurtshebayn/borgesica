@@ -339,6 +339,65 @@ def test_cmd_create_without_strict_sets_continue_on_error_true() -> None:
 
 
 # ---------------------------------------------------------------------------
+# A1 — Extract mode: `create --extract N` translates only the first N chunks
+# ---------------------------------------------------------------------------
+
+
+def test_extract_flag_parses_int_when_given() -> None:
+    """--extract sets args.extract_chunks to the given int."""
+    from borgesica.__main__ import _build_parser
+
+    args = _build_parser().parse_args(
+        ["create", "book.epub", "--model", "x", "--extract", "5"]
+    )
+    assert args.extract_chunks == 5
+
+
+def test_extract_flag_defaults_to_none() -> None:
+    """Without --extract, extract_chunks is None (translate everything)."""
+    from borgesica.__main__ import _build_parser
+
+    args = _build_parser().parse_args(["create", "book.epub", "--model", "x"])
+    assert args.extract_chunks is None
+
+
+def test_cmd_create_extract_sets_extract_chunks_on_config() -> None:
+    """`create --extract 3` builds a JobConfig with extract_chunks=3."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.create_job.return_value = MagicMock(id="job-extract-1")
+        mock_build.return_value = engine
+
+        code = main(["create", "book.epub", "--model", "x", "--extract", "3"])
+
+    assert code == 0
+    _, passed_config = engine.create_job.call_args.args
+    assert passed_config.extract_chunks == 3
+
+
+def test_cmd_create_without_extract_leaves_extract_chunks_none() -> None:
+    """`create` without --extract builds a JobConfig with extract_chunks=None."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.create_job.return_value = MagicMock(id="job-extract-2")
+        mock_build.return_value = engine
+
+        code = main(["create", "book.epub", "--model", "x"])
+
+    assert code == 0
+    _, passed_config = engine.create_job.call_args.args
+    assert passed_config.extract_chunks is None
+
+
+# ---------------------------------------------------------------------------
 # continue-on-error WU4-2 — `run` prints a skip-summary line when chunks failed
 # Spec: job-lifecycle/"skip report surfaces FAILED chunk indices at end of run"
 # (scenario: CLI run prints a skip-summary line when chunks failed)

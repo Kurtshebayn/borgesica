@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from borgesica.api import TranslatorEngine
 from borgesica.domain.errors import JobNotFoundError, JobStateError
@@ -43,6 +44,7 @@ def _make_config(
     quality_mode: str = "fast",
     budget_usd: float | None = None,
     continue_on_error: bool = True,
+    extract_chunks: int | None = None,
 ) -> JobConfig:
     return JobConfig(
         source_type=source_type,
@@ -51,6 +53,7 @@ def _make_config(
         quality_mode=quality_mode,  # type: ignore[arg-type]
         budget_usd=budget_usd,
         continue_on_error=continue_on_error,
+        extract_chunks=extract_chunks,
     )
 
 
@@ -187,6 +190,102 @@ def test_create_job_makes_no_provider_calls(tmp_path: Path) -> None:
     engine.create_job(srt_path, config)
 
     assert provider.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# A1 — Extract mode: create_job truncates to the first N chunks
+#
+# Purpose (backlog A1): make model comparison and quality iteration cheap.
+# Truncation happens at CREATE time, before glossary seeding, so the job IS
+# the extract: total_chunks, cost estimate, run, and writer all operate on
+# the truncated set with no downstream special-casing.
+# ---------------------------------------------------------------------------
+
+
+class _SpyGlossaryExtractor:
+    """Records the text passed to extract() so tests can assert on its scope."""
+
+    def __init__(self) -> None:
+        self.seen_text: str | None = None
+
+    def extract(self, text: str, config: JobConfig) -> Glossary:  # noqa: ARG002
+        self.seen_text = text
+        return Glossary(entries=[])
+
+
+def test_create_job_extract_chunks_truncates_to_first_n(tmp_path: Path) -> None:
+    """75 cues / chunk_size=25 → 3 chunks; extract_chunks=2 keeps the first 2."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=75)
+    engine, _, checkpoint = _make_engine()
+    config = _make_config(chunk_size=25, extract_chunks=2)
+
+    job = engine.create_job(srt_path, config)
+
+    assert job.total_chunks == 2
+    chunks = checkpoint.load_chunks(job.id)
+    assert len(chunks) == 2
+    # The first N, in order — not an arbitrary subset.
+    assert [c.index for c in chunks] == [0, 1]
+
+
+def test_create_job_without_extract_chunks_keeps_all(tmp_path: Path) -> None:
+    """Default (None) is a no-op: the full job is created, as before."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=75)
+    engine, _, checkpoint = _make_engine()
+    config = _make_config(chunk_size=25)
+
+    job = engine.create_job(srt_path, config)
+
+    assert job.total_chunks == 3
+    assert len(checkpoint.load_chunks(job.id)) == 3
+
+
+def test_create_job_extract_chunks_above_total_keeps_all(tmp_path: Path) -> None:
+    """Asking for more chunks than exist clamps to the total — not an error."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=75)
+    engine, _, checkpoint = _make_engine()
+    config = _make_config(chunk_size=25, extract_chunks=99)
+
+    job = engine.create_job(srt_path, config)
+
+    assert job.total_chunks == 3
+    assert len(checkpoint.load_chunks(job.id)) == 3
+
+
+def test_create_job_extract_chunks_scopes_glossary_seeding(tmp_path: Path) -> None:
+    """Glossary is seeded from the EXTRACT only — that is the cost saving.
+
+    Seeding from the full source would defeat the purpose: the extractor call
+    carries the whole book as input (see api.create_job step 3).
+    """
+    srt_path = _make_srt_fixture(tmp_path, num_cues=75)
+    spy = _SpyGlossaryExtractor()
+    provider = FakeTranslationProvider()
+    checkpoint = InMemoryCheckpointStore()
+    from borgesica.adapters.readers.srt_reader import SrtReader
+    from borgesica.adapters.writers.srt_writer import SrtWriter
+
+    engine = TranslatorEngine(
+        provider=provider,
+        checkpoint=checkpoint,
+        readers={SourceType.SRT: SrtReader()},
+        writers={SourceType.SRT: SrtWriter()},
+        extractor=spy,
+    )
+    config = _make_config(chunk_size=25, extract_chunks=1)
+
+    engine.create_job(srt_path, config)
+
+    assert spy.seen_text is not None
+    # Cue 1 is in the first chunk; cue 75 is in the third and must be excluded.
+    assert "Cue 1 text." in spy.seen_text
+    assert "Cue 75 text." not in spy.seen_text
+
+
+def test_extract_chunks_must_be_at_least_one() -> None:
+    """extract_chunks=0 is meaningless — reject at the config boundary."""
+    with pytest.raises(ValidationError):
+        JobConfig(source_type=SourceType.SRT, model="fake-model", extract_chunks=0)
 
 
 # ---------------------------------------------------------------------------

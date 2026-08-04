@@ -123,6 +123,13 @@ class TranslatorEngine:
             # SRT: cue-batch chunker (meta carries cue_batches + line_length)
             chunks = SrtChunker.chunk(cues, config)
 
+        # 2b. Extract mode: keep only the first N chunks. Done here — before
+        # glossary seeding — so the extract is the whole job: the glossary is
+        # seeded from the extract alone (that is the cost saving), and
+        # estimate_cost / run_job / the writer see a normal, complete job.
+        if config.extract_chunks is not None:
+            chunks = chunks[: config.extract_chunks]
+
         # 3. Seed glossary (no translation for "none" strategy)
         glossary = self._extractor.extract(
             " ".join(c.source_text for c in chunks), config

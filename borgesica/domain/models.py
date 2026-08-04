@@ -261,6 +261,12 @@ class JobConfig(BaseModel):
     # DONE. When False (--strict), the prior contract holds: FAILED chunk pauses
     # the job immediately.
     continue_on_error: bool = True
+    # Extract mode: keep only the first N chunks at create time, for cheap model
+    # comparison and translation-quality iteration without paying for a full book.
+    # None (default) = translate everything. Truncation happens BEFORE glossary
+    # seeding, so the job simply IS the extract — estimate, run, and writer need
+    # no special-casing. Values above the chunk total clamp to the total.
+    extract_chunks: int | None = Field(default=None, ge=1)
 
 
 class Job(BaseModel):
