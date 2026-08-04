@@ -149,6 +149,70 @@ def test_glossary_render_all_locked_appear_regardless_of_budget():
 
 
 # ---------------------------------------------------------------------------
+# B1a — Glossary budget: the default must fit a real book's glossary
+#
+# Measured before the fix: at budget_tokens=300 the renderer hit a HARD ceiling
+# at ~67 entries regardless of glossary size, so a 400-term novel delivered 67
+# terms and silently dropped 333. Because the cut is a `break` over insertion
+# order, every term past the ceiling was invisible in EVERY chunk, permanently
+# — which is why term drift showed up late in a long book, not early.
+# ---------------------------------------------------------------------------
+
+
+def _novel_glossary(n: int) -> Glossary:
+    """n realistic proper-noun entries, shaped like extractor output."""
+    return Glossary(
+        entries=[
+            GlossaryEntry(term=f"Gleaners{i:03d}", translation=f"Espigadores{i:03d}")
+            for i in range(n)
+        ]
+    )
+
+
+def test_glossary_render_default_budget_fits_a_full_novel_glossary():
+    """300 unlocked entries must ALL survive render() at its default budget."""
+    glossary = _novel_glossary(300)
+
+    rendered = glossary.render()
+
+    kept = len([ln for ln in rendered.split("\n") if ln.strip()])
+    assert kept == 300, f"only {kept}/300 entries reached the prompt"
+
+
+def test_glossary_render_still_truncates_when_budget_is_explicitly_small():
+    """The budget still works — raising the default did not disable trimming."""
+    glossary = _novel_glossary(300)
+
+    rendered = glossary.render(budget_tokens=30)
+
+    kept = len([ln for ln in rendered.split("\n") if ln.strip()])
+    assert 0 < kept < 300
+
+
+def test_build_system_prompt_honors_config_glossary_budget():
+    """The per-chunk prompt uses config.glossary_budget_tokens, not a constant.
+
+    Before the fix context.py hardcoded budget_tokens=300, so the budget was
+    unreachable from JobConfig and could not be tuned per job or per provider.
+    """
+    from borgesica.domain.context import ContextManager
+
+    manager = ContextManager(FakeTranslationProvider())
+    glossary = _novel_glossary(300)
+    summary = RollingSummary()
+
+    generous = manager.build_system_prompt(
+        make_config(glossary_budget_tokens=5000), glossary, summary
+    )
+    stingy = manager.build_system_prompt(
+        make_config(glossary_budget_tokens=30), glossary, summary
+    )
+
+    assert "Gleaners299" in generous.text
+    assert "Gleaners299" not in stingy.text
+
+
+# ---------------------------------------------------------------------------
 # Test 6 — rolling summary from chunk N-1 is in chunk N's system prompt
 # ---------------------------------------------------------------------------
 

@@ -261,7 +261,9 @@ class ContextManager:
             SystemPrompt with .text and .cached fields.
         """
         static_block = self.get_static_block(config)
-        dynamic_block = self._build_dynamic_block(glossary, summary)
+        dynamic_block = self._build_dynamic_block(
+            glossary, summary, config.glossary_budget_tokens
+        )
         full_text = static_block + "\n\n" + dynamic_block
 
         token_count = self._provider.count_tokens(static_block, config.model)
@@ -296,9 +298,10 @@ class ContextManager:
         self,
         glossary: Glossary,
         summary: RollingSummary,
+        glossary_budget_tokens: int,
     ) -> str:
         """Build the per-chunk dynamic section."""
-        rendered_glossary = glossary.render(budget_tokens=300)
+        rendered_glossary = glossary.render(budget_tokens=glossary_budget_tokens)
         summary_text = summary.text if summary.text else "No prior context."
 
         return (

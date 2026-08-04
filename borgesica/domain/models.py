@@ -44,6 +44,15 @@ class SourceType(StrEnum):
 # ---------------------------------------------------------------------------
 
 
+# Glossary prompt budget, in WORDS (see Glossary.render). Sized to fit a full
+# novel's term list: measured at 300 the renderer stopped at ~67 entries, so a
+# 400-term book silently lost 333 of them. The glossary rides in the DYNAMIC
+# (uncached) prompt block, so this is paid per chunk — ~$0.09 extra per book on
+# deepseek-v4-flash, ~$2 on claude-sonnet-5. It is a ceiling, not a floor: a
+# small glossary renders small regardless.
+DEFAULT_GLOSSARY_BUDGET_TOKENS = 1500
+
+
 class GlossaryEntry(BaseModel):
     term: str
     translation: str
@@ -54,11 +63,21 @@ class GlossaryEntry(BaseModel):
 class Glossary(BaseModel):
     entries: list[GlossaryEntry] = Field(default_factory=list)
 
-    def render(self, budget_tokens: int = 300) -> str:
+    def render(self, budget_tokens: int = DEFAULT_GLOSSARY_BUDGET_TOKENS) -> str:
         """Return a compact table of entries for prompt injection.
 
-        Locked entries appear first.  Unlocked entries are trimmed once the
-        estimated token budget is exhausted (token ~= word count).
+        Locked entries appear first, and are ALWAYS included in full — a locked
+        term is one the user explicitly pinned, so dropping it would defeat the
+        purpose of locking. Unlocked entries are trimmed once the budget is
+        exhausted.
+
+        The budget is measured in WORDS (``len(line.split())``), which
+        under-counts real tokens by roughly 1.7x for accented Spanish plus the
+        arrow separator. The default is expressed in those same units and sized
+        so that a full novel's glossary reaches the prompt intact; at 300 the
+        renderer capped out near 67 entries no matter how large the glossary
+        grew, and everything past that was invisible to the model in every
+        chunk.
         """
         locked = [e for e in self.entries if e.locked]
         unlocked = [e for e in self.entries if not e.locked]
@@ -267,6 +286,12 @@ class JobConfig(BaseModel):
     # seeding, so the job simply IS the extract — estimate, run, and writer need
     # no special-casing. Values above the chunk total clamp to the total.
     extract_chunks: int | None = Field(default=None, ge=1)
+    # Word budget for the glossary block of the per-chunk system prompt. Tunable
+    # so expensive providers can trade glossary coverage against cost; see
+    # DEFAULT_GLOSSARY_BUDGET_TOKENS for why the default is what it is.
+    glossary_budget_tokens: int = Field(
+        default=DEFAULT_GLOSSARY_BUDGET_TOKENS, ge=1
+    )
 
 
 class Job(BaseModel):

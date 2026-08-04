@@ -143,6 +143,63 @@ def test_harness_injects_glossary_locked_terms_into_prompt() -> None:
 
 
 # ---------------------------------------------------------------------------
+# B1a follow-up — the judge must see the SAME glossary view as the translator
+#
+# The judge scores a `glossary_consistency` dimension, so a glossary block
+# truncated more aggressively than the translator's would penalise the model
+# for terms it was never shown.
+# ---------------------------------------------------------------------------
+
+
+def _novel_glossary(n: int) -> Glossary:
+    return Glossary(
+        entries=[
+            GlossaryEntry(term=f"Gleaners{i:03d}", translation=f"Espigadores{i:03d}")
+            for i in range(n)
+        ]
+    )
+
+
+def test_harness_glossary_budget_defaults_to_the_translator_budget() -> None:
+    """By default the judge renders the glossary at the shared default budget."""
+    from borgesica.domain.models import DEFAULT_GLOSSARY_BUDGET_TOKENS
+
+    canned = _make_score_unit()
+    provider = FakeTranslationProvider(canned_unit=canned)
+    harness = QualityHarness(provider=provider)
+
+    harness.evaluate(
+        source="Hello.",
+        translation="Hola.",
+        glossary=_novel_glossary(300),
+        model="test-model",
+    )
+
+    user_message = provider.call_log[0][1]
+    # Entry 299 sits far past the old hardcoded-300 ceiling (~67 entries).
+    assert "Gleaners299" in user_message
+    assert DEFAULT_GLOSSARY_BUDGET_TOKENS >= 1200
+
+
+def test_harness_glossary_budget_is_overridable_per_call() -> None:
+    """A job with a tuned budget can align the judge with its own prompt."""
+    canned = _make_score_unit()
+    provider = FakeTranslationProvider(canned_unit=canned)
+    harness = QualityHarness(provider=provider)
+
+    harness.evaluate(
+        source="Hello.",
+        translation="Hola.",
+        glossary=_novel_glossary(300),
+        model="test-model",
+        glossary_budget_tokens=30,
+    )
+
+    user_message = provider.call_log[0][1]
+    assert "Gleaners299" not in user_message
+
+
+# ---------------------------------------------------------------------------
 # Test 2 — advisory_gate: any dimension < 4 → FAIL; all >= 4 → PASS
 # ---------------------------------------------------------------------------
 

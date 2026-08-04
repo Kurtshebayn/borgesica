@@ -282,6 +282,37 @@ def test_job_config_continue_on_error_explicit_false() -> None:
     assert config.continue_on_error is False
 
 
+def test_job_config_glossary_budget_default_fits_a_novel() -> None:
+    """B1a: the glossary prompt budget must fit a full book's term list.
+
+    The old hardcoded 300 capped the prompt at ~67 entries, silently dropping
+    the rest of a long book's glossary.
+    """
+    from borgesica.domain.models import JobConfig, SourceType
+
+    config = JobConfig(source_type=SourceType.SRT, model="x")
+    assert config.glossary_budget_tokens >= 1200
+
+
+def test_job_config_glossary_budget_is_overridable() -> None:
+    """B1a: tunable per job — expensive providers can dial the budget down."""
+    from borgesica.domain.models import JobConfig, SourceType
+
+    config = JobConfig(source_type=SourceType.SRT, model="x", glossary_budget_tokens=400)
+    assert config.glossary_budget_tokens == 400
+
+
+def test_job_config_glossary_budget_rejects_non_positive() -> None:
+    """B1a: a zero/negative budget would silently blank the glossary."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from borgesica.domain.models import JobConfig, SourceType
+
+    with _pytest.raises(ValidationError):
+        JobConfig(source_type=SourceType.SRT, model="x", glossary_budget_tokens=0)
+
+
 # --- Job ---
 
 def test_job_accepts_all_required_fields() -> None:
