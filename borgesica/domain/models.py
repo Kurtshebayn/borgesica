@@ -286,6 +286,12 @@ class JobConfig(BaseModel):
     # seeding, so the job simply IS the extract — estimate, run, and writer need
     # no special-casing. Values above the chunk total clamp to the total.
     extract_chunks: int | None = Field(default=None, ge=1)
+    # Where the extract window starts. Defects tend to surface deep into a long
+    # book, so an extract pinned to the opening cannot reproduce them. Combined:
+    # chunks[extract_offset : extract_offset + extract_chunks]. With no
+    # extract_chunks, the window runs to the end. Extracted chunks KEEP their
+    # original indices, so the job records where in the book it came from.
+    extract_offset: int = Field(default=0, ge=0)
     # Word budget for the glossary block of the per-chunk system prompt. Tunable
     # so expensive providers can trade glossary coverage against cost; see
     # DEFAULT_GLOSSARY_BUDGET_TOKENS for why the default is what it is.

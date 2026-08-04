@@ -45,6 +45,7 @@ def _make_config(
     budget_usd: float | None = None,
     continue_on_error: bool = True,
     extract_chunks: int | None = None,
+    extract_offset: int = 0,
 ) -> JobConfig:
     return JobConfig(
         source_type=source_type,
@@ -54,6 +55,7 @@ def _make_config(
         budget_usd=budget_usd,
         continue_on_error=continue_on_error,
         extract_chunks=extract_chunks,
+        extract_offset=extract_offset,
     )
 
 
@@ -286,6 +288,90 @@ def test_extract_chunks_must_be_at_least_one() -> None:
     """extract_chunks=0 is meaningless — reject at the config boundary."""
     with pytest.raises(ValidationError):
         JobConfig(source_type=SourceType.SRT, model="fake-model", extract_chunks=0)
+
+
+# ---------------------------------------------------------------------------
+# A1b — Extract offset: reach an arbitrary window, not just the opening
+#
+# Translation defects surface deep into a long book (a term first rendered
+# consistently can drift once the glossary outgrows its prompt budget), so an
+# extract pinned to the first N chunks cannot reproduce or verify them.
+# ---------------------------------------------------------------------------
+
+
+def test_create_job_extract_offset_preserves_original_chunk_indices(
+    tmp_path: Path,
+) -> None:
+    """The window keeps its real position in the book — indices are NOT rebased.
+
+    save_chunk is keyed by (job_id, chunk.index) and load_chunks orders by it,
+    neither of which requires a 0-based run; keeping the original index is what
+    makes `status` show where in the book the extract actually came from.
+    """
+    srt_path = _make_srt_fixture(tmp_path, num_cues=75)
+    engine, _, checkpoint = _make_engine()
+    config = _make_config(chunk_size=25, extract_chunks=1, extract_offset=2)
+
+    job = engine.create_job(srt_path, config)
+
+    assert job.total_chunks == 1
+    chunks = checkpoint.load_chunks(job.id)
+    assert [c.index for c in chunks] == [2]
+
+
+def test_create_job_extract_offset_without_count_runs_to_the_end(
+    tmp_path: Path,
+) -> None:
+    """An offset with no count means "from here to the end"."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=75)
+    engine, _, checkpoint = _make_engine()
+    config = _make_config(chunk_size=25, extract_offset=1)
+
+    job = engine.create_job(srt_path, config)
+
+    assert job.total_chunks == 2
+    assert [c.index for c in checkpoint.load_chunks(job.id)] == [1, 2]
+
+
+def test_create_job_extract_offset_beyond_total_is_rejected(tmp_path: Path) -> None:
+    """An offset past the last chunk would create an empty, unrunnable job."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=75)
+    engine, _, _ = _make_engine()
+    config = _make_config(chunk_size=25, extract_offset=99)
+
+    with pytest.raises(ValueError, match="offset"):
+        engine.create_job(srt_path, config)
+
+
+def test_create_job_extract_offset_scopes_glossary_to_the_window(
+    tmp_path: Path,
+) -> None:
+    """The glossary is seeded from the WINDOW, not from the start of the book."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=75)
+    spy = _SpyGlossaryExtractor()
+    from borgesica.adapters.readers.srt_reader import SrtReader
+    from borgesica.adapters.writers.srt_writer import SrtWriter
+
+    engine = TranslatorEngine(
+        provider=FakeTranslationProvider(),
+        checkpoint=InMemoryCheckpointStore(),
+        readers={SourceType.SRT: SrtReader()},
+        writers={SourceType.SRT: SrtWriter()},
+        extractor=spy,
+    )
+    config = _make_config(chunk_size=25, extract_chunks=1, extract_offset=2)
+
+    engine.create_job(srt_path, config)
+
+    assert spy.seen_text is not None
+    assert "Cue 75 text." in spy.seen_text
+    assert "Cue 1 text." not in spy.seen_text
+
+
+def test_extract_offset_must_be_non_negative() -> None:
+    """A negative offset would silently wrap around the chunk list."""
+    with pytest.raises(ValidationError):
+        JobConfig(source_type=SourceType.SRT, model="fake-model", extract_offset=-1)
 
 
 # ---------------------------------------------------------------------------

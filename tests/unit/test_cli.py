@@ -379,6 +379,56 @@ def test_cmd_create_extract_sets_extract_chunks_on_config() -> None:
     assert passed_config.extract_chunks == 3
 
 
+def test_from_flag_parses_int_and_defaults_to_zero() -> None:
+    """--from sets args.extract_offset; absent, it is 0."""
+    from borgesica.__main__ import _build_parser
+
+    with_flag = _build_parser().parse_args(
+        ["create", "book.epub", "--model", "x", "--extract", "20", "--from", "380"]
+    )
+    without = _build_parser().parse_args(["create", "book.epub", "--model", "x"])
+
+    assert with_flag.extract_offset == 380
+    assert without.extract_offset == 0
+
+
+def test_cmd_create_from_sets_extract_offset_on_config() -> None:
+    """`create --extract 20 --from 380` reaches JobConfig intact."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.create_job.return_value = MagicMock(id="job-extract-3")
+        mock_build.return_value = engine
+
+        code = main(
+            ["create", "book.epub", "--model", "x", "--extract", "20", "--from", "380"]
+        )
+
+    assert code == 0
+    _, passed_config = engine.create_job.call_args.args
+    assert passed_config.extract_chunks == 20
+    assert passed_config.extract_offset == 380
+
+
+def test_cmd_create_reports_out_of_range_offset_without_a_traceback() -> None:
+    """An offset past the last chunk is a user error, not a crash."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.create_job.side_effect = ValueError("extract offset 99 is past the last chunk")
+        mock_build.return_value = engine
+
+        code = main(["create", "book.epub", "--model", "x", "--from", "99"])
+
+    assert code == 1
+
+
 def test_cmd_create_without_extract_leaves_extract_chunks_none() -> None:
     """`create` without --extract builds a JobConfig with extract_chunks=None."""
     from unittest.mock import MagicMock
