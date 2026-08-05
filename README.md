@@ -96,6 +96,31 @@ npm install
 npm run tauri dev
 ```
 
+## Probalo en un minuto
+
+El repo trae subtítulos de muestra en `samples/`, así que no hace falta conseguir un libro para ver el motor funcionando. Cada archivo `-en` viene con su `-es`: la traducción de referencia, para comparar contra la que genere tu modelo.
+
+Necesitás la clave del proveedor que elijas en el entorno (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY` u `OPENAI_API_KEY`), o ningún key si usás Ollama local.
+
+```bash
+# 1. Crear el trabajo — imprime el job id. No traduce ni gasta nada todavía.
+python -m borgesica create samples/short-en.srt --model deepseek-v4-flash
+
+# 2. Ver el costo ANTES de pagarlo, como rango (piso y techo).
+python -m borgesica estimate <job_id>
+
+# 3. Traducir.
+python -m borgesica run <job_id> --out mi-traduccion.srt
+```
+
+Compará `mi-traduccion.srt` contra `samples/short-es.srt`.
+
+Para un libro entero, `--extract N` y `--from M` traducen solo una ventana de capítulos: sirve para comparar modelos o evaluar la calidad sin pagar la obra completa.
+
+```bash
+python -m borgesica create libro.epub --model deepseek-v4-flash --extract 20 --from 380
+```
+
 ## Arquitectura
 
 Motor primero, UI después. El núcleo es una arquitectura hexagonal: el dominio (chunking, glosario, resumen rodante, orquestación, costos) no conoce ningún proveedor ni formato concreto — todo entra y sale por puertos (`DocumentReader`, `DocumentWriter`, `TranslationProvider`, `Checkpoint`) con adaptadores intercambiables. La API pública es `TranslatorEngine`. La CLI, la API HTTP y la app de escritorio son tres formas distintas de llegar al mismo motor.
