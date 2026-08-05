@@ -249,12 +249,12 @@ class AnthropicProvider:
         caller relies on.
 
         Callers needing an exact count near a decision boundary must not assume
-        one: ContextManager compares this against the 1024-token Anthropic cache
+        one: CostEstimator compares this against the 1024-token Anthropic cache
         threshold, and for the EPUB static block the heuristic lands close
-        enough to flip that comparison. That flag (SystemPrompt.cached) is
-        currently computed but never consumed — nothing sets cache_control — so
-        the approximation costs nothing today. Wiring prompt caching up will
-        need a sharper measurement than this.
+        enough to flip that comparison. That only affects the informational
+        `cached` field on CostEstimate — no adapter applies prompt caching, so
+        nothing behavioural rides on it today. Wiring caching up will need a
+        sharper measurement than this.
         """
         return max(0, round(len(text.split()) * 1.3))
 

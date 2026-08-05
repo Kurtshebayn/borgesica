@@ -9,13 +9,15 @@ Design (M1-6):
   - Multiplies by 3 if quality_mode="reflective" (translate + critique + revise).
   - Computes USD from provider.price(model).
   - Sets within_budget per config.budget_usd.
-  - cached=False (cache hint lives in SystemPrompt, not in the estimate by default).
+  - Sets cached=True when the static block clears Anthropic's 1024-token
+    prompt-cache minimum (requires a context_manager; False without one).
 
 NOTE: Prompt cache-write cost is NOT included in the estimate.
 Cache writes are one-time amortized costs; omitting them keeps estimates
 conservative and predictable for the user. The cached field on CostEstimate
-signals whether the static block qualifies for caching — the adapter decides
-whether to apply it and what discount to apply at runtime.
+reports whether the static block QUALIFIES for caching; no adapter applies
+caching today, so it is informational only — `estimate` surfaces it to the
+user and the HTTP schema carries it.
 """
 from __future__ import annotations
 
@@ -122,8 +124,8 @@ class CostEstimator:
 
         Returns:
             CostEstimate with input_tokens, output_tokens, usd, model,
-            cached (always False — cache hint is in SystemPrompt, not here),
-            and within_budget.
+            cached (whether the static block qualifies for prompt caching —
+            informational; no adapter applies it), and within_budget.
 
         NOTE: Prompt cache-write cost is NOT included. See module docstring.
         """

@@ -302,76 +302,57 @@ def test_system_prompt_first_chunk_no_exception():
 
 
 # ---------------------------------------------------------------------------
-# Test 8 — static block ≥ 1024 tokens → cached=True
+# SystemPrompt.cached removed — it was computed and never consumed
+#
+# No adapter ever read the hint: AnthropicProvider.translate passes `system`
+# through as a plain string and nothing anywhere sets cache_control. Computing
+# it cost a count_tokens call on every chunk to produce a boolean no caller
+# looked at. CostEstimate.cached is a separate thing and stays: it is surfaced
+# to the user by `estimate` and by the HTTP schema.
 # ---------------------------------------------------------------------------
 
 
-def test_cached_true_when_static_block_large_enough():
-    """When static block ≥ 1024 tokens, SystemPrompt.cached must be True."""
-    from borgesica.domain.context import ContextManager
-
-    # Use a provider that counts tokens naively (word count)
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
-    config = make_config()
-    glossary = Glossary()
-    summary = RollingSummary()
-
-    sp = cm.build_system_prompt(config, glossary, summary)
-
-    # Measure the static block token count with the fake provider
-    static_tokens = provider.count_tokens(cm.get_static_block(config), "")
-
-    if static_tokens >= 1024:
-        assert sp.cached is True
-    else:
-        # The test verifies the LOGIC: if we artificially force a large static block
-        # by patching, cached becomes True. We test the boundary rule here.
-        # Since our static block may be < 1024 in the fake, test that cached=False
-        assert sp.cached is False
-
-
-# ---------------------------------------------------------------------------
-# Test 9 — static block < 1024 tokens → cached=False
-# ---------------------------------------------------------------------------
-
-
-def test_cached_false_when_static_block_too_small():
-    """When static block < 1024 tokens (by fake provider word count), cached=False."""
-    from borgesica.domain.context import ContextManager
-
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
-    config = make_config()
-    glossary = Glossary()
-    summary = RollingSummary()
-
-    sp = cm.build_system_prompt(config, glossary, summary)
-    static_tokens = provider.count_tokens(cm.get_static_block(config), "")
-
-    # The FakeTranslationProvider counts words. Our static block will be < 1024 words.
-    # So cached must be False.
-    assert static_tokens < 1024 or sp.cached is True  # either the block is small → False, or it's big → True
-
-
-# ---------------------------------------------------------------------------
-# Test 10 — SystemPrompt is a proper dataclass/model with text and cached fields
-# ---------------------------------------------------------------------------
-
-
-def test_system_prompt_has_text_and_cached_fields():
-    """SystemPrompt must expose .text (str) and .cached (bool)."""
+def test_system_prompt_exposes_text_only():
+    """SystemPrompt carries the prompt text and nothing else."""
     from borgesica.domain.context import ContextManager, SystemPrompt
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
-    config = make_config()
+    cm = ContextManager(provider=FakeTranslationProvider())
 
-    sp = cm.build_system_prompt(config, Glossary(), RollingSummary())
+    sp = cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
 
     assert isinstance(sp, SystemPrompt)
     assert isinstance(sp.text, str)
-    assert isinstance(sp.cached, bool)
+    assert not hasattr(sp, "cached")
+
+
+def test_build_system_prompt_counts_no_tokens():
+    """Assembling the prompt does no token counting — nothing needed it."""
+    from borgesica.domain.context import ContextManager
+
+    class _CountingProvider(FakeTranslationProvider):
+        counts: int = 0
+
+        def count_tokens(self, text: str, model: str) -> int:
+            type(self).counts += 1
+            return len(text.split())
+
+    _CountingProvider.counts = 0
+    cm = ContextManager(provider=_CountingProvider())
+
+    cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
+
+    assert _CountingProvider.counts == 0
+
+
+def test_cost_estimate_still_reports_cached():
+    """The user-facing hint survives: `estimate` and the HTTP schema expose it."""
+    from borgesica.domain.models import CostEstimate
+
+    estimate = CostEstimate(
+        input_tokens=1, output_tokens=1, usd=0.0, model="m", cached=True
+    )
+
+    assert estimate.cached is True
 
 
 # ---------------------------------------------------------------------------

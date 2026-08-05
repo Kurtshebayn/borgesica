@@ -6,10 +6,10 @@ No I/O, no adapter imports.
 Design (M1-5):
   build_system_prompt(config, glossary, summary) -> SystemPrompt
     SystemPrompt.text  = static_block + dynamic_block
-    SystemPrompt.cached = True iff provider.count_tokens(static_block) >= 1024
 
-The static block is cacheable (Anthropic prompt-caching boundary).
-The dynamic block appends glossary + rolling summary (changes per chunk).
+The static block is the natural prompt-caching boundary (it is identical for
+every chunk of a job), though no adapter applies caching today. The dynamic
+block appends glossary + rolling summary, which change per chunk.
 """
 from __future__ import annotations
 
@@ -29,13 +29,16 @@ class SystemPrompt:
 
     Attributes:
         text: Full system prompt string (static + dynamic).
-        cached: True iff the static block meets the provider's minimum cacheable
-                size (≥ 1024 tokens by Anthropic convention). Adapters honor or
-                ignore this hint; no exception is raised if they ignore it.
+
+    Previously also carried a ``cached`` hint — True when the static block met
+    Anthropic's 1024-token prompt-cache minimum. No adapter ever read it
+    (``translate`` takes ``system`` as a plain string and nothing sets
+    ``cache_control``), so computing it spent a ``count_tokens`` call per chunk
+    on a boolean nobody looked at. ``CostEstimate.cached`` is a different field
+    and still exists: that one is shown to the user by ``estimate``.
     """
 
     text: str
-    cached: bool
 
 
 # ---------------------------------------------------------------------------
@@ -219,8 +222,6 @@ reinterpretation."""
 # ContextManager
 # ---------------------------------------------------------------------------
 
-_ANTHROPIC_CACHE_MIN_TOKENS = 1024
-
 
 class ContextManager:
     """Assembles the system prompt for each translation call.
@@ -254,22 +255,17 @@ class ContextManager:
             Translation philosophy (meaning+image, no calques, naturalness)
             Neutral-Spanish rules (all 5, verbatim)
           [DYNAMIC — changes per chunk]
-            [GLOSSARY] rendered table (≤ 300 tokens)
+            [GLOSSARY] rendered table (config.glossary_budget_tokens)
             [SUMMARY] rolling summary from chunk N-1 (≤ 200 tokens)
 
         Returns:
-            SystemPrompt with .text and .cached fields.
+            SystemPrompt carrying the assembled .text.
         """
         static_block = self.get_static_block(config)
         dynamic_block = self._build_dynamic_block(
             glossary, summary, config.glossary_budget_tokens
         )
-        full_text = static_block + "\n\n" + dynamic_block
-
-        token_count = self._provider.count_tokens(static_block, config.model)
-        cached = token_count >= _ANTHROPIC_CACHE_MIN_TOKENS
-
-        return SystemPrompt(text=full_text, cached=cached)
+        return SystemPrompt(text=static_block + "\n\n" + dynamic_block)
 
     def get_static_block(self, config: JobConfig) -> str:
         """Return the cacheable static instruction block.
