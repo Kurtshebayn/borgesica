@@ -38,5 +38,17 @@ Thumbs.db
 *.sqlite3
 /out/
 
+# Spec-driven-development working artifacts. These track HOW a change was
+# built, not what the engine does, and nothing verifies them against the code
+# — the living specs already described prompt caching that was never
+# implemented. Kept locally as a working tool; the README is the published
+# description of the project.
+openspec/
+
+# Source and translated books/subtitles used for real-world testing. These are
+# copyrighted commercial works: a legitimately owned copy carries no right to
+# redistribute it. Small original samples (sample-*.srt) are tracked instead.
+examples/
+
 .atl/
 .claude/
