@@ -49,6 +49,13 @@ _OUTPUT_ENVELOPE_TOKENS = 150
 _REFLECTIVE_PASSES = 3
 _FAST_PASSES = 1
 
+# Anthropic will not cache a prompt prefix below this many tokens. Only the
+# static block is a caching candidate (it is identical for every chunk of a
+# job); the glossary and rolling summary change per chunk. Used solely to fill
+# the informational CostEstimate.cached — no adapter applies prompt caching, so
+# nothing behavioural depends on this number.
+_ANTHROPIC_CACHE_MIN_TOKENS = 1024
+
 # Retry-waste ceiling: the point estimate models the HAPPY PATH (1 billed call
 # per chunk). Real runs pay for structured-output tier fallthrough + malformed
 # retries — each billed call re-sends the full prompt. That waste is provider-
@@ -135,7 +142,7 @@ class CostEstimator:
         if self._context_manager is not None:
             static_block = self._context_manager.get_static_block(config)
             token_count = self._provider.count_tokens(static_block, config.model)
-            cached = token_count >= 1024  # Anthropic prompt-cache minimum
+            cached = token_count >= _ANTHROPIC_CACHE_MIN_TOKENS
 
         pending = [c for c in chunks if c.status != ChunkStatus.DONE]
 
