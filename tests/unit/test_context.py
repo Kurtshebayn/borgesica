@@ -189,6 +189,55 @@ def test_glossary_render_still_truncates_when_budget_is_explicitly_small():
     assert 0 < kept < 300
 
 
+def test_glossary_render_omits_notes():
+    """Notes are for the human reviewing the glossary, not for the prompt.
+
+    Measured on a real 491-entry book glossary: every entry carried a note,
+    and the notes were 78% of the rendered weight (8482 words with them, 1868
+    without). Repeating explanatory prose to the model on all 502 chunks
+    crowded out the term->translation pairs that actually enforce consistency.
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(
+                term="Aaru",
+                translation="Aaru",
+                note="El Campo de Juncos; concepto de más allá en la tradición de las tumbas.",
+            )
+        ]
+    )
+
+    rendered = glossary.render()
+
+    assert "Aaru" in rendered
+    assert "Campo de Juncos" not in rendered
+    assert "más allá" not in rendered
+
+
+def test_glossary_render_default_budget_fits_a_real_book_glossary():
+    """491 note-bearing entries — the real shape — must all reach the prompt.
+
+    The earlier synthetic fixture used 3-word entries and badly overstated
+    coverage: with notes rendered, real entries averaged 17.3 words and only
+    92 of 491 survived at a 1500 budget.
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(
+                term=f"Gleaners{i:03d}",
+                translation=f"Segadores{i:03d}",
+                note="Explicación larga que no debe llegar nunca al prompt del modelo.",
+            )
+            for i in range(491)
+        ]
+    )
+
+    rendered = glossary.render()
+
+    kept = len([ln for ln in rendered.split("\n") if ln.strip()])
+    assert kept == 491, f"only {kept}/491 entries reached the prompt"
+
+
 def test_build_system_prompt_honors_config_glossary_budget():
     """The per-chunk prompt uses config.glossary_budget_tokens, not a constant.
 

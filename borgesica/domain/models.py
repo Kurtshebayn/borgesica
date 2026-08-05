@@ -44,13 +44,19 @@ class SourceType(StrEnum):
 # ---------------------------------------------------------------------------
 
 
-# Glossary prompt budget, in WORDS (see Glossary.render). Sized to fit a full
-# novel's term list: measured at 300 the renderer stopped at ~67 entries, so a
-# 400-term book silently lost 333 of them. The glossary rides in the DYNAMIC
-# (uncached) prompt block, so this is paid per chunk — ~$0.09 extra per book on
-# deepseek-v4-flash, ~$2 on claude-sonnet-5. It is a ceiling, not a floor: a
-# small glossary renders small regardless.
-DEFAULT_GLOSSARY_BUDGET_TOKENS = 1500
+# Glossary prompt budget, in WORDS (see Glossary.render). Sized from a REAL
+# book: a finished 502-chunk run accumulated 491 entries, which render to 1868
+# words once notes are excluded (~3.8 words each). 2500 fits that with room for
+# a larger glossary. At 300 the renderer stopped at 18 of those 491 entries,
+# which is how a term at alphabetical position 153 became invisible to the
+# model in every chunk.
+#
+# The glossary rides in the DYNAMIC (uncached) prompt block, so it is paid on
+# every call: ~2500 words ≈ 3.3k tokens × 502 chunks ≈ $0.23 per book on
+# deepseek-v4-flash, ~$5 on claude-sonnet-5. Tune JobConfig.
+# glossary_budget_tokens down on expensive providers. It is a ceiling, not a
+# floor: a small glossary renders small regardless.
+DEFAULT_GLOSSARY_BUDGET_TOKENS = 2500
 
 
 class GlossaryEntry(BaseModel):
@@ -83,9 +89,14 @@ class Glossary(BaseModel):
         unlocked = [e for e in self.entries if not e.locked]
 
         def entry_line(e: GlossaryEntry, mark: str = "") -> str:
+            # `note` is deliberately NOT rendered. It is explanatory prose for
+            # the human reviewing the glossary; the model only needs the
+            # term → translation pair to stay consistent. On a real 491-entry
+            # book glossary every entry carried one, and the notes were 78% of
+            # the rendered weight (8482 words with them, 1868 without) — they
+            # crowded out the very mappings the glossary exists to enforce.
             suffix = f" [LOCKED]{mark}" if e.locked else mark
-            note_part = f" ({e.note})" if e.note else ""
-            return f"  {e.term} → {e.translation}{note_part}{suffix}"
+            return f"  {e.term} → {e.translation}{suffix}"
 
         lines: list[str] = []
         used_tokens = 0
