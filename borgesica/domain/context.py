@@ -16,7 +16,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from borgesica.domain.models import Glossary, JobConfig, RollingSummary, SourceType
-from borgesica.domain.ports import TranslationProvider  # noqa: I001
 
 # ---------------------------------------------------------------------------
 # Output model
@@ -226,16 +225,13 @@ reinterpretation."""
 class ContextManager:
     """Assembles the system prompt for each translation call.
 
-    Pure domain — no I/O, no adapter imports.  The provider is injected
-    only for its count_tokens capability (token budget calculation).
-
-    Args:
-        provider: A TranslationProvider used solely for count_tokens().
-                  No translate() calls are made here.
+    Pure domain — no I/O, no adapter imports, and no collaborators at all:
+    prompt assembly is string concatenation over the config, glossary and
+    rolling summary. It used to take a TranslationProvider, but only ever for
+    the count_tokens call behind the `cached` hint that nothing consumed; with
+    that gone, "assembling a prompt makes no provider call" is guaranteed by
+    the type rather than by convention.
     """
-
-    def __init__(self, provider: "TranslationProvider") -> None:  # type: ignore[type-arg]
-        self._provider = provider
 
     # ------------------------------------------------------------------
     # Public interface

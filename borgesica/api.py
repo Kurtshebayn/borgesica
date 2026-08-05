@@ -79,7 +79,7 @@ class TranslatorEngine:
         self._provider_name = provider_name
 
         # Domain services (no adapter deps)
-        self._ctx = ContextManager(provider=provider)
+        self._ctx = ContextManager()
         self._cost_est = CostEstimator(provider=provider, context_manager=self._ctx)
 
         # Per-job cancel flags: {job_id: threading.Event}

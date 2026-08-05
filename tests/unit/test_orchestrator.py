@@ -91,7 +91,7 @@ def make_orchestrator(
         provider = FakeTranslationProvider()
     if store is None:
         store = InMemoryCheckpointStore()
-    ctx = ContextManager(provider)
+    ctx = ContextManager()
     cost_est = CostEstimator(provider)
     orch = TranslationOrchestrator(
         provider=provider,
@@ -2859,7 +2859,7 @@ def test_orchestrator_accepts_provider_name_default_unknown():
     #6) defaulting to 'unknown' so existing call sites are unaffected."""
     provider = FakeTranslationProvider()
     store = InMemoryCheckpointStore()
-    ctx = ContextManager(provider)
+    ctx = ContextManager()
     cost_est = CostEstimator(provider)
     orch = TranslationOrchestrator(
         provider=provider,
@@ -2874,7 +2874,7 @@ def test_orchestrator_accepts_provider_name_explicit_value():
     """Triangulation: explicit provider_name is stored verbatim."""
     provider = FakeTranslationProvider()
     store = InMemoryCheckpointStore()
-    ctx = ContextManager(provider)
+    ctx = ContextManager()
     cost_est = CostEstimator(provider)
     orch = TranslationOrchestrator(
         provider=provider,

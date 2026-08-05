@@ -12,7 +12,6 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.fakes import FakeTranslationProvider
 from borgesica.domain.models import (
     Glossary,
     GlossaryEntry,
@@ -37,8 +36,7 @@ def test_system_prompt_contains_all_neutral_spanish_constraints():
     """Static block must contain all 5 neutral-Spanish rules (substring detectable)."""
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config(target_lang="es-neutral")
     glossary = Glossary()
     summary = RollingSummary()
@@ -65,8 +63,7 @@ def test_system_prompt_contains_translation_philosophy():
     """Static block must include meaning+image philosophy and anti-calque instruction."""
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config()
     glossary = Glossary()
     summary = RollingSummary()
@@ -246,7 +243,7 @@ def test_build_system_prompt_honors_config_glossary_budget():
     """
     from borgesica.domain.context import ContextManager
 
-    manager = ContextManager(FakeTranslationProvider())
+    manager = ContextManager()
     glossary = _novel_glossary(300)
     summary = RollingSummary()
 
@@ -270,8 +267,7 @@ def test_system_prompt_includes_prior_rolling_summary():
     """Summary from chunk N-1 must be detectable in chunk N's system prompt."""
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config()
     glossary = Glossary()
     summary = RollingSummary(text="Context: detective story, noir tone.", chunk_index=0)
@@ -289,8 +285,7 @@ def test_system_prompt_first_chunk_no_exception():
     """First chunk has empty summary (chunk_index=-1) → no exception, empty or placeholder."""
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config()
     glossary = Glossary()
     summary = RollingSummary()  # default: text="", chunk_index=-1
@@ -316,7 +311,7 @@ def test_system_prompt_exposes_text_only():
     """SystemPrompt carries the prompt text and nothing else."""
     from borgesica.domain.context import ContextManager, SystemPrompt
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
 
     sp = cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
 
@@ -325,23 +320,21 @@ def test_system_prompt_exposes_text_only():
     assert not hasattr(sp, "cached")
 
 
-def test_build_system_prompt_counts_no_tokens():
-    """Assembling the prompt does no token counting — nothing needed it."""
+def test_context_manager_needs_no_provider():
+    """Prompt assembly is pure string work — it holds no provider.
+
+    The provider existed solely for the count_tokens call behind the deleted
+    `cached` hint. Dropping the dependency makes "assembling a prompt costs
+    nothing" a property of the type rather than something a test must guard.
+    """
     from borgesica.domain.context import ContextManager
 
-    class _CountingProvider(FakeTranslationProvider):
-        counts: int = 0
+    cm = ContextManager()
 
-        def count_tokens(self, text: str, model: str) -> int:
-            type(self).counts += 1
-            return len(text.split())
+    sp = cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
 
-    _CountingProvider.counts = 0
-    cm = ContextManager(provider=_CountingProvider())
-
-    cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
-
-    assert _CountingProvider.counts == 0
+    assert sp.text
+    assert not hasattr(cm, "_provider")
 
 
 def test_cost_estimate_still_reports_cached():
@@ -368,8 +361,7 @@ def test_system_prompt_contains_tag_preservation_instruction():
     """
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config()
     glossary = Glossary()
     summary = RollingSummary()
@@ -401,7 +393,7 @@ def test_srt_static_block_describes_translations_array():
     the 'translations' array, one string per segment, no merging/splitting."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     static = cm.get_static_block(make_config(source_type=SourceType.SRT))
 
     assert '"translations"' in static
@@ -418,7 +410,7 @@ def test_srt_static_block_teaches_continuous_speech_coherence():
     rendered as an unrelated imperative)."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     static = cm.get_static_block(make_config(source_type=SourceType.SRT))
 
     assert "continuous speech" in static.lower()
@@ -437,7 +429,7 @@ def test_srt_static_block_has_split_sentence_few_shot_example():
     valid held-out test of generalization."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     static = cm.get_static_block(make_config(source_type=SourceType.SRT))
 
     assert "watch for her birthday" in static
@@ -452,7 +444,7 @@ def test_prose_static_block_keeps_legacy_translation_contract():
     NOT mention the translations array."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     static = cm.get_static_block(make_config(source_type=SourceType.EPUB))
 
     assert '"translation"' in static
@@ -464,7 +456,7 @@ def test_srt_static_block_still_cacheable_and_stable():
     two calls with the same config return the identical string."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     config = make_config(source_type=SourceType.SRT)
 
     assert cm.get_static_block(config) == cm.get_static_block(config)
