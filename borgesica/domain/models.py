@@ -44,6 +44,21 @@ class SourceType(StrEnum):
 # ---------------------------------------------------------------------------
 
 
+# Glossary prompt budget, in WORDS (see Glossary.render). Sized from a REAL
+# book: a finished 502-chunk run accumulated 491 entries, which render to 1868
+# words once notes are excluded (~3.8 words each). 2500 fits that with room for
+# a larger glossary. At 300 the renderer stopped at 18 of those 491 entries,
+# which is how a term at alphabetical position 153 became invisible to the
+# model in every chunk.
+#
+# The glossary rides in the DYNAMIC (uncached) prompt block, so it is paid on
+# every call: ~2500 words ≈ 3.3k tokens × 502 chunks ≈ $0.23 per book on
+# deepseek-v4-flash, ~$5 on claude-sonnet-5. Tune JobConfig.
+# glossary_budget_tokens down on expensive providers. It is a ceiling, not a
+# floor: a small glossary renders small regardless.
+DEFAULT_GLOSSARY_BUDGET_TOKENS = 2500
+
+
 class GlossaryEntry(BaseModel):
     term: str
     translation: str
@@ -54,19 +69,34 @@ class GlossaryEntry(BaseModel):
 class Glossary(BaseModel):
     entries: list[GlossaryEntry] = Field(default_factory=list)
 
-    def render(self, budget_tokens: int = 300) -> str:
+    def render(self, budget_tokens: int = DEFAULT_GLOSSARY_BUDGET_TOKENS) -> str:
         """Return a compact table of entries for prompt injection.
 
-        Locked entries appear first.  Unlocked entries are trimmed once the
-        estimated token budget is exhausted (token ~= word count).
+        Locked entries appear first, and are ALWAYS included in full — a locked
+        term is one the user explicitly pinned, so dropping it would defeat the
+        purpose of locking. Unlocked entries are trimmed once the budget is
+        exhausted.
+
+        The budget is measured in WORDS (``len(line.split())``), which
+        under-counts real tokens by roughly 1.7x for accented Spanish plus the
+        arrow separator. The default is expressed in those same units and sized
+        so that a full novel's glossary reaches the prompt intact; at 300 the
+        renderer capped out near 67 entries no matter how large the glossary
+        grew, and everything past that was invisible to the model in every
+        chunk.
         """
         locked = [e for e in self.entries if e.locked]
         unlocked = [e for e in self.entries if not e.locked]
 
         def entry_line(e: GlossaryEntry, mark: str = "") -> str:
+            # `note` is deliberately NOT rendered. It is explanatory prose for
+            # the human reviewing the glossary; the model only needs the
+            # term → translation pair to stay consistent. On a real 491-entry
+            # book glossary every entry carried one, and the notes were 78% of
+            # the rendered weight (8482 words with them, 1868 without) — they
+            # crowded out the very mappings the glossary exists to enforce.
             suffix = f" [LOCKED]{mark}" if e.locked else mark
-            note_part = f" ({e.note})" if e.note else ""
-            return f"  {e.term} → {e.translation}{note_part}{suffix}"
+            return f"  {e.term} → {e.translation}{suffix}"
 
         lines: list[str] = []
         used_tokens = 0
@@ -261,6 +291,24 @@ class JobConfig(BaseModel):
     # DONE. When False (--strict), the prior contract holds: FAILED chunk pauses
     # the job immediately.
     continue_on_error: bool = True
+    # Extract mode: keep only the first N chunks at create time, for cheap model
+    # comparison and translation-quality iteration without paying for a full book.
+    # None (default) = translate everything. Truncation happens BEFORE glossary
+    # seeding, so the job simply IS the extract — estimate, run, and writer need
+    # no special-casing. Values above the chunk total clamp to the total.
+    extract_chunks: int | None = Field(default=None, ge=1)
+    # Where the extract window starts. Defects tend to surface deep into a long
+    # book, so an extract pinned to the opening cannot reproduce them. Combined:
+    # chunks[extract_offset : extract_offset + extract_chunks]. With no
+    # extract_chunks, the window runs to the end. Extracted chunks KEEP their
+    # original indices, so the job records where in the book it came from.
+    extract_offset: int = Field(default=0, ge=0)
+    # Word budget for the glossary block of the per-chunk system prompt. Tunable
+    # so expensive providers can trade glossary coverage against cost; see
+    # DEFAULT_GLOSSARY_BUDGET_TOKENS for why the default is what it is.
+    glossary_budget_tokens: int = Field(
+        default=DEFAULT_GLOSSARY_BUDGET_TOKENS, ge=1
+    )
 
 
 class Job(BaseModel):

@@ -79,7 +79,7 @@ class TranslatorEngine:
         self._provider_name = provider_name
 
         # Domain services (no adapter deps)
-        self._ctx = ContextManager(provider=provider)
+        self._ctx = ContextManager()
         self._cost_est = CostEstimator(provider=provider, context_manager=self._ctx)
 
         # Per-job cancel flags: {job_id: threading.Event}
@@ -122,6 +122,27 @@ class TranslatorEngine:
         else:
             # SRT: cue-batch chunker (meta carries cue_batches + line_length)
             chunks = SrtChunker.chunk(cues, config)
+
+        # 2b. Extract mode: keep only the requested window of chunks. Done here
+        # — before glossary seeding — so the extract is the whole job: the
+        # glossary is seeded from the window alone (that is the cost saving),
+        # and estimate_cost / run_job / the writer see a normal, complete job.
+        # Chunks keep their ORIGINAL indices: save_chunk is keyed by
+        # (job_id, chunk.index) and load_chunks orders by it, so nothing needs a
+        # 0-based run, and the job records where in the book it came from.
+        if config.extract_offset or config.extract_chunks is not None:
+            if config.extract_offset >= len(chunks):
+                raise ValueError(
+                    f"extract offset {config.extract_offset} is past the last "
+                    f"chunk (source has {len(chunks)})"
+                )
+            start = config.extract_offset
+            end = (
+                start + config.extract_chunks
+                if config.extract_chunks is not None
+                else None
+            )
+            chunks = chunks[start:end]
 
         # 3. Seed glossary (no translation for "none" strategy)
         glossary = self._extractor.extract(

@@ -571,6 +571,59 @@ class TestSegmentedOutput:
 
 
 # ---------------------------------------------------------------------------
+# A3 — count_tokens must not touch the network
+#
+# chunk_prose calls provider.count_tokens once per prose node, so a network
+# round-trip per node made `create` unusable on a real book: a 502-node EPUB
+# hung for 15+ minutes before a single word was translated. The port documents
+# count_tokens as "an approximate token count", and every other adapter already
+# satisfies it locally with the same word-count heuristic.
+# ---------------------------------------------------------------------------
+
+
+class TestCountTokensIsLocal:
+    def test_count_tokens_makes_no_api_call(self):
+        """The token-counting endpoint must never be hit."""
+        client = MagicMock()
+        client.messages.count_tokens = MagicMock(
+            return_value=MagicMock(input_tokens=50)
+        )
+        provider = AnthropicProvider(client=client)
+
+        provider.count_tokens("one two three four five", "claude-sonnet-5")
+
+        client.messages.count_tokens.assert_not_called()
+
+    def test_count_tokens_uses_the_word_count_heuristic(self):
+        """Same heuristic the other adapters use: words x 1.3."""
+        provider = AnthropicProvider(client=MagicMock())
+
+        assert provider.count_tokens("one two three four five", "claude-sonnet-5") == round(
+            5 * 1.3
+        )
+
+    def test_count_tokens_of_empty_text_is_zero(self):
+        """No words means no tokens — never a negative or a crash."""
+        provider = AnthropicProvider(client=MagicMock())
+
+        assert provider.count_tokens("", "claude-sonnet-5") == 0
+        assert provider.count_tokens("   \n  ", "claude-sonnet-5") == 0
+
+    def test_chunking_a_many_node_document_makes_no_api_calls(self):
+        """The regression that mattered: 502 nodes must cost 0 round-trips."""
+        client = MagicMock()
+        client.messages.count_tokens = MagicMock(
+            return_value=MagicMock(input_tokens=50)
+        )
+        provider = AnthropicProvider(client=client)
+
+        for _ in range(502):
+            provider.count_tokens("A paragraph of prose text.", "claude-sonnet-5")
+
+        assert client.messages.count_tokens.call_count == 0
+
+
+# ---------------------------------------------------------------------------
 # Test 9: Integration test — real API call (SKIPPED if no API key)
 # ---------------------------------------------------------------------------
 

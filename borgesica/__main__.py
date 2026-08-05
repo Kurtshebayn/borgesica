@@ -11,11 +11,17 @@ Usage:
 Subcommands:
     create  <source_file> --model <model> [--provider anthropic|deepseek|openai|ollama]
              [--chunk-size N] [--budget USD] [--quality-mode fast|reflective] [--strict]
+             [--extract N] [--from M]
              (source format auto-detected from .srt/.epub/.pdf extension)
              By default (no --strict), a chunk that exhausts all translation
              attempts is skipped (FAILED) and the run continues; the job still
              finishes DONE. Pass --strict to restore the pre-continue-on-error
              contract: the job PAUSES immediately on the first FAILED chunk.
+             --extract N keeps only N chunks, for comparing models or iterating
+             on translation quality without paying for a full book. --from M
+             starts that window at chunk M instead of the beginning, to reach
+             defects that only surface deep into a long book. Extracted chunks
+             keep their original indices.
     estimate <job_id>
     run     <job_id> [--out <path>] [--provider ...]
              Prints a skip-summary line if any chunks ended FAILED.
@@ -344,8 +350,16 @@ def _cmd_create(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         prose_segmentation=(
             "paragraph" if getattr(args, "per_paragraph", False) else "batch"
         ),
+        extract_chunks=getattr(args, "extract_chunks", None),
+        extract_offset=getattr(args, "extract_offset", 0),
     )
-    job = engine.create_job(args.source_file, config)
+    try:
+        job = engine.create_job(args.source_file, config)
+    except ValueError as exc:
+        # e.g. an extract window that starts past the last chunk — a user
+        # mistake, not a crash.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     print(job.id)
     return 0
 
@@ -596,6 +610,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Pause the job on the first FAILED chunk instead of continuing "
             "(restores the pre-continue-on-error contract)."
+        ),
+    )
+    p_create.add_argument(
+        "--extract",
+        type=int,
+        default=None,
+        dest="extract_chunks",
+        metavar="N",
+        help=(
+            "Translate only the first N chunks. For comparing models or "
+            "iterating on translation quality without paying for a full book. "
+            "The glossary is seeded from the extract alone."
+        ),
+    )
+    p_create.add_argument(
+        "--from",
+        type=int,
+        default=0,
+        dest="extract_offset",
+        metavar="M",
+        help=(
+            "Start the extract at chunk M instead of the beginning. Translation "
+            "defects often surface deep into a long book, where an extract of "
+            "the opening cannot reach them. Extracted chunks keep their "
+            "original indices."
         ),
     )
     p_create.add_argument(

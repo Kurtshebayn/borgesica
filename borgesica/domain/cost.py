@@ -9,13 +9,15 @@ Design (M1-6):
   - Multiplies by 3 if quality_mode="reflective" (translate + critique + revise).
   - Computes USD from provider.price(model).
   - Sets within_budget per config.budget_usd.
-  - cached=False (cache hint lives in SystemPrompt, not in the estimate by default).
+  - Sets cached=True when the static block clears Anthropic's 1024-token
+    prompt-cache minimum (requires a context_manager; False without one).
 
 NOTE: Prompt cache-write cost is NOT included in the estimate.
 Cache writes are one-time amortized costs; omitting them keeps estimates
 conservative and predictable for the user. The cached field on CostEstimate
-signals whether the static block qualifies for caching — the adapter decides
-whether to apply it and what discount to apply at runtime.
+reports whether the static block QUALIFIES for caching; no adapter applies
+caching today, so it is informational only — `estimate` surfaces it to the
+user and the HTTP schema carries it.
 """
 from __future__ import annotations
 
@@ -46,6 +48,13 @@ _OUTPUT_ENVELOPE_TOKENS = 150
 # reflective mode runs 3 passes: translate (draft) + critique + revise
 _REFLECTIVE_PASSES = 3
 _FAST_PASSES = 1
+
+# Anthropic will not cache a prompt prefix below this many tokens. Only the
+# static block is a caching candidate (it is identical for every chunk of a
+# job); the glossary and rolling summary change per chunk. Used solely to fill
+# the informational CostEstimate.cached — no adapter applies prompt caching, so
+# nothing behavioural depends on this number.
+_ANTHROPIC_CACHE_MIN_TOKENS = 1024
 
 # Retry-waste ceiling: the point estimate models the HAPPY PATH (1 billed call
 # per chunk). Real runs pay for structured-output tier fallthrough + malformed
@@ -122,8 +131,8 @@ class CostEstimator:
 
         Returns:
             CostEstimate with input_tokens, output_tokens, usd, model,
-            cached (always False — cache hint is in SystemPrompt, not here),
-            and within_budget.
+            cached (whether the static block qualifies for prompt caching —
+            informational; no adapter applies it), and within_budget.
 
         NOTE: Prompt cache-write cost is NOT included. See module docstring.
         """
@@ -133,7 +142,7 @@ class CostEstimator:
         if self._context_manager is not None:
             static_block = self._context_manager.get_static_block(config)
             token_count = self._provider.count_tokens(static_block, config.model)
-            cached = token_count >= 1024  # Anthropic prompt-cache minimum
+            cached = token_count >= _ANTHROPIC_CACHE_MIN_TOKENS
 
         pending = [c for c in chunks if c.status != ChunkStatus.DONE]
 

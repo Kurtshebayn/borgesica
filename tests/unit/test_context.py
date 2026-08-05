@@ -12,7 +12,6 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.fakes import FakeTranslationProvider
 from borgesica.domain.models import (
     Glossary,
     GlossaryEntry,
@@ -37,8 +36,7 @@ def test_system_prompt_contains_all_neutral_spanish_constraints():
     """Static block must contain all 5 neutral-Spanish rules (substring detectable)."""
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config(target_lang="es-neutral")
     glossary = Glossary()
     summary = RollingSummary()
@@ -65,8 +63,7 @@ def test_system_prompt_contains_translation_philosophy():
     """Static block must include meaning+image philosophy and anti-calque instruction."""
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config()
     glossary = Glossary()
     summary = RollingSummary()
@@ -149,6 +146,119 @@ def test_glossary_render_all_locked_appear_regardless_of_budget():
 
 
 # ---------------------------------------------------------------------------
+# B1a — Glossary budget: the default must fit a real book's glossary
+#
+# Measured before the fix: at budget_tokens=300 the renderer hit a HARD ceiling
+# at ~67 entries regardless of glossary size, so a 400-term novel delivered 67
+# terms and silently dropped 333. Because the cut is a `break` over insertion
+# order, every term past the ceiling was invisible in EVERY chunk, permanently
+# — which is why term drift showed up late in a long book, not early.
+# ---------------------------------------------------------------------------
+
+
+def _novel_glossary(n: int) -> Glossary:
+    """n realistic proper-noun entries, shaped like extractor output."""
+    return Glossary(
+        entries=[
+            GlossaryEntry(term=f"Gleaners{i:03d}", translation=f"Espigadores{i:03d}")
+            for i in range(n)
+        ]
+    )
+
+
+def test_glossary_render_default_budget_fits_a_full_novel_glossary():
+    """300 unlocked entries must ALL survive render() at its default budget."""
+    glossary = _novel_glossary(300)
+
+    rendered = glossary.render()
+
+    kept = len([ln for ln in rendered.split("\n") if ln.strip()])
+    assert kept == 300, f"only {kept}/300 entries reached the prompt"
+
+
+def test_glossary_render_still_truncates_when_budget_is_explicitly_small():
+    """The budget still works — raising the default did not disable trimming."""
+    glossary = _novel_glossary(300)
+
+    rendered = glossary.render(budget_tokens=30)
+
+    kept = len([ln for ln in rendered.split("\n") if ln.strip()])
+    assert 0 < kept < 300
+
+
+def test_glossary_render_omits_notes():
+    """Notes are for the human reviewing the glossary, not for the prompt.
+
+    Measured on a real 491-entry book glossary: every entry carried a note,
+    and the notes were 78% of the rendered weight (8482 words with them, 1868
+    without). Repeating explanatory prose to the model on all 502 chunks
+    crowded out the term->translation pairs that actually enforce consistency.
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(
+                term="Aaru",
+                translation="Aaru",
+                note="El Campo de Juncos; concepto de más allá en la tradición de las tumbas.",
+            )
+        ]
+    )
+
+    rendered = glossary.render()
+
+    assert "Aaru" in rendered
+    assert "Campo de Juncos" not in rendered
+    assert "más allá" not in rendered
+
+
+def test_glossary_render_default_budget_fits_a_real_book_glossary():
+    """491 note-bearing entries — the real shape — must all reach the prompt.
+
+    The earlier synthetic fixture used 3-word entries and badly overstated
+    coverage: with notes rendered, real entries averaged 17.3 words and only
+    92 of 491 survived at a 1500 budget.
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(
+                term=f"Gleaners{i:03d}",
+                translation=f"Segadores{i:03d}",
+                note="Explicación larga que no debe llegar nunca al prompt del modelo.",
+            )
+            for i in range(491)
+        ]
+    )
+
+    rendered = glossary.render()
+
+    kept = len([ln for ln in rendered.split("\n") if ln.strip()])
+    assert kept == 491, f"only {kept}/491 entries reached the prompt"
+
+
+def test_build_system_prompt_honors_config_glossary_budget():
+    """The per-chunk prompt uses config.glossary_budget_tokens, not a constant.
+
+    Before the fix context.py hardcoded budget_tokens=300, so the budget was
+    unreachable from JobConfig and could not be tuned per job or per provider.
+    """
+    from borgesica.domain.context import ContextManager
+
+    manager = ContextManager()
+    glossary = _novel_glossary(300)
+    summary = RollingSummary()
+
+    generous = manager.build_system_prompt(
+        make_config(glossary_budget_tokens=5000), glossary, summary
+    )
+    stingy = manager.build_system_prompt(
+        make_config(glossary_budget_tokens=30), glossary, summary
+    )
+
+    assert "Gleaners299" in generous.text
+    assert "Gleaners299" not in stingy.text
+
+
+# ---------------------------------------------------------------------------
 # Test 6 — rolling summary from chunk N-1 is in chunk N's system prompt
 # ---------------------------------------------------------------------------
 
@@ -157,8 +267,7 @@ def test_system_prompt_includes_prior_rolling_summary():
     """Summary from chunk N-1 must be detectable in chunk N's system prompt."""
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config()
     glossary = Glossary()
     summary = RollingSummary(text="Context: detective story, noir tone.", chunk_index=0)
@@ -176,8 +285,7 @@ def test_system_prompt_first_chunk_no_exception():
     """First chunk has empty summary (chunk_index=-1) → no exception, empty or placeholder."""
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config()
     glossary = Glossary()
     summary = RollingSummary()  # default: text="", chunk_index=-1
@@ -189,76 +297,55 @@ def test_system_prompt_first_chunk_no_exception():
 
 
 # ---------------------------------------------------------------------------
-# Test 8 — static block ≥ 1024 tokens → cached=True
+# SystemPrompt.cached removed — it was computed and never consumed
+#
+# No adapter ever read the hint: AnthropicProvider.translate passes `system`
+# through as a plain string and nothing anywhere sets cache_control. Computing
+# it cost a count_tokens call on every chunk to produce a boolean no caller
+# looked at. CostEstimate.cached is a separate thing and stays: it is surfaced
+# to the user by `estimate` and by the HTTP schema.
 # ---------------------------------------------------------------------------
 
 
-def test_cached_true_when_static_block_large_enough():
-    """When static block ≥ 1024 tokens, SystemPrompt.cached must be True."""
-    from borgesica.domain.context import ContextManager
-
-    # Use a provider that counts tokens naively (word count)
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
-    config = make_config()
-    glossary = Glossary()
-    summary = RollingSummary()
-
-    sp = cm.build_system_prompt(config, glossary, summary)
-
-    # Measure the static block token count with the fake provider
-    static_tokens = provider.count_tokens(cm.get_static_block(config), "")
-
-    if static_tokens >= 1024:
-        assert sp.cached is True
-    else:
-        # The test verifies the LOGIC: if we artificially force a large static block
-        # by patching, cached becomes True. We test the boundary rule here.
-        # Since our static block may be < 1024 in the fake, test that cached=False
-        assert sp.cached is False
-
-
-# ---------------------------------------------------------------------------
-# Test 9 — static block < 1024 tokens → cached=False
-# ---------------------------------------------------------------------------
-
-
-def test_cached_false_when_static_block_too_small():
-    """When static block < 1024 tokens (by fake provider word count), cached=False."""
-    from borgesica.domain.context import ContextManager
-
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
-    config = make_config()
-    glossary = Glossary()
-    summary = RollingSummary()
-
-    sp = cm.build_system_prompt(config, glossary, summary)
-    static_tokens = provider.count_tokens(cm.get_static_block(config), "")
-
-    # The FakeTranslationProvider counts words. Our static block will be < 1024 words.
-    # So cached must be False.
-    assert static_tokens < 1024 or sp.cached is True  # either the block is small → False, or it's big → True
-
-
-# ---------------------------------------------------------------------------
-# Test 10 — SystemPrompt is a proper dataclass/model with text and cached fields
-# ---------------------------------------------------------------------------
-
-
-def test_system_prompt_has_text_and_cached_fields():
-    """SystemPrompt must expose .text (str) and .cached (bool)."""
+def test_system_prompt_exposes_text_only():
+    """SystemPrompt carries the prompt text and nothing else."""
     from borgesica.domain.context import ContextManager, SystemPrompt
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
-    config = make_config()
+    cm = ContextManager()
 
-    sp = cm.build_system_prompt(config, Glossary(), RollingSummary())
+    sp = cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
 
     assert isinstance(sp, SystemPrompt)
     assert isinstance(sp.text, str)
-    assert isinstance(sp.cached, bool)
+    assert not hasattr(sp, "cached")
+
+
+def test_context_manager_needs_no_provider():
+    """Prompt assembly is pure string work — it holds no provider.
+
+    The provider existed solely for the count_tokens call behind the deleted
+    `cached` hint. Dropping the dependency makes "assembling a prompt costs
+    nothing" a property of the type rather than something a test must guard.
+    """
+    from borgesica.domain.context import ContextManager
+
+    cm = ContextManager()
+
+    sp = cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
+
+    assert sp.text
+    assert not hasattr(cm, "_provider")
+
+
+def test_cost_estimate_still_reports_cached():
+    """The user-facing hint survives: `estimate` and the HTTP schema expose it."""
+    from borgesica.domain.models import CostEstimate
+
+    estimate = CostEstimate(
+        input_tokens=1, output_tokens=1, usd=0.0, model="m", cached=True
+    )
+
+    assert estimate.cached is True
 
 
 # ---------------------------------------------------------------------------
@@ -274,8 +361,7 @@ def test_system_prompt_contains_tag_preservation_instruction():
     """
     from borgesica.domain.context import ContextManager
 
-    provider = FakeTranslationProvider()
-    cm = ContextManager(provider=provider)
+    cm = ContextManager()
     config = make_config()
     glossary = Glossary()
     summary = RollingSummary()
@@ -307,7 +393,7 @@ def test_srt_static_block_describes_translations_array():
     the 'translations' array, one string per segment, no merging/splitting."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     static = cm.get_static_block(make_config(source_type=SourceType.SRT))
 
     assert '"translations"' in static
@@ -324,7 +410,7 @@ def test_srt_static_block_teaches_continuous_speech_coherence():
     rendered as an unrelated imperative)."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     static = cm.get_static_block(make_config(source_type=SourceType.SRT))
 
     assert "continuous speech" in static.lower()
@@ -343,7 +429,7 @@ def test_srt_static_block_has_split_sentence_few_shot_example():
     valid held-out test of generalization."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     static = cm.get_static_block(make_config(source_type=SourceType.SRT))
 
     assert "watch for her birthday" in static
@@ -358,7 +444,7 @@ def test_prose_static_block_keeps_legacy_translation_contract():
     NOT mention the translations array."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     static = cm.get_static_block(make_config(source_type=SourceType.EPUB))
 
     assert '"translation"' in static
@@ -370,7 +456,7 @@ def test_srt_static_block_still_cacheable_and_stable():
     two calls with the same config return the identical string."""
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager(provider=FakeTranslationProvider())
+    cm = ContextManager()
     config = make_config(source_type=SourceType.SRT)
 
     assert cm.get_static_block(config) == cm.get_static_block(config)

@@ -42,7 +42,11 @@ from dataclasses import dataclass, field
 from pydantic import ValidationError
 
 from borgesica.domain.errors import MalformedOutput
-from borgesica.domain.models import Glossary, QualityScore
+from borgesica.domain.models import (
+    DEFAULT_GLOSSARY_BUDGET_TOKENS,
+    Glossary,
+    QualityScore,
+)
 from borgesica.domain.ports import TranslationProvider
 
 # ---------------------------------------------------------------------------
@@ -130,13 +134,14 @@ def _build_judge_user_message(
     source: str,
     translation: str,
     glossary: Glossary,
+    glossary_budget_tokens: int = DEFAULT_GLOSSARY_BUDGET_TOKENS,
 ) -> str:
     """Build the user turn for the judge prompt."""
     parts: list[str] = []
     parts.append(f"[SOURCE (English)]\n{source.strip()}")
     parts.append(f"[TRANSLATION (Spanish)]\n{translation.strip()}")
 
-    glossary_text = glossary.render(budget_tokens=300)
+    glossary_text = glossary.render(budget_tokens=glossary_budget_tokens)
     if glossary_text.strip():
         parts.append(f"[GLOSSARY — locked terms must appear VERBATIM]\n{glossary_text}")
     else:
@@ -176,6 +181,7 @@ class QualityHarness:
         translation: str,
         glossary: Glossary,
         model: str,
+        glossary_budget_tokens: int = DEFAULT_GLOSSARY_BUDGET_TOKENS,
     ) -> QualityScore:
         """Evaluate a translation and return a QualityScore (Tier-2 judge).
 
@@ -187,6 +193,12 @@ class QualityHarness:
             translation: The Spanish translation to evaluate.
             glossary:    The job glossary (locked terms injected into judge prompt).
             model:       The model to use for the judge call.
+            glossary_budget_tokens: Word budget for the glossary block. Must match
+                         the budget the TRANSLATOR ran with (JobConfig.
+                         glossary_budget_tokens) — the judge scores a
+                         glossary_consistency dimension, so a more aggressively
+                         trimmed view here would penalise the model for terms it
+                         was never shown.
 
         Returns:
             A valid QualityScore instance (pure 4-field rubric).
@@ -197,7 +209,9 @@ class QualityHarness:
         """
         # --- Judge call (Tier-2) ---
         system_prompt = self._build_judge_system_prompt(glossary)
-        user_message = _build_judge_user_message(source, translation, glossary)
+        user_message = _build_judge_user_message(
+            source, translation, glossary, glossary_budget_tokens
+        )
 
         result = self._provider.translate(system_prompt, user_message, model)
 

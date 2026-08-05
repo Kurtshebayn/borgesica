@@ -77,6 +77,7 @@ from borgesica.domain.markup import (
     validate_segments,
     validate_tags,
 )
+from borgesica.domain.language import detect_unexpected_script
 from borgesica.domain.prose import has_translatable_prose
 from borgesica.domain.models import (
     Chunk,
@@ -689,7 +690,21 @@ class TranslationOrchestrator:
             # Validate tag counts in the raw translation (tags-in-text path).
             if validate_tags(chunk.source_text, translated_text):
                 if validate_segments(chunk.source_text, translated_text):
-                    return unit, translated_text, total_call_cost, True, None
+                    # Structure can be perfect while the LANGUAGE is wrong: a
+                    # real run shipped one chunk translated into Chinese
+                    # because every check above reasons about shape only.
+                    # Deterministic and local — no extra provider call.
+                    foreign = detect_unexpected_script(
+                        translated_text, config.target_lang
+                    )
+                    if foreign is None:
+                        return unit, translated_text, total_call_cost, True, None
+                    validation_issues.append(
+                        f"attempt {attempt + 1}: output is in {foreign} script, "
+                        f"not {config.target_lang}"
+                    )
+                    best_effort = (unit, translated_text)
+                    continue
                 # Segment-count mismatch (model merged/split "\n\n" paragraphs,
                 # which desynchronizes the writer's positional node mapping):
                 # keep this tag-valid attempt and retry for a compliant one.

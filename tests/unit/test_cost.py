@@ -274,7 +274,7 @@ def test_estimate_includes_per_call_system_prompt_overhead():
     from borgesica.domain.cost import _DYNAMIC_BLOCK_BUDGET_TOKENS, CostEstimator
 
     provider = FakeTranslationProvider()
-    context_manager = ContextManager(provider=provider)
+    context_manager = ContextManager()
     estimator = CostEstimator(provider=provider, context_manager=context_manager)
     config = make_config(quality_mode="fast")
     job = make_job(config, total=3)
@@ -342,7 +342,7 @@ def test_cached_true_when_static_block_meets_min():
     from borgesica.domain.cost import CostEstimator
 
     provider = BigTokenProvider()
-    context_manager = ContextManager(provider=provider)
+    context_manager = ContextManager()
     estimator = CostEstimator(provider=provider, context_manager=context_manager)
 
     config = make_config(quality_mode="fast")
@@ -359,7 +359,7 @@ def test_cached_false_when_static_block_below_min():
     from borgesica.domain.cost import CostEstimator
 
     provider = SmallTokenProvider()
-    context_manager = ContextManager(provider=provider)
+    context_manager = ContextManager()
     estimator = CostEstimator(provider=provider, context_manager=context_manager)
 
     config = make_config(quality_mode="fast")
@@ -467,7 +467,7 @@ def test_estimate_counts_tool_schema_in_per_call_overhead():
     from borgesica.domain.models import translation_tool_schema
 
     provider = FakeTranslationProvider()
-    context_manager = ContextManager(provider=provider)
+    context_manager = ContextManager()
     estimator = CostEstimator(provider=provider, context_manager=context_manager)
     config = make_config(quality_mode="fast")
     job = make_job(config, total=2)

@@ -15,7 +15,7 @@ Test categories:
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Callable
 
@@ -91,7 +91,7 @@ def make_orchestrator(
         provider = FakeTranslationProvider()
     if store is None:
         store = InMemoryCheckpointStore()
-    ctx = ContextManager(provider)
+    ctx = ContextManager()
     cost_est = CostEstimator(provider)
     orch = TranslationOrchestrator(
         provider=provider,
@@ -2859,7 +2859,7 @@ def test_orchestrator_accepts_provider_name_default_unknown():
     #6) defaulting to 'unknown' so existing call sites are unaffected."""
     provider = FakeTranslationProvider()
     store = InMemoryCheckpointStore()
-    ctx = ContextManager(provider)
+    ctx = ContextManager()
     cost_est = CostEstimator(provider)
     orch = TranslationOrchestrator(
         provider=provider,
@@ -2874,7 +2874,7 @@ def test_orchestrator_accepts_provider_name_explicit_value():
     """Triangulation: explicit provider_name is stored verbatim."""
     provider = FakeTranslationProvider()
     store = InMemoryCheckpointStore()
-    ctx = ContextManager(provider)
+    ctx = ContextManager()
     cost_est = CostEstimator(provider)
     orch = TranslationOrchestrator(
         provider=provider,
@@ -3044,3 +3044,88 @@ def test_corpus_store_passing_chunk_validation_errors_none():
     sample = corpus.samples[(job.id, 0)]
     assert sample.passed_validation is True
     assert sample.validation_errors is None
+
+
+# ---------------------------------------------------------------------------
+# A2 — Output-language guard
+#
+# Production incident: one chunk of a 502-chunk book came back in Chinese and
+# shipped. It was structurally perfect, and every validator in the loop checks
+# structure only, so nothing noticed.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ScriptedProvider(FakeTranslationProvider):
+    """Returns a scripted sequence of translations, one per call."""
+
+    scripted: list[str] = field(default_factory=list)
+
+    def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+        index = len(self.call_log)
+        self.call_log.append((system, user, model))
+        self.segment_count_log.append(segment_count)
+        text = self.scripted[min(index, len(self.scripted) - 1)]
+        unit = TranslationUnit(
+            translation=text, summary_update="Fake summary.", glossary_additions=[]
+        )
+        return TranslationResult(unit=unit, usage=Usage(input_tokens=1, output_tokens=1))
+
+
+_CHINESE = "这是一个完全用中文写的段落，它本应该是西班牙语的翻译，但是模型换了语言。"
+_SPANISH = "Este es un párrafo correctamente traducido al español neutro."
+
+
+def test_wrong_language_output_is_retried_and_recovers():
+    """A one-off language slip is retried, and a clean retry ends DONE+valid."""
+    provider = _ScriptedProvider(scripted=[_CHINESE, _SPANISH])
+    store = InMemoryCheckpointStore()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.DONE
+    assert saved.translated_text == _SPANISH
+    assert saved.passed_validation is True
+    assert provider.call_count == 2, "the Chinese attempt must have been retried"
+
+
+def test_persistently_wrong_language_is_surfaced_not_shipped_silently():
+    """If every attempt is in the wrong language, the chunk records why."""
+    import json
+
+    provider = _ScriptedProvider(scripted=[_CHINESE])
+    store = InMemoryCheckpointStore()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.passed_validation is False
+    assert saved.validation_errors is not None
+    issues = json.loads(saved.validation_errors)
+    assert any("cjk" in issue.lower() or "script" in issue.lower() for issue in issues)
+
+
+def test_correct_spanish_is_not_retried():
+    """No extra call, no false positive, on ordinary output."""
+    provider = _ScriptedProvider(scripted=[_SPANISH])
+    store = InMemoryCheckpointStore()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=1)
+    chunks = make_chunks(1)
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.DONE
+    assert saved.passed_validation is True
+    assert provider.call_count == 1

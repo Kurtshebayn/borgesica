@@ -238,16 +238,25 @@ class AnthropicProvider:
         raise MalformedOutput(job_id="unknown", chunk_index=-1, usage=wasted) from last_error
 
     def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
-        """Count tokens using the Anthropic token-counting API, with word-count fallback."""
-        try:
-            response = self._client.messages.count_tokens(
-                model=model,
-                messages=[{"role": "user", "content": text}],
-            )
-            return int(response.input_tokens)
-        except Exception:
-            # Fallback: word count × 1.3 approximation
-            return round(len(text.split()) * 1.3)
+        """Approximate token count using a word-count heuristic — never the network.
+
+        This deliberately does NOT call ``client.messages.count_tokens``.
+        chunk_prose calls this once per prose node, so a round-trip per node
+        made `create` unusable on a real book: a 502-node EPUB hung for 15+
+        minutes before translating a single word. The port documents the return
+        value as approximate, and OpenAICompatibleProvider already satisfies it
+        with this same heuristic, so exactness here bought nothing that any
+        caller relies on.
+
+        Callers needing an exact count near a decision boundary must not assume
+        one: CostEstimator compares this against the 1024-token Anthropic cache
+        threshold, and for the EPUB static block the heuristic lands close
+        enough to flip that comparison. That only affects the informational
+        `cached` field on CostEstimate — no adapter applies prompt caching, so
+        nothing behavioural rides on it today. Wiring caching up will need a
+        sharper measurement than this.
+        """
+        return max(0, round(len(text.split()) * 1.3))
 
     def price(self, model: str) -> tuple[float, float]:
         """Return (input_usd_per_mtok, output_usd_per_mtok) for the given model.
