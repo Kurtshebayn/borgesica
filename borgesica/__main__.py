@@ -148,6 +148,31 @@ def _default_provider() -> str:
     return "anthropic"
 
 
+def _announce_inferred_provider(provider: str) -> None:
+    """Name the provider on stderr when nothing explicit selected it.
+
+    Silent auto-detection is a cost trap. _default_provider() scans the keys in a
+    fixed order and takes the first one present, and it cannot tell a key the user
+    exported from one loaded out of a .env. Once several keys are reachable —
+    which a checked-out .env makes easy — anthropic always wins, the most
+    expensive entry in the model table, and nothing in the output said so.
+
+    Stays quiet when BORGESICA_PROVIDER is set, just as main() stays quiet when
+    --provider was passed: both are deliberate choices, and reading them back is
+    noise. The notice is for the one case nobody decided.
+
+    Writes to stderr because estimate/status print JSON on stdout that the desktop
+    app parses over the sidecar; a human-readable line there would break it.
+    """
+    if os.environ.get("BORGESICA_PROVIDER"):
+        return
+    print(
+        f"Using provider '{provider}', auto-detected from the API keys available. "
+        f"Pass --provider, or set BORGESICA_PROVIDER, to choose one explicitly.",
+        file=sys.stderr,
+    )
+
+
 def _require_env(var: str, provider: str) -> str:
     """Return env var *var* or exit(1) with a clear message naming the *provider*."""
     value = os.environ.get(var)
@@ -780,8 +805,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Resolve provider: explicit --provider wins, else auto-detect (env / keys).
+    explicit_provider = getattr(args, "provider", None)
+    provider = explicit_provider or _default_provider()
+    if not explicit_provider:
+        _announce_inferred_provider(provider)
+
     engine = _build_engine(
-        provider=getattr(args, "provider", None) or _default_provider(),
+        provider=provider,
         model=getattr(args, "model", ""),
         key_stdin=getattr(args, "key_stdin", False),
     )
