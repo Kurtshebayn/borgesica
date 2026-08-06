@@ -23,8 +23,11 @@ libros, `serve` para la API HTTP, `openai-compat` para DeepSeek y OpenAI.
 > `pdf-fast` queda deliberadamente fuera de esa línea: PyMuPDF es **AGPL-3.0** y
 > por eso es opt-in explícito. No lo agregues a las dependencias por defecto.
 
-Para las claves de proveedor, copia `.env.example` y lee sus instrucciones —
-borgésica no carga `.env` sola, hay que exportar las variables al entorno.
+Para las claves de proveedor, copia `.env.example` a `.env` y completa solo la
+del proveedor que vayas a usar. La CLI carga ese archivo al arrancar, buscándolo
+desde el directorio en el que corres el comando hacia arriba. Una variable ya
+exportada en el entorno le gana al valor del archivo, así que puedes sobrescribir
+una clave para una corrida puntual sin editar `.env`.
 
 Para la app de escritorio hacen falta además Node.js y el toolchain de Rust:
 
