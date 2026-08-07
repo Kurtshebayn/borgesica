@@ -947,3 +947,53 @@ class TestMaxOutputTokensOverride:
 
         assert fake_client.call_log[0].get("max_tokens") == _MAX_OUTPUT_TOKENS
 
+
+# ---------------------------------------------------------------------------
+# count_tokens calibration (C1 cause 2, measured 2026-08-06).
+#
+# The old heuristic was words x 1.3. Measured against the LIVE DeepSeek
+# tokenizer (usage.prompt_tokens, chat-template overhead subtracted) over real
+# book text, it under-counted EVERY kind of text:
+#
+#   text kind        real tokens/word   heuristic error
+#   English prose          1.384             -6%
+#   Spanish prose          1.710            -24%
+#   static block           1.506            -14%
+#   rendered glossary      2.584            -50%
+#
+# Words are the unstable unit: tokens/word ranged 1.29-2.58 (CV 21.7%) while
+# chars/token held 2.65-4.34 (CV 13.6%). Counting characters and dividing by a
+# measured per-provider constant is both more accurate and more stable.
+# ---------------------------------------------------------------------------
+
+
+class TestCountTokensCalibration:
+    def test_counts_characters_against_the_measured_constant(self):
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=object())
+        text = "x" * 3853
+
+        assert provider.count_tokens(text, "deepseek-v4-flash") == pytest.approx(
+            1000, rel=0.01
+        )
+
+    def test_empty_text_is_zero(self):
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=object())
+        assert provider.count_tokens("", "deepseek-v4-flash") == 0
+
+    def test_accented_spanish_no_longer_under_counts(self):
+        """Spanish prose measured at 1.710 real tokens/word; the old heuristic
+        assumed 1.3 and under-counted it by 24%. The calibrated count must land
+        above the old value for the same text."""
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=object())
+        spanish = (
+            "El resplandor furioso del fuego iluminaba nubes bajas y veloces "
+            "mientras la cacofonía de la batalla se acercaba al muro. "
+        ) * 20
+
+        old_heuristic = round(len(spanish.split()) * 1.3)
+        assert provider.count_tokens(spanish, "deepseek-v4-flash") > old_heuristic
+
+    def test_calibration_constant_is_documented_on_the_class(self):
+        """The constant is per-provider because tokenizers differ measurably;
+        it must be an overridable attribute, not a literal buried in the body."""
+        assert OpenAICompatibleProvider.chars_per_token == pytest.approx(3.853)

@@ -172,6 +172,15 @@ class OpenAICompatibleProvider:
     # unknown kwargs — Ollama's local shim 400s instead of ignoring them.
     reasoning_effort: str | None = "none"
 
+    # Characters per token, MEASURED against the live DeepSeek tokenizer on real
+    # book text (2026-08-06): mean 3.853, CV 13.6% across English prose, Spanish
+    # prose, the static block, and a rendered glossary. Per-provider because
+    # tokenizers differ measurably — Anthropic came in at 3.390 on the same
+    # samples. See count_tokens for the full measurement and its residual.
+    # Subclasses may override; Ollama inherits it, where local-model drift is
+    # inert because Ollama prices at zero.
+    chars_per_token: float = 3.853
+
     def __init__(
         self,
         base_url: str,
@@ -451,13 +460,38 @@ class OpenAICompatibleProvider:
         return _Propagate(server_err_count=server_err_count, last_error=last_error)
 
     def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
-        """Approximate token count using word-count heuristic.
+        """Approximate token count: characters ÷ `chars_per_token`.
 
-        The OpenAI SDK does not expose a token-counting API for arbitrary
-        endpoints. Approximation: word count × 1.3 (same as AnthropicProvider
-        fallback). For cost estimation this is conservative and sufficient.
+        The OpenAI SDK exposes no token-counting API for arbitrary endpoints,
+        so this stays a local heuristic — but a CALIBRATED one.
+
+        It used to be `words × 1.3`, which under-counted every kind of text
+        this project sends. Measured 2026-08-06 against the live DeepSeek
+        tokenizer (usage.prompt_tokens on real book text, chat-template
+        overhead subtracted):
+
+            text kind          real tokens/word   `× 1.3` error
+            English prose            1.384             -6%
+            Spanish prose            1.710            -24%
+            static block             1.506            -14%
+            rendered glossary        2.584            -50%
+
+        Words are the unstable unit. Across those samples tokens/word ranged
+        1.29-2.58 (CV 21.7%) while chars/token held 2.65-4.34 (CV 13.6%), so
+        characters give a better estimate from the same free local data.
+
+        The residual is a known under-count on dense tabular text (the rendered
+        glossary sits near 2.65 chars/token against this 3.853 mean). That is
+        deliberate: this method is a MEASUREMENT primitive and stays as
+        accurate as the evidence allows, while safety margin lives in
+        CostEstimate.usd_high, which exists to absorb exactly this.
         """
-        return max(0, round(len(text.split()) * 1.3))
+        # Whitespace-only text counts as nothing. Character counting would
+        # otherwise bill blank padding, and callers (the orchestrator prose
+        # guard, chunk_prose) rely on blank nodes costing zero.
+        if not text.strip():
+            return 0
+        return max(0, round(len(text) / self.chars_per_token))
 
     def price(self, model: str) -> tuple[float, float]:
         """Return (input_usd_per_mtok, output_usd_per_mtok) for the given model.
