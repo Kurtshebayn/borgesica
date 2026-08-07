@@ -2350,11 +2350,10 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     import json as _json
 
     from borgesica.domain.cost import (
-        _DYNAMIC_BLOCK_BUDGET_TOKENS,
         _OUTPUT_ENVELOPE_TOKENS,
         _waste_factor,
     )
-    from borgesica.domain.models import translation_tool_schema
+    from borgesica.domain.models import Glossary, translation_tool_schema
 
     orch, provider, _ = make_orchestrator()
     config = make_config(quality_mode="fast")
@@ -2368,10 +2367,18 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     schema_tokens = provider.count_tokens(
         _json.dumps(translation_tool_schema(None)), config.model
     )
+    # The dynamic block is MEASURED from the same builder that produces the real
+    # prompt, not restated as a literal (C1: the literal went stale at 500).
+    dynamic_tokens = provider.count_tokens(
+        orch._ctx.build_dynamic_block(
+            Glossary(), RollingSummary(), config.glossary_budget_tokens
+        ),
+        config.model,
+    )
     src_tokens = 2  # "hello world" with the word-count fake
     in_price, out_price = provider.price(config.model)
     base = (
-        (src_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens)
+        (src_tokens + static_tokens + dynamic_tokens + schema_tokens)
         / 1_000_000 * in_price
         + (src_tokens + _OUTPUT_ENVELOPE_TOKENS) / 1_000_000 * out_price
     )
@@ -3129,3 +3136,4 @@ def test_correct_spanish_is_not_retried():
     assert saved.status == ChunkStatus.DONE
     assert saved.passed_validation is True
     assert provider.call_count == 1
+
