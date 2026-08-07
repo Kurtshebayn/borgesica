@@ -309,6 +309,14 @@ class JobConfig(BaseModel):
     glossary_budget_tokens: int = Field(
         default=DEFAULT_GLOSSARY_BUDGET_TOKENS, ge=1
     )
+    # Output-token cap per provider call. None (default) lets the adapter pick
+    # its own. Raise it only for a model whose reasoning trace must fit in the
+    # SAME budget as the answer: reasoning tokens are billed as output and are
+    # drawn from this cap, so a trace larger than the cap truncates the call
+    # before it emits anything (deepseek-v4-flash, measured 2026-08-06, spends
+    # ~20k). Prefer disabling reasoning at the adapter over raising this — a
+    # reasoning run cost ~23x the output tokens and ~100x the wall time.
+    max_output_tokens: int | None = Field(default=None, ge=1)
 
 
 class Job(BaseModel):

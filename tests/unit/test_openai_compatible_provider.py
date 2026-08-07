@@ -868,3 +868,82 @@ class TestSegmentedOutput:
         tier3_user = fake_client.call_log[2]["messages"][1]["content"]
         assert '"minItems": 3' in tier3_user
         assert '"translations"' in tier3_user
+
+
+# ---------------------------------------------------------------------------
+# Reasoning tokens (measured 2026-08-06).
+#
+# deepseek-v4-flash became a reasoning model: it spends ~20k reasoning tokens
+# before emitting anything. At the 8192 output cap every tier returned
+# finish_reason='length' with NO tool_call and NO content, so all three tiers
+# failed identically (~80s each) and every chunk ended in MalformedOutput.
+# Measured: reasoning_effort='none' -> 1.6s, 0 reasoning tokens, correct output.
+# ---------------------------------------------------------------------------
+
+
+class TestReasoningEffort:
+    def test_deepseek_disables_reasoning_by_default(self):
+        """Every tier must send reasoning_effort='none' on an OpenAI-compatible
+        provider, or the output budget is consumed by the reasoning trace."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert fake_client.call_log[0].get("reasoning_effort") == "none", (
+            "reasoning must be disabled by default: a reasoning trace eats the "
+            "whole output budget and the call returns no tool_call at all"
+        )
+
+    def test_reasoning_effort_is_overridable(self):
+        """An explicit reasoning_effort must reach the provider call."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+        provider.reasoning_effort = "minimal"
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert fake_client.call_log[0].get("reasoning_effort") == "minimal"
+
+    def test_reasoning_effort_omitted_when_none(self):
+        """Providers that do not understand the knob must not receive it.
+
+        Ollama subclasses this provider and talks to local models through the
+        OpenAI-compatible shim; an unknown parameter there is a 400, not a
+        no-op.
+        """
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+        provider.reasoning_effort = None
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert "reasoning_effort" not in fake_client.call_log[0]
+
+
+class TestMaxOutputTokensOverride:
+    def test_translate_honors_an_explicit_cap(self):
+        """A per-job output cap must override the module default on every tier."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate(
+                "system", "Hello world", "deepseek-v4-flash", max_output_tokens=32000
+            )
+
+        assert fake_client.call_log[0].get("max_tokens") == 32000
+
+    def test_default_cap_is_unchanged_when_not_given(self):
+        """Omitting the override keeps the historical module constant."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert fake_client.call_log[0].get("max_tokens") == _MAX_OUTPUT_TOKENS
+

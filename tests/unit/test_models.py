@@ -556,3 +556,28 @@ def test_corpus_sample_translated_text_optional() -> None:
         quality_mode="fast",
     )
     assert sample.translated_text is None
+
+
+def test_max_output_tokens_defaults_to_none():
+    """None means 'let the adapter choose', so no existing job changes behavior."""
+    from borgesica.domain.models import JobConfig, SourceType
+
+    config = JobConfig(source_type=SourceType.SRT, model="x")
+    assert config.max_output_tokens is None
+
+
+def test_max_output_tokens_is_configurable():
+    """A job can raise the output cap — e.g. to leave room for a reasoning trace."""
+    from borgesica.domain.models import JobConfig, SourceType
+
+    config = JobConfig(source_type=SourceType.SRT, model="x", max_output_tokens=32000)
+    assert config.max_output_tokens == 32000
+
+
+def test_max_output_tokens_rejects_non_positive():
+    from pydantic import ValidationError
+
+    from borgesica.domain.models import JobConfig, SourceType
+
+    with pytest.raises(ValidationError):
+        JobConfig(source_type=SourceType.SRT, model="x", max_output_tokens=0)

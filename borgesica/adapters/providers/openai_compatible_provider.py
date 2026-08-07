@@ -159,6 +159,19 @@ class OpenAICompatibleProvider:
     # default and are unaffected.
     _completion_tokens_param_name: str = "max_tokens"
 
+    # Reasoning-trace budget requested from the endpoint. MEASURED 2026-08-06:
+    # deepseek-v4-flash became a reasoning model and spends ~20k reasoning
+    # tokens before emitting anything. Reasoning tokens are billed as OUTPUT and
+    # are drawn from the SAME cap as the answer, so at _MAX_OUTPUT_TOKENS every
+    # tier returned finish_reason='length' with no tool_call and no content —
+    # the whole 3-tier chain failed identically on every chunk (~300s wasted per
+    # chunk, zero usable output). With 'none' the same call answers in ~1.6s
+    # with zero reasoning tokens.
+    #
+    # None means "do not send the parameter at all", for endpoints that reject
+    # unknown kwargs — Ollama's local shim 400s instead of ignoring them.
+    reasoning_effort: str | None = "none"
+
     def __init__(
         self,
         base_url: str,
@@ -269,8 +282,30 @@ class OpenAICompatibleProvider:
     # TranslationProvider Protocol
     # ------------------------------------------------------------------
 
+    def _output_kwargs(self, max_output_tokens: int | None = None) -> dict[str, Any]:
+        """Per-call output controls shared by all three tiers.
+
+        Carries the output-length cap under whichever parameter name the
+        endpoint expects, plus the reasoning budget when the endpoint
+        understands it. Built once here so a tier can never silently drop one
+        of the two — dropping the reasoning knob is what made every tier fail.
+        """
+        kwargs: dict[str, Any] = {
+            self._completion_tokens_param_name: (
+                max_output_tokens if max_output_tokens is not None else _MAX_OUTPUT_TOKENS
+            )
+        }
+        if self.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        return kwargs
+
     def translate(
-        self, system: str, user: str, model: str, segment_count: int | None = None
+        self,
+        system: str,
+        user: str,
+        model: str,
+        segment_count: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> TranslationResult:
         """Return a TranslationResult with a validated TranslationUnit and real Usage.
 
@@ -298,7 +333,7 @@ class OpenAICompatibleProvider:
 
         # ---- TIER-1: tool/function calling (with inline 429 retry) ----
         t1 = self._call_with_retry(
-            lambda s, u, m: self._tier1_tool_call(s, u, m, segment_count),
+            lambda s, u, m: self._tier1_tool_call(s, u, m, segment_count, max_output_tokens),
             system, user, model,
             server_err_count_ref=[server_err_count],
             fall_through_on_client_error=True,
@@ -317,7 +352,8 @@ class OpenAICompatibleProvider:
 
         # ---- TIER-2: JSON mode ----
         t2 = self._call_with_retry(
-            self._tier2_json_mode, system, user, model,
+            lambda s, u, m: self._tier2_json_mode(s, u, m, max_output_tokens),
+            system, user, model,
             server_err_count_ref=[server_err_count],
             fall_through_on_client_error=True,
         )
@@ -336,7 +372,9 @@ class OpenAICompatibleProvider:
         # ---- TIER-3: prompt-and-parse fallback (up to MAX_TIER3_RETRIES calls) ----
         for attempt in range(MAX_TIER3_RETRIES):
             t3 = self._call_with_retry(
-                lambda s, u, m: self._tier3_prompt_parse(s, u, m, attempt, segment_count),
+                lambda s, u, m: self._tier3_prompt_parse(
+                    s, u, m, attempt, segment_count, max_output_tokens
+                ),
                 system, user, model,
                 server_err_count_ref=[server_err_count],
             )
@@ -450,7 +488,12 @@ class OpenAICompatibleProvider:
             return Usage()
 
     def _tier1_tool_call(
-        self, system: str, user: str, model: str, segment_count: int | None = None
+        self,
+        system: str,
+        user: str,
+        model: str,
+        segment_count: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> tuple[TranslationUnit | None, Any]:
         """TIER-1: function/tool-calling.
 
@@ -468,7 +511,7 @@ class OpenAICompatibleProvider:
             ],
             tools=_translation_tools(segment_count),
             tool_choice="auto",
-            **{self._completion_tokens_param_name: _MAX_OUTPUT_TOKENS},
+            **self._output_kwargs(max_output_tokens),
         )
         choice = response.choices[0]
         message = choice.message
@@ -490,7 +533,7 @@ class OpenAICompatibleProvider:
         return None, response
 
     def _tier2_json_mode(
-        self, system: str, user: str, model: str
+        self, system: str, user: str, model: str, max_output_tokens: int | None = None
     ) -> tuple[TranslationUnit | None, bool, Any]:
         """TIER-2: JSON mode (response_format={'type': 'json_object'}).
 
@@ -508,7 +551,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             response_format={"type": "json_object"},
-            **{self._completion_tokens_param_name: _MAX_OUTPUT_TOKENS},
+            **self._output_kwargs(max_output_tokens),
         )
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""
@@ -525,6 +568,7 @@ class OpenAICompatibleProvider:
     def _tier3_prompt_parse(
         self, system: str, user: str, model: str, attempt: int,
         segment_count: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> tuple[TranslationUnit | None, Any]:
         """TIER-3: prompt-and-parse fallback.
 
@@ -548,7 +592,7 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user + json_instruction},
             ],
-            **{self._completion_tokens_param_name: _MAX_OUTPUT_TOKENS},
+            **self._output_kwargs(max_output_tokens),
         )
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""

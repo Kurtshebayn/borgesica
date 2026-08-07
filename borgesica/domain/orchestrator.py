@@ -658,6 +658,10 @@ class TranslationOrchestrator:
         segment_kwargs = (
             {} if segment_count is None else {"segment_count": segment_count}
         )
+        # Same **kwargs discipline for the per-job output cap: only jobs that
+        # set one pass it, so providers and fakes that predate it keep working.
+        if config.max_output_tokens is not None:
+            segment_kwargs["max_output_tokens"] = config.max_output_tokens
 
         # Nav-label chunks always single-pass, regardless of quality_mode (D3):
         # short factual nav labels gain nothing from critique/revise, and the
@@ -852,6 +856,10 @@ class TranslationOrchestrator:
         segment_kwargs = (
             {} if segment_count is None else {"segment_count": segment_count}
         )
+        # Same **kwargs discipline for the per-job output cap: only jobs that
+        # set one pass it, so providers and fakes that predate it keep working.
+        if config.max_output_tokens is not None:
+            segment_kwargs["max_output_tokens"] = config.max_output_tokens
 
         try:
             # Step 1: Draft translation (user prompt has tags)

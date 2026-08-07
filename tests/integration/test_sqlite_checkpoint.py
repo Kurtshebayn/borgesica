@@ -386,3 +386,50 @@ class TestSQLiteCheckpointStore:
         assert isinstance(result, RollingSummary)
         assert result.text == ""
         assert result.chunk_index == -1
+
+
+def test_max_output_tokens_round_trip(tmp_path):
+    """The per-job output cap must survive save/load.
+
+    It is read at RUN time on every provider call, so losing it on `resume`
+    would silently drop a job back to the adapter default mid-book — exactly
+    the failure it exists to avoid.
+    """
+    from borgesica.adapters.checkpoints.sqlite_checkpoint import SQLiteCheckpointStore
+    from borgesica.domain.models import Job, JobConfig, SourceType
+
+    store = SQLiteCheckpointStore(str(tmp_path / "jobs.db"))
+    job = Job(
+        id="cap-job",
+        config=JobConfig(
+            source_type=SourceType.EPUB,
+            model="deepseek-v4-flash",
+            max_output_tokens=32000,
+        ),
+        source_path="/tmp/book.epub",
+        total_chunks=1,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    store.save_job(job)
+
+    assert store.load_job("cap-job").config.max_output_tokens == 32000
+
+
+def test_max_output_tokens_defaults_to_none_on_load(tmp_path):
+    """A job that never set a cap loads back as None, not as a number."""
+    from borgesica.adapters.checkpoints.sqlite_checkpoint import SQLiteCheckpointStore
+    from borgesica.domain.models import Job, JobConfig, SourceType
+
+    store = SQLiteCheckpointStore(str(tmp_path / "jobs.db"))
+    job = Job(
+        id="nocap-job",
+        config=JobConfig(source_type=SourceType.EPUB, model="deepseek-v4-flash"),
+        source_path="/tmp/book.epub",
+        total_chunks=1,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    store.save_job(job)
+
+    assert store.load_job("nocap-job").config.max_output_tokens is None

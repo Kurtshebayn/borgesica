@@ -52,6 +52,7 @@ def make_config(
     quality_mode: str = "fast",
     budget_usd: float | None = None,
     continue_on_error: bool = True,
+    **overrides,
 ) -> JobConfig:
     return JobConfig(
         source_type=SourceType.SRT,
@@ -59,6 +60,7 @@ def make_config(
         quality_mode=quality_mode,  # type: ignore[arg-type]
         budget_usd=budget_usd,
         continue_on_error=continue_on_error,
+        **overrides,
     )
 
 
@@ -3137,3 +3139,63 @@ def test_correct_spanish_is_not_retried():
     assert saved.passed_validation is True
     assert provider.call_count == 1
 
+
+# ---------------------------------------------------------------------------
+# Per-job output cap. Reasoning tokens are billed as output and drawn from the
+# SAME cap as the answer, so a job targeting a reasoning model needs headroom.
+# Passed as **kwargs like segment_count so the ~40 pre-existing 3-arg provider
+# fakes keep working untouched.
+# ---------------------------------------------------------------------------
+
+
+class _CapRecordingProvider:
+    """Records the kwargs the orchestrator passes to translate()."""
+
+    retry_waste_factor = 1.0
+
+    def __init__(self):
+        self.calls = []
+
+    def translate(self, system, user, model, **kwargs):
+        self.calls.append(kwargs)
+        return TranslationResult(
+            unit=TranslationUnit(translation="hola", summary_update="s"),
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
+
+    def count_tokens(self, text: str, model: str) -> int:
+        return len(text.split())
+
+    def price(self, model: str) -> tuple[float, float]:
+        return (1.0, 1.0)
+
+
+def _run_one_chunk_with(config_kwargs):
+    provider = _CapRecordingProvider()
+    orch, _, _ = make_orchestrator(provider=provider)
+    config = make_config(quality_mode="fast", **config_kwargs)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="hello world", status=ChunkStatus.PENDING)]
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+    return provider
+
+
+def test_orchestrator_forwards_the_configured_output_cap():
+    provider = _run_one_chunk_with({"max_output_tokens": 32000})
+    assert provider.calls, "provider was never called"
+    assert provider.calls[0].get("max_output_tokens") == 32000
+
+
+def test_orchestrator_omits_the_cap_when_unset():
+    """Default jobs must not pass the kwarg at all — pre-existing provider
+    fakes and adapters that predate it keep working."""
+    provider = _run_one_chunk_with({})
+    assert provider.calls, "provider was never called"
+    assert "max_output_tokens" not in provider.calls[0]
