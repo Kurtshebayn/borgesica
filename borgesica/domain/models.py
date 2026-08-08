@@ -335,7 +335,15 @@ class Progress(BaseModel):
     """Progress update pushed to the caller after each chunk completes."""
 
     job_id: str
+    # Position of this chunk in the SOURCE, which for an extract job is its
+    # original book index (--extract 20 --from 380 yields 380-399). Keep it:
+    # the writer and the checkpoint both key off it.
     chunk_index: int
+    # 1-based position within THIS run, so `position/total_chunks` is a real
+    # fraction. chunk_index is not: on an extract it made the CLI print
+    # "chunk 387/20 (1935%)". Defaults to 0 for callers that build a Progress
+    # without one.
+    position: int = 0
     total_chunks: int
     cost_usd: float
     status: JobStatus

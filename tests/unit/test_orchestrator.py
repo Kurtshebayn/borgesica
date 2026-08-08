@@ -3199,3 +3199,68 @@ def test_orchestrator_omits_the_cap_when_unset():
     provider = _run_one_chunk_with({})
     assert provider.calls, "provider was never called"
     assert "max_output_tokens" not in provider.calls[0]
+
+
+# ---------------------------------------------------------------------------
+# Progress position. Extracted chunks KEEP their original book indices by
+# design (--extract 20 --from 380 yields indices 380-399), so chunk_index is
+# the wrong numerator for "how far along is this run" — the CLI printed
+# "chunk 387/20 (1935%)". Progress carries an explicit 1-based position.
+# ---------------------------------------------------------------------------
+
+
+def test_progress_position_is_relative_to_the_run_not_the_book():
+    seen: list[tuple[int, int, int]] = []
+
+    orch, _, _ = make_orchestrator()
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=3)
+    # An extract window: original book indices, far from zero.
+    chunks = [
+        Chunk(index=i, source_text="hello world", status=ChunkStatus.PENDING)
+        for i in (380, 381, 382)
+    ]
+
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: seen.append((p.position, p.chunk_index, p.total_chunks)),
+        cancel_flag=threading.Event(),
+    )
+
+    assert [s[0] for s in seen] == [1, 2, 3], (
+        f"position must count within the run, got {[s[0] for s in seen]}"
+    )
+    assert [s[1] for s in seen] == [380, 381, 382], (
+        "chunk_index must keep the ORIGINAL book index — the writer and the "
+        "checkpoint both depend on it"
+    )
+    assert all(s[0] <= s[2] for s in seen), "position must never exceed total_chunks"
+
+
+def test_progress_position_accounts_for_already_done_chunks_on_resume():
+    """A resumed job skips DONE chunks; position must still reflect the real
+    place in the book segment, not restart at 1."""
+    seen: list[int] = []
+
+    orch, _, store = make_orchestrator()
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=3)
+    chunks = [
+        Chunk(index=380, source_text="a", status=ChunkStatus.DONE, translated_text="a"),
+        Chunk(index=381, source_text="b", status=ChunkStatus.DONE, translated_text="b"),
+        Chunk(index=382, source_text="hello world", status=ChunkStatus.PENDING),
+    ]
+
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: seen.append(p.position),
+        cancel_flag=threading.Event(),
+    )
+
+    assert seen == [3], f"resumed run must report position 3 of 3, got {seen}"

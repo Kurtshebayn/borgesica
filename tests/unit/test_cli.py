@@ -786,3 +786,43 @@ def test_run_command_accepts_key_stdin_flag() -> None:
             main(["run", "job-1", "--out", "out.srt", "--provider", "anthropic", "--key-stdin"])
 
     assert mock_build.call_args.kwargs.get("key_stdin") is True
+
+
+class TestProgressPrinter:
+    """Extracted chunks keep their original book indices, so the printer must
+    use Progress.position. Using chunk_index printed "chunk 387/20 (1935%)"
+    on a --extract 20 --from 380 run."""
+
+    def _line(self, capsys, **kwargs) -> str:
+        from borgesica.__main__ import _print_progress
+        from borgesica.domain.models import JobStatus, Progress
+
+        payload = dict(
+            job_id="j",
+            chunk_index=386,
+            position=7,
+            total_chunks=20,
+            cost_usd=0.00526,
+            status=JobStatus.RUNNING,
+        )
+        payload.update(kwargs)
+        _print_progress(Progress(**payload))
+        return capsys.readouterr().out.strip()
+
+    def test_uses_the_run_position_not_the_book_index(self, capsys):
+        line = self._line(capsys)
+
+        assert "7/20" in line, f"expected the run position, got: {line}"
+        assert "387/20" not in line, f"book index leaked into progress: {line}"
+        assert "(35%)" in line, f"expected 7/20 = 35%, got: {line}"
+
+    def test_percentage_never_exceeds_one_hundred(self, capsys):
+        line = self._line(capsys, position=20, chunk_index=399)
+
+        assert "20/20" in line
+        assert "(100%)" in line, line
+
+    def test_zero_total_does_not_divide_by_zero(self, capsys):
+        line = self._line(capsys, position=0, total_chunks=0)
+
+        assert "(0%)" in line, line

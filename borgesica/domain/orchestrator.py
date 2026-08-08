@@ -284,8 +284,10 @@ class TranslationOrchestrator:
         # Mutable glossary reference — may grow via mid-run additions.
         live_glossary = glossary
 
-        # Process each chunk in order.
-        for chunk in ordered_chunks:
+        # Process each chunk in order. `position` is 1-based within this run:
+        # extracted chunks keep their ORIGINAL book indices, so chunk.index is
+        # not a fraction of total_chunks and must never be used as one.
+        for position, chunk in enumerate(ordered_chunks, start=1):
             # Skip already-DONE chunks (resume semantics).
             if chunk.status == ChunkStatus.DONE:
                 continue
@@ -342,6 +344,7 @@ class TranslationOrchestrator:
                     Progress(
                         job_id=job.id,
                         chunk_index=chunk.index,
+                        position=position,
                         total_chunks=len(ordered_chunks),
                         cost_usd=running_cost,
                         status=JobStatus.RUNNING,
@@ -405,6 +408,7 @@ class TranslationOrchestrator:
                     Progress(
                         job_id=job.id,
                         chunk_index=chunk.index,
+                        position=position,
                         total_chunks=len(ordered_chunks),
                         cost_usd=running_cost,
                         status=JobStatus.RUNNING,
@@ -445,6 +449,7 @@ class TranslationOrchestrator:
                 Progress(
                     job_id=job.id,
                     chunk_index=chunk.index,
+                    position=position,
                     total_chunks=len(ordered_chunks),
                     cost_usd=running_cost,
                     status=JobStatus.RUNNING,
