@@ -629,3 +629,47 @@ def test_render_emits_no_do_not_translate_line_without_identity_entries():
 def test_render_of_an_empty_glossary_is_still_empty():
     """An empty glossary must not grow a header."""
     assert Glossary().render() == ""
+
+
+# ---------------------------------------------------------------------------
+# B1d — the prompt must state the glossary direction
+#
+# Root cause of the reversed entries: the task description never said which
+# side of a glossary_addition is English and which is Spanish. The only
+# directional signal was a placeholder inside a JSON template, so a model that
+# had just produced Spanish happily emitted {"term": "Voluntad",
+# "translation": "Will"}. The rules block also said "Do NOT add common Spanish
+# vocabulary" about a field that is supposed to hold ENGLISH source text.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("source_type", [SourceType.SRT, SourceType.EPUB])
+def test_static_block_states_the_glossary_direction(source_type):
+    """Both task descriptions must say term=English source, translation=Spanish."""
+    from borgesica.domain.context import ContextManager
+
+    block = ContextManager().get_static_block(make_config(source_type=source_type))
+
+    assert "NEVER reverse" in block
+    assert 'exactly as it appears in the source' in block
+
+
+@pytest.mark.parametrize("source_type", [SourceType.SRT, SourceType.EPUB])
+def test_static_block_forbids_registering_produced_spanish_as_a_term(source_type):
+    """The observed failure was the model's own output re-entering as a term."""
+    from borgesica.domain.context import ContextManager
+
+    block = ContextManager().get_static_block(make_config(source_type=source_type))
+
+    assert "Spanish text you just produced" in block
+
+
+@pytest.mark.parametrize("source_type", [SourceType.SRT, SourceType.EPUB])
+def test_static_block_no_longer_scopes_the_vocabulary_rule_to_spanish_only(source_type):
+    """"term" holds English, so the exclusion rule must cover English too."""
+    from borgesica.domain.context import ContextManager
+
+    block = ContextManager().get_static_block(make_config(source_type=source_type))
+
+    assert "Do NOT add common English or Spanish vocabulary." in block
+    assert "Do NOT add common Spanish vocabulary." not in block
