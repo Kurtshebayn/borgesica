@@ -141,12 +141,7 @@ desktop/           # app de escritorio (Tauri + React), habla con serve/ vía si
 
 ## Contribuir
 
-El proyecto es open source y las contribuciones son bienvenidas. Está desarrollado con TDD estricto: la lógica de dominio se testea con el LLM simulado; los adaptadores, contra fixtures.
-
-```bash
-pip install -e ".[dev]"
-pytest
-```
+El proyecto es open source y las contribuciones son bienvenidas. Antes de abrir un PR, lee [CONTRIBUTING.md](CONTRIBUTING.md): explica cómo levantar el entorno, cómo correr los tests y las dos reglas que no se negocian — el dominio no importa adaptadores, y el TDD es estricto (la lógica de dominio se testea con el LLM simulado; los adaptadores, contra fixtures).
 
 ## Licencia
 

@@ -255,16 +255,25 @@ def test_build_provider_openai_resolves_key_and_targets_openai_base_url() -> Non
     assert provider.default_model == "gpt-5.6-luna"
 
 
-def test_estimate_resolves_provider_from_env_not_hardcoded_anthropic() -> None:
+def test_estimate_resolves_provider_from_env_not_hardcoded_anthropic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`estimate <id>` with only DEEPSEEK_API_KEY set must NOT demand ANTHROPIC_API_KEY.
 
     Regression: estimate/status/cancel/glossary previously defaulted to anthropic
     and failed when the user only had a DeepSeek key.
+
+    Runs from an empty directory on purpose. main() loads a project-local .env, so
+    "only DEEPSEEK_API_KEY is set" only holds where no .env can contribute other
+    keys — otherwise this test would pass or fail depending on whether the person
+    running it happens to have an untracked .env above the checkout.
     """
     import os
     from unittest.mock import MagicMock
 
     from borgesica.__main__ import main
+
+    monkeypatch.chdir(tmp_path)
 
     with (
         patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-x"}, clear=True),

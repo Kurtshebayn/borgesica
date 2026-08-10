@@ -44,6 +44,10 @@ Environment (per provider; only the selected provider's key is required):
     OLLAMA_HOST        — for --provider ollama (optional; defaults to localhost:11434)
     BORGESICA_PROVIDER — optional; sets the default provider when --provider is omitted
 
+    These are read from the real environment and, as a convenience, from a .env
+    file in the current working directory (or the nearest parent that has one).
+    A variable already exported in the environment always wins over the .env value.
+
 API key from stdin (--key-stdin):
     Instead of an environment variable, pass --key-stdin on any provider command
     to read the selected provider's key from a single newline-delimited JSON line
@@ -60,6 +64,8 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+
+from dotenv import find_dotenv, load_dotenv
 
 from borgesica.api import TranslatorEngine
 from borgesica.domain.errors import BorgesicaError, JobNotFoundError, UnsupportedFormatError
@@ -100,6 +106,27 @@ def _ext_for(source_type: SourceType) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _load_dotenv() -> None:
+    """Load a project-local .env into the environment, without overriding exports.
+
+    Discovery starts at the current working directory (usecwd=True) rather than at
+    this file. A bare load_dotenv() walks upward from THIS MODULE instead, which
+    after `pip install borgesica` means site-packages, and in a source checkout
+    means any .env sitting above the package — a directory the user never chose to
+    run from. The CLI must read the project it was invoked in, and nothing else.
+
+    find_dotenv returns "" when it finds nothing; the guard keeps that case an
+    explicit no-op instead of a load attempt on a bogus path.
+
+    Variables already present in the environment win, because load_dotenv defaults
+    to override=False. That is deliberate: an explicit export, or the key the desktop
+    app injects, must beat whatever a checked-out .env happens to contain.
+    """
+    path = find_dotenv(usecwd=True)
+    if path:
+        load_dotenv(path)
+
+
 def _default_provider() -> str:
     """Resolve the provider when --provider is not given.
 
@@ -119,6 +146,31 @@ def _default_provider() -> str:
     if os.environ.get("OLLAMA_HOST"):
         return "ollama"
     return "anthropic"
+
+
+def _announce_inferred_provider(provider: str) -> None:
+    """Name the provider on stderr when nothing explicit selected it.
+
+    Silent auto-detection is a cost trap. _default_provider() scans the keys in a
+    fixed order and takes the first one present, and it cannot tell a key the user
+    exported from one loaded out of a .env. Once several keys are reachable —
+    which a checked-out .env makes easy — anthropic always wins, the most
+    expensive entry in the model table, and nothing in the output said so.
+
+    Stays quiet when BORGESICA_PROVIDER is set, just as main() stays quiet when
+    --provider was passed: both are deliberate choices, and reading them back is
+    noise. The notice is for the one case nobody decided.
+
+    Writes to stderr because estimate/status print JSON on stdout that the desktop
+    app parses over the sidecar; a human-readable line there would break it.
+    """
+    if os.environ.get("BORGESICA_PROVIDER"):
+        return
+    print(
+        f"Using provider '{provider}', auto-detected from the API keys available. "
+        f"Pass --provider, or set BORGESICA_PROVIDER, to choose one explicitly.",
+        file=sys.stderr,
+    )
 
 
 def _require_env(var: str, provider: str) -> str:
@@ -743,6 +795,11 @@ def main(argv: list[str] | None = None) -> int:
     # non-ASCII output (arrows, accented Spanish). Force UTF-8 where supported.
     _reconfigure_streams(sys.stdout, sys.stderr)
 
+    # Provider keys may live in a project-local .env. Load it before anything reads
+    # os.environ — _default_provider() below picks a provider by which key is
+    # present, so loading later would resolve against an incomplete environment.
+    _load_dotenv()
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -751,8 +808,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Resolve provider: explicit --provider wins, else auto-detect (env / keys).
+    explicit_provider = getattr(args, "provider", None)
+    provider = explicit_provider or _default_provider()
+    if not explicit_provider:
+        _announce_inferred_provider(provider)
+
     engine = _build_engine(
-        provider=getattr(args, "provider", None) or _default_provider(),
+        provider=provider,
         model=getattr(args, "model", ""),
         key_stdin=getattr(args, "key_stdin", False),
     )
