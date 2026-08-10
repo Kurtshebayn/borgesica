@@ -471,3 +471,173 @@ def test_llm_extractor_dedupes_its_own_output():
     glossary = extractor.extract("text", make_config(glossary_strategy="llm"))
 
     assert [e.term for e in glossary.entries] == ["Alupi"]
+
+
+# ---------------------------------------------------------------------------
+# B1d — reversed / contradictory entries
+#
+# The real 491-entry glossary of job 13b43ac6 contained six entries pointing
+# the wrong way, four of them as outright inverse pairs:
+#     Birthright -> Derecho de Nacimiento  ||  Derecho de Nacimiento -> Birthright
+#     Religion   -> Religion (es)          ||  Religion (es)         -> Religion
+#     Will       -> Voluntad               ||  Voluntad              -> Will
+#     Will cage  -> Jaula de Voluntad      ||  jaula de Voluntad     -> Will cage
+# Injected as-is they instruct translating INTO English. In all six the
+# English-source direction was recorded FIRST and the Spanish rendering leaked
+# back as a source term later, after the model had already produced it.
+# ---------------------------------------------------------------------------
+
+
+def test_drop_reversed_keeps_the_first_half_of_an_inverse_pair():
+    """A -> B and B -> A cannot both be right; the earlier one is the source direction."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento"),
+            GlossaryEntry(term="Derecho de Nacimiento", translation="Birthright"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary)
+
+    assert [e.term for e in cleaned.entries] == ["Birthright"]
+    assert [e.term for e in dropped] == ["Derecho de Nacimiento"]
+
+
+def test_drop_reversed_catches_a_reversal_with_no_exact_inverse():
+    """'Placement -> Colocacion' makes any '... -> Placement' entry contradictory."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Placement", translation="Colocacion"),
+            GlossaryEntry(term="Asignacion", translation="Placement"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary)
+
+    assert [e.term for e in cleaned.entries] == ["Placement"]
+    assert [e.term for e in dropped] == ["Asignacion"]
+
+
+def test_drop_reversed_keeps_a_mapping_whose_output_is_only_a_do_not_translate_term():
+    """The false positive that must never come back.
+
+    'The Tongue -> la Lengua' is correct even though 'la Lengua' is itself an
+    entry, because that entry is 'la Lengua -> la Lengua' — a do-not-translate
+    term, not something the glossary says must be translated further. On the
+    real glossary a rule without this exemption discarded 8 valid mappings.
+    """
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="la Lengua", translation="la Lengua"),
+            GlossaryEntry(term="The Tongue", translation="la Lengua"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary)
+
+    assert [e.term for e in cleaned.entries] == ["la Lengua", "The Tongue"]
+    assert dropped == []
+
+
+def test_drop_reversed_never_drops_a_locked_entry():
+    """A locked entry is a human decision; inference does not get to overrule it."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Will", translation="Voluntad"),
+            GlossaryEntry(term="Voluntad", translation="Will", locked=True),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary)
+
+    assert [e.term for e in cleaned.entries] == ["Will", "Voluntad"]
+    assert dropped == []
+
+
+def test_drop_reversed_never_drops_an_identity_entry():
+    """'Aaru -> Aaru' states no direction, so it can never contradict one."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Gleaner", translation="Segador"),
+            GlossaryEntry(term="Segador", translation="Segador"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary)
+
+    assert [e.term for e in cleaned.entries] == ["Gleaner", "Segador"]
+    assert dropped == []
+
+
+def test_drop_reversed_is_case_and_whitespace_insensitive():
+    """'jaula de Voluntad' must still contradict 'Jaula de Voluntad'."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Will cage", translation="Jaula  de Voluntad"),
+            GlossaryEntry(term="jaula de voluntad", translation="Will cage"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary)
+
+    assert [e.term for e in cleaned.entries] == ["Will cage"]
+    assert len(dropped) == 1
+
+
+def test_drop_reversed_leaves_a_consistent_glossary_untouched():
+    """No contradiction means no drops and no reordering."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Gleaner", translation="Segador"),
+            GlossaryEntry(term="Gleaners", translation="Segadores"),
+            GlossaryEntry(term="Aaru", translation="Aaru"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary)
+
+    assert cleaned.entries == glossary.entries
+    assert dropped == []
+
+
+def test_merge_rejects_a_reversed_addition():
+    """A chunk that emits the Spanish rendering as a source term is refused."""
+    from borgesica.domain.glossary import merge_additions
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Will", translation="Voluntad")])
+    additions = [GlossaryEntry(term="Voluntad", translation="Will")]
+
+    result = merge_additions(glossary, additions)
+
+    assert [e.term for e in result.entries] == ["Will"]
+
+
+def test_merge_cleans_a_reversed_pair_already_in_the_live_glossary():
+    """Glossaries persisted before this rule repair themselves on the next merge."""
+    from borgesica.domain.glossary import merge_additions
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Religion", translation="Religion-es"),
+            GlossaryEntry(term="Religion-es", translation="Religion"),
+        ]
+    )
+    additions = [GlossaryEntry(term="Aaru", translation="Aaru")]
+
+    result = merge_additions(glossary, additions)
+
+    assert [e.term for e in result.entries] == ["Religion", "Aaru"]

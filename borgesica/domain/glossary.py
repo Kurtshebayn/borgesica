@@ -32,6 +32,7 @@ __all__ = [
     "LlmGlossaryExtractor",
     "NullGlossaryExtractor",
     "dedupe_glossary",
+    "drop_reversed_entries",
     "get_extractor",
     "merge_additions",
     "normalize_term",
@@ -207,6 +208,68 @@ def dedupe_glossary(glossary: Glossary) -> Glossary:
 
 
 # ---------------------------------------------------------------------------
+# Direction guard — reversed / contradictory entries
+# ---------------------------------------------------------------------------
+
+
+def drop_reversed_entries(
+    glossary: Glossary,
+) -> tuple[Glossary, list[GlossaryEntry]]:
+    """Remove entries that point the wrong way, returning them for reporting.
+
+    The glossary is directional: ``term`` is source text, ``translation`` is
+    the target-language rendering. Nothing enforced that, and on the real
+    491-entry glossary of job 13b43ac6 six entries had it backwards, four as
+    outright inverse pairs ("Birthright → Derecho de Nacimiento" alongside
+    "Derecho de Nacimiento → Birthright"). Rendered into the prompt they
+    instruct translating INTO the source language.
+
+    An entry is reversed when its TRANSLATION is the TERM of an
+    already-accepted NON-IDENTITY entry — that is, it produces output the
+    glossary itself says must be translated to something else. This needs no
+    language detection: it is a contradiction visible in the data alone.
+
+    Two exemptions keep the rule honest, both learned by running it over the
+    real glossary:
+
+    - IDENTITY entries (term == translation) are never dropped and never count
+      as evidence. "la Lengua → la Lengua" only says "leave this alone", so a
+      correct "The Tongue → la Lengua" does not contradict it. Without this
+      exemption the rule discarded 8 valid mappings on the real glossary
+      alongside the 6 real reversals.
+    - LOCKED entries are never dropped. Locking is a human decision, and
+      inference does not get to overrule it.
+
+    Order decides which half of an inverse pair survives, and the data backs
+    it: in all six real cases the source-language direction was recorded
+    FIRST, and the rendering leaked back as a term later, after the model had
+    already produced it.
+    """
+    mapped_terms: set[str] = set()
+    kept: list[GlossaryEntry] = []
+    dropped: list[GlossaryEntry] = []
+
+    for entry in glossary.entries:
+        term = normalize_term(entry.term)
+        translation = normalize_term(entry.translation)
+        is_identity = term == translation
+
+        if (
+            not is_identity
+            and not entry.locked
+            and translation.casefold() in mapped_terms
+        ):
+            dropped.append(entry)
+            continue
+
+        kept.append(entry)
+        if not is_identity:
+            mapped_terms.add(term.casefold())
+
+    return Glossary(entries=kept), dropped
+
+
+# ---------------------------------------------------------------------------
 # Mid-run addition merge helper (used by orchestrator in M1-8)
 # ---------------------------------------------------------------------------
 
@@ -221,11 +284,15 @@ def merge_additions(glossary: Glossary, additions: list[GlossaryEntry]) -> Gloss
 
     "Same term" is decided by ``_dedupe_key``, so a case or spacing variant of
     an existing term is a duplicate, not a new entry. The incoming live
-    glossary is deduplicated first, which repairs glossaries that were
-    persisted before this rule existed: a resumed job cleans itself up on its
-    next merge instead of carrying its collisions to the end of the book.
+    glossary is deduplicated first, and the merged result passes through
+    ``drop_reversed_entries``. Both repair glossaries that were persisted
+    before those rules existed: a resumed job cleans itself up on its next
+    merge instead of carrying its collisions and contradictions to the end of
+    the book.
 
-    Returns a new Glossary (models are immutable Pydantic objects).
+    Returns a new Glossary (models are immutable Pydantic objects). Callers
+    that want to report what was discarded should call ``drop_reversed_entries``
+    directly — it returns the dropped entries.
     """
     deduped = dedupe_glossary(glossary)
     existing_locked = {_dedupe_key(e.term) for e in deduped.entries if e.locked}
@@ -255,4 +322,5 @@ def merge_additions(glossary: Glossary, additions: list[GlossaryEntry]) -> Gloss
         )
         existing_terms.add(key)
 
-    return Glossary(entries=new_entries)
+    cleaned, _dropped = drop_reversed_entries(Glossary(entries=new_entries))
+    return cleaned

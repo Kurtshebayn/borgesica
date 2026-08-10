@@ -147,7 +147,12 @@ Rules for summary_update:
 Rules for glossary_additions:
 - Add ONLY proper nouns, invented terms, or domain-specific vocabulary first \
 encountered in this chunk.
-- Do NOT add common Spanish vocabulary.
+- DIRECTION IS FIXED: "term" MUST be the ENGLISH string exactly as it appears \
+in the source, and "translation" MUST be its Spanish rendering. NEVER reverse \
+them.
+- Do NOT add an entry whose "term" is Spanish text you just produced. Your own \
+output is never a source term.
+- Do NOT add common English or Spanish vocabulary.
 - Leave the list empty ([]) if no new terms appear.
 
 Rules for locked glossary terms (marked [LOCKED] below):
@@ -209,7 +214,12 @@ Rules for summary_update:
 Rules for glossary_additions:
 - Add ONLY proper nouns, invented terms, or domain-specific vocabulary first \
 encountered in this chunk.
-- Do NOT add common Spanish vocabulary.
+- DIRECTION IS FIXED: "term" MUST be the ENGLISH string exactly as it appears \
+in the source, and "translation" MUST be its Spanish rendering. NEVER reverse \
+them.
+- Do NOT add an entry whose "term" is Spanish text you just produced. Your own \
+output is never a source term.
+- Do NOT add common English or Spanish vocabulary.
 - Leave the list empty ([]) if no new terms appear.
 
 Rules for locked glossary terms (marked [LOCKED] below):
