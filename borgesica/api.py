@@ -17,7 +17,11 @@ from datetime import UTC, datetime
 from borgesica.domain.chunking import SrtChunker, chunk_prose
 from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import CostEstimator
-from borgesica.domain.errors import JobNotFoundError, JobStateError
+from borgesica.domain.errors import (
+    GlossaryEntryRejectedError,
+    JobNotFoundError,
+    JobStateError,
+)
 from borgesica.domain.glossary import (
     NullGlossaryExtractor,
     normalize_term,
@@ -391,6 +395,27 @@ class TranslatorEngine:
         self._load_job_or_raise(job_id)  # validate existence
         return self._clean_glossary(job_id)
 
+    def glossary_repairs(self, job_id: str) -> list[GlossaryEntry]:
+        """Return the stored entries that ``get_glossary`` removes on read.
+
+        Exists so a reader can explain the difference between what is stored
+        and what it shows. Without it, ``glossary show`` printing 471 of 491
+        entries looks like data loss rather than repair.
+
+        Args:
+            job_id: ID of the job.
+
+        Returns:
+            The removed entries, in the order they were stored. Empty when the
+            stored glossary is already clean.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        _cleaned, dropped = sanitize_glossary(self._checkpoint.load_glossary(job_id))
+        return dropped
+
     def update_glossary(self, job_id: str, entries: list[GlossaryEntry]) -> Glossary:
         """Replace the current glossary entries with the provided list.
 
@@ -406,8 +431,11 @@ class TranslatorEngine:
 
         A hand edit the direction guard would reject can still be forced by
         marking it ``locked=True`` — locking states human intent, and no
-        inferred rule overrides it. The persisted Glossary is returned, so a
-        caller can always see what actually survived.
+        inferred rule overrides it. Anything else the caller supplied that the
+        rules discard raises ``GlossaryEntryRejectedError`` and persists
+        nothing: repairing contamination already in the glossary is quiet
+        maintenance, but silently dropping an edit someone just asked for is
+        not.
 
         Args:
             job_id:  ID of the job.
@@ -418,6 +446,8 @@ class TranslatorEngine:
 
         Raises:
             JobNotFoundError: if job_id is not found.
+            GlossaryEntryRejectedError: if any supplied entry is discarded by
+                the hygiene rules. Nothing is persisted in that case.
         """
         self._load_job_or_raise(job_id)
         existing = self._clean_glossary(job_id)
@@ -437,6 +467,17 @@ class TranslatorEngine:
         updated, _dropped = sanitize_glossary(
             Glossary(entries=list(entry_map.values()))
         )
+
+        # Only the caller's OWN entries count as a rejection. Compared by
+        # normalised key, so collapsing two case variants the caller supplied
+        # is deduplication rather than a refusal.
+        surviving = {normalize_term(e.term).casefold() for e in updated.entries}
+        rejected = [
+            e for e in entries if normalize_term(e.term).casefold() not in surviving
+        ]
+        if rejected:
+            raise GlossaryEntryRejectedError(job_id=job_id, rejected=rejected)
+
         self._checkpoint.save_glossary(job_id, updated)
         return updated
 

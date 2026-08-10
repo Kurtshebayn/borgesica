@@ -105,7 +105,10 @@ class LlmGlossaryExtractor:
             user=user_prompt,
             model=config.model,
         )
-        return dedupe_glossary(Glossary(entries=list(result.unit.glossary_additions)))
+        seeded, _duplicates = dedupe_glossary(
+            Glossary(entries=list(result.unit.glossary_additions))
+        )
+        return seeded
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +170,14 @@ def _dedupe_key(term: str) -> str:
     return normalize_term(term).casefold()
 
 
-def dedupe_glossary(glossary: Glossary) -> Glossary:
+def dedupe_glossary(glossary: Glossary) -> tuple[Glossary, list[GlossaryEntry]]:
     """Collapse case- and whitespace-only duplicates, preserving order.
+
+    Returns the deduplicated glossary and the entries it discarded, matching
+    ``drop_reversed_entries``. Both rules report what they removed because a
+    reader has to be able to explain why a stored glossary shows fewer entries
+    than were saved — on the real 491-entry glossary 14 of the 20 removals are
+    duplicates, so a report that omitted them would explain almost nothing.
 
     Within a group of entries sharing a ``_dedupe_key``:
       - a LOCKED entry wins, because locking is an explicit human decision
@@ -183,10 +192,12 @@ def dedupe_glossary(glossary: Glossary) -> Glossary:
     """
     winners: dict[str, GlossaryEntry] = {}
     order: list[str] = []
+    dropped: list[GlossaryEntry] = []
 
     for entry in glossary.entries:
         term = normalize_term(entry.term)
         if not term:
+            dropped.append(entry)
             continue
         key = term.casefold()
         candidate = entry.model_copy(update={"term": term})
@@ -202,10 +213,13 @@ def dedupe_glossary(glossary: Glossary) -> Glossary:
             winners[key] = candidate.model_copy(
                 update={"note": candidate.note or incumbent.note}
             )
-        elif incumbent.note is None and candidate.note is not None:
-            winners[key] = incumbent.model_copy(update={"note": candidate.note})
+            dropped.append(incumbent)
+        else:
+            if incumbent.note is None and candidate.note is not None:
+                winners[key] = incumbent.model_copy(update={"note": candidate.note})
+            dropped.append(entry)
 
-    return Glossary(entries=[winners[key] for key in order])
+    return Glossary(entries=[winners[key] for key in order]), dropped
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +297,9 @@ def sanitize_glossary(glossary: Glossary) -> tuple[Glossary, list[GlossaryEntry]
     enough — a FINISHED job never merges again, so its stored glossary would
     keep its duplicates and contradictions forever.
     """
-    deduped = dedupe_glossary(glossary)
-    return drop_reversed_entries(deduped)
+    deduped, duplicates = dedupe_glossary(glossary)
+    cleaned, reversed_entries = drop_reversed_entries(deduped)
+    return cleaned, duplicates + reversed_entries
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +327,7 @@ def merge_additions(glossary: Glossary, additions: list[GlossaryEntry]) -> Gloss
     that want to report what was discarded should call ``drop_reversed_entries``
     directly — it returns the dropped entries.
     """
-    deduped = dedupe_glossary(glossary)
+    deduped, _duplicates = dedupe_glossary(glossary)
     existing_locked = {_dedupe_key(e.term) for e in deduped.entries if e.locked}
     existing_terms = {_dedupe_key(e.term) for e in deduped.entries}
 

@@ -195,7 +195,7 @@ def test_dedupe_collapses_case_only_duplicates_keeping_first_form():
         ]
     )
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert [e.term for e in result.entries] == ["Alupi"]
     assert result.entries[0].translation == "Alupi"
@@ -212,7 +212,7 @@ def test_dedupe_collapses_whitespace_only_duplicates():
         ]
     )
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert [e.term for e in result.entries] == ["Ddram cyfraith"]
 
@@ -228,7 +228,7 @@ def test_dedupe_lets_a_locked_duplicate_win_over_an_earlier_unlocked_one():
         ]
     )
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert len(result.entries) == 1
     assert result.entries[0].term == "Draoi"
@@ -247,7 +247,7 @@ def test_dedupe_keeps_the_first_locked_entry_when_several_are_locked():
         ]
     )
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert len(result.entries) == 1
     assert result.entries[0].term == "Caer"
@@ -267,7 +267,7 @@ def test_dedupe_recovers_a_note_from_the_discarded_duplicate():
         ]
     )
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert len(result.entries) == 1
     assert result.entries[0].term == "Crannog"
@@ -285,7 +285,7 @@ def test_dedupe_keeps_the_winners_own_note_when_it_has_one():
         ]
     )
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert result.entries[0].note == "Kept."
 
@@ -302,7 +302,7 @@ def test_dedupe_drops_entries_whose_term_is_blank():
         ]
     )
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert [e.term for e in result.entries] == ["Alupi"]
 
@@ -313,7 +313,7 @@ def test_dedupe_normalizes_the_terms_it_keeps():
 
     glossary = Glossary(entries=[GlossaryEntry(term=" Caer  Dathyl ", translation="Caer Dathyl")])
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert result.entries[0].term == "Caer Dathyl"
 
@@ -331,7 +331,7 @@ def test_dedupe_preserves_order_and_distinct_entries():
         ]
     )
 
-    result = dedupe_glossary(glossary)
+    result, _dropped = dedupe_glossary(glossary)
 
     assert [e.term for e in result.entries] == ["Alupi", "Crannog", "Draoi"]
 
@@ -347,7 +347,7 @@ def test_dedupe_of_a_clean_glossary_is_a_no_op():
         ]
     )
 
-    assert dedupe_glossary(glossary).entries == glossary.entries
+    assert dedupe_glossary(glossary)[0].entries == glossary.entries
 
 
 # ---------------------------------------------------------------------------
