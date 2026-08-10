@@ -18,7 +18,11 @@ from borgesica.domain.chunking import SrtChunker, chunk_prose
 from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import CostEstimator
 from borgesica.domain.errors import JobNotFoundError, JobStateError
-from borgesica.domain.glossary import NullGlossaryExtractor
+from borgesica.domain.glossary import (
+    NullGlossaryExtractor,
+    normalize_term,
+    sanitize_glossary,
+)
 from borgesica.domain.models import (
     ChunkStatus,
     CostEstimate,
@@ -201,7 +205,7 @@ class TranslatorEngine:
             job,
             chunks,
             job.config,
-            glossary=self._checkpoint.load_glossary(job_id),
+            glossary=self._clean_glossary(job_id),
             summary=self._checkpoint.load_summary(job_id),
         )
 
@@ -353,8 +357,27 @@ class TranslatorEngine:
     # get_glossary / update_glossary
     # ------------------------------------------------------------------
 
+    def _clean_glossary(self, job_id: str) -> Glossary:
+        """Load the persisted glossary and apply the hygiene rules to it.
+
+        Glossaries written before those rules existed still hold case
+        duplicates and reversed entries, and a FINISHED job never merges
+        again, so nothing else would ever repair them. Cleaning on load makes
+        the repair reach every reader — review, estimate and resume alike —
+        without a migration.
+
+        Deliberately does NOT write back: persisting is the job of the calls
+        that already persist. See ``update_glossary``.
+        """
+        cleaned, _dropped = sanitize_glossary(self._checkpoint.load_glossary(job_id))
+        return cleaned
+
     def get_glossary(self, job_id: str) -> Glossary:
         """Return the current persisted glossary for a job.
+
+        The result is normalised and deduplicated: case-only duplicate terms
+        are collapsed and entries pointing the wrong way are removed. What is
+        stored is left untouched — a getter does not rewrite the database.
 
         Args:
             job_id: ID of the job.
@@ -366,13 +389,25 @@ class TranslatorEngine:
             JobNotFoundError: if job_id is not found.
         """
         self._load_job_or_raise(job_id)  # validate existence
-        return self._checkpoint.load_glossary(job_id)
+        return self._clean_glossary(job_id)
 
     def update_glossary(self, job_id: str, entries: list[GlossaryEntry]) -> Glossary:
         """Replace the current glossary entries with the provided list.
 
         Merges: provided entries are upserted — existing entries not in the
         list are preserved. The full merged Glossary is persisted and returned.
+
+        This is the path a human uses to curate terminology by hand, so it is
+        also the path through which every defect the glossary rules exist to
+        prevent could re-enter. The upsert key is the NORMALISED term: editing
+        "alupi" updates an existing "Alupi" instead of creating a second
+        entry, which is exactly the bug ``merge_additions`` had before it
+        matched on the same key. The result is sanitised before it is stored.
+
+        A hand edit the direction guard would reject can still be forced by
+        marking it ``locked=True`` — locking states human intent, and no
+        inferred rule overrides it. The persisted Glossary is returned, so a
+        caller can always see what actually survived.
 
         Args:
             job_id:  ID of the job.
@@ -385,16 +420,23 @@ class TranslatorEngine:
             JobNotFoundError: if job_id is not found.
         """
         self._load_job_or_raise(job_id)
-        existing = self._checkpoint.load_glossary(job_id)
+        existing = self._clean_glossary(job_id)
 
-        # Build a dict of existing entries keyed by term
-        entry_map: dict[str, GlossaryEntry] = {e.term: e for e in existing.entries}
+        # Keyed by normalised term so a case or spacing variant edits the
+        # entry it refers to rather than duplicating it. Replacing a key keeps
+        # its original position, so editing a term does not reshuffle the
+        # glossary around it.
+        entry_map: dict[str, GlossaryEntry] = {
+            normalize_term(e.term).casefold(): e for e in existing.entries
+        }
 
         # Upsert provided entries (caller's version wins)
         for entry in entries:
-            entry_map[entry.term] = entry
+            entry_map[normalize_term(entry.term).casefold()] = entry
 
-        updated = Glossary(entries=list(entry_map.values()))
+        updated, _dropped = sanitize_glossary(
+            Glossary(entries=list(entry_map.values()))
+        )
         self._checkpoint.save_glossary(job_id, updated)
         return updated
 
@@ -476,7 +518,9 @@ class TranslatorEngine:
 
         # Load current state
         chunks = self._checkpoint.load_chunks(job.id)
-        glossary = self._checkpoint.load_glossary(job.id)
+        # Cleaned on load so a resumed job starts from a repaired glossary
+        # instead of waiting for its first mid-run merge to fix one.
+        glossary = self._clean_glossary(job.id)
 
         # Persist RUNNING status so external status() calls see it.
         # The orchestrator receives the pre-RUNNING job object (it guards

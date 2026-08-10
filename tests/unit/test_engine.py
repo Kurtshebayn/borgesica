@@ -790,3 +790,164 @@ def test_best_effort_chunk_indices_raises_for_unknown_job_id() -> None:
     engine, _, _ = _make_engine()
     with pytest.raises(JobNotFoundError):
         engine.best_effort_chunk_indices("unknown-id")
+
+
+# ---------------------------------------------------------------------------
+# B1d — the API is the other door into the glossary
+#
+# merge_additions cleans the glossary during a run, but a FINISHED job never
+# merges again, and update_glossary is the path a human uses to curate terms
+# by hand. Both bypassed every normalisation rule: update_glossary keyed its
+# upsert map on the exact term string, so it reintroduced the very case
+# duplicates that merge_additions had just been taught to reject.
+# ---------------------------------------------------------------------------
+
+
+def _engine_with_glossary(tmp_path: Path, entries: list[GlossaryEntry]):
+    """Create a job and persist `entries` verbatim, bypassing the API guards."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, _, checkpoint = _make_engine()
+    job = engine.create_job(srt_path, _make_config())
+    checkpoint.save_glossary(job.id, Glossary(entries=entries))
+    return engine, job
+
+
+def test_get_glossary_collapses_case_duplicates_persisted_before_the_rule(
+    tmp_path: Path,
+) -> None:
+    """A finished job never merges again, so the repair must happen on read."""
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(term="Alupi", translation="Alupi"),
+            GlossaryEntry(term="alupi", translation="alupi"),
+        ],
+    )
+
+    glossary = engine.get_glossary(job.id)
+
+    assert [e.term for e in glossary.entries] == ["Alupi"]
+
+
+def test_get_glossary_drops_reversed_entries(tmp_path: Path) -> None:
+    """Reviewing a contaminated glossary must not show entries pointing backwards."""
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(term="Will", translation="Voluntad"),
+            GlossaryEntry(term="Voluntad", translation="Will"),
+        ],
+    )
+
+    glossary = engine.get_glossary(job.id)
+
+    assert [e.term for e in glossary.entries] == ["Will"]
+
+
+def test_get_glossary_does_not_rewrite_what_is_stored(tmp_path: Path) -> None:
+    """A getter stays a getter — cleaning on read must not silently persist."""
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(term="Alupi", translation="Alupi"),
+            GlossaryEntry(term="alupi", translation="alupi"),
+        ],
+    )
+
+    engine.get_glossary(job.id)
+
+    stored = engine._checkpoint.load_glossary(job.id)
+    assert len(stored.entries) == 2
+
+
+def test_update_glossary_does_not_reintroduce_a_case_duplicate(tmp_path: Path) -> None:
+    """The exact-string upsert key was the same bug merge_additions already had."""
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Alupi", translation="Alupi")]
+    )
+
+    updated = engine.update_glossary(
+        job.id, [GlossaryEntry(term="alupi", translation="alupi tribe")]
+    )
+
+    assert len(updated.entries) == 1
+    assert updated.entries[0].translation == "alupi tribe"
+
+
+def test_update_glossary_lets_the_callers_version_win(tmp_path: Path) -> None:
+    """Upsert semantics are unchanged: a hand edit overrides what was stored."""
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Gleaner", translation="Espigador")]
+    )
+
+    updated = engine.update_glossary(
+        job.id, [GlossaryEntry(term="Gleaner", translation="Segador", locked=True)]
+    )
+
+    assert len(updated.entries) == 1
+    assert updated.entries[0].translation == "Segador"
+    assert updated.entries[0].locked is True
+
+
+def test_update_glossary_preserves_the_position_of_an_upserted_entry(
+    tmp_path: Path,
+) -> None:
+    """Editing a term must not reshuffle the glossary around it."""
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(term="Aaru", translation="Aaru"),
+            GlossaryEntry(term="Gleaner", translation="Espigador"),
+            GlossaryEntry(term="Draoi", translation="Draoi"),
+        ],
+    )
+
+    updated = engine.update_glossary(
+        job.id, [GlossaryEntry(term="Gleaner", translation="Segador")]
+    )
+
+    assert [e.term for e in updated.entries] == ["Aaru", "Gleaner", "Draoi"]
+
+
+def test_update_glossary_rejects_a_reversed_hand_edit(tmp_path: Path) -> None:
+    """The direction guard applies to hand edits too."""
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Will", translation="Voluntad")]
+    )
+
+    updated = engine.update_glossary(
+        job.id, [GlossaryEntry(term="Voluntad", translation="Will")]
+    )
+
+    assert [e.term for e in updated.entries] == ["Will"]
+
+
+def test_update_glossary_honours_a_locked_entry_the_guard_would_reject(
+    tmp_path: Path,
+) -> None:
+    """Locking is the escape hatch: it states intent the guard must not override."""
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Will", translation="Voluntad")]
+    )
+
+    updated = engine.update_glossary(
+        job.id, [GlossaryEntry(term="Voluntad", translation="Will", locked=True)]
+    )
+
+    assert [e.term for e in updated.entries] == ["Will", "Voluntad"]
+
+
+def test_update_glossary_persists_the_cleaned_glossary(tmp_path: Path) -> None:
+    """Unlike the getter, a write heals what is stored."""
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(term="Alupi", translation="Alupi"),
+            GlossaryEntry(term="alupi", translation="alupi"),
+        ],
+    )
+
+    engine.update_glossary(job.id, [GlossaryEntry(term="Aaru", translation="Aaru")])
+
+    stored = engine._checkpoint.load_glossary(job.id)
+    assert [e.term for e in stored.entries] == ["Alupi", "Aaru"]

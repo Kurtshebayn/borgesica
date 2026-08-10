@@ -36,6 +36,7 @@ __all__ = [
     "get_extractor",
     "merge_additions",
     "normalize_term",
+    "sanitize_glossary",
 ]
 
 # ---------------------------------------------------------------------------
@@ -269,6 +270,23 @@ def drop_reversed_entries(
     return Glossary(entries=kept), dropped
 
 
+def sanitize_glossary(glossary: Glossary) -> tuple[Glossary, list[GlossaryEntry]]:
+    """Apply every glossary hygiene rule, returning the entries that were removed.
+
+    The canonical composition — deduplicate case and spacing variants, then
+    drop entries that point the wrong way. Both rules are idempotent, so this
+    is safe to run on every load and every save.
+
+    Exists so there is ONE spelling of "a clean glossary". The rules are
+    applied at each boundary where a glossary enters the system: on load, on
+    hand edit, and on mid-run merge. Applying them only during a run was not
+    enough — a FINISHED job never merges again, so its stored glossary would
+    keep its duplicates and contradictions forever.
+    """
+    deduped = dedupe_glossary(glossary)
+    return drop_reversed_entries(deduped)
+
+
 # ---------------------------------------------------------------------------
 # Mid-run addition merge helper (used by orchestrator in M1-8)
 # ---------------------------------------------------------------------------
@@ -322,5 +340,5 @@ def merge_additions(glossary: Glossary, additions: list[GlossaryEntry]) -> Gloss
         )
         existing_terms.add(key)
 
-    cleaned, _dropped = drop_reversed_entries(Glossary(entries=new_entries))
+    cleaned, _dropped = sanitize_glossary(Glossary(entries=new_entries))
     return cleaned
