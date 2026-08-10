@@ -5,11 +5,37 @@ Dependency rule: only stdlib + pydantic allowed here.
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def normalize_term(term: str) -> str:
+    """Return the canonical display form of a glossary term.
+
+    Canonicalises the two ways the same term can be spelled without anyone
+    meaning anything different by it:
+      - surrounding and repeated internal whitespace (models emit both
+        "Ddram cyfraith" and "Ddram  cyfraith ");
+      - Unicode composition, so a precomposed "ó" and an "o" followed by a
+        combining acute compare equal — they render identically and would
+        otherwise persist as two entries in an accented-Spanish glossary.
+
+    Casing is deliberately preserved: it is not part of the identity of a term
+    (see ``borgesica.domain.glossary._dedupe_key``), but it *is* how the entry
+    is shown to the model and to the human editing the glossary.
+
+    Lives here rather than in ``glossary.py`` because ``Glossary.render`` needs
+    it to decide which entries are identity entries, and ``glossary.py``
+    imports from this module.
+    """
+    return _WHITESPACE_RUN.sub(" ", unicodedata.normalize("NFC", term)).strip()
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -72,10 +98,26 @@ class Glossary(BaseModel):
     def render(self, budget_tokens: int = DEFAULT_GLOSSARY_BUDGET_TOKENS) -> str:
         """Return a compact table of entries for prompt injection.
 
-        Locked entries appear first, and are ALWAYS included in full — a locked
+        Entries are split into two kinds, because they carry different
+        instructions and cost very different amounts to express:
+
+        - MAPPINGS (term != translation) render as "term → translation" lines.
+          These are the only entries that teach the model a rendering it would
+          not otherwise produce, so they get first claim on the budget.
+        - IDENTITY entries (term == translation once normalised) collapse into
+          a single trailing DO NOT TRANSLATE line. On a real 491-entry book
+          glossary 337 entries (69%) were of this kind — proper nouns that
+          correctly must not be translated. Spelling each one out as
+          "Aaru → Aaru" spent two thirds of the per-call glossary budget
+          repeating every term back to itself; naming them once in a list says
+          the same thing for roughly a third of the words.
+
+        Locked entries are ALWAYS included in full, of either kind — a locked
         term is one the user explicitly pinned, so dropping it would defeat the
         purpose of locking. Unlocked entries are trimmed once the budget is
-        exhausted.
+        exhausted. Identity entries carry no [LOCKED] marker: "do not
+        translate" is already absolute, so the marker would be paid for on
+        every call while adding nothing the line does not already say.
 
         The budget is measured in WORDS (``len(line.split())``), which
         under-counts real tokens by roughly 1.7x for accented Spanish plus the
@@ -85,30 +127,38 @@ class Glossary(BaseModel):
         grew, and everything past that was invisible to the model in every
         chunk.
         """
-        locked = [e for e in self.entries if e.locked]
-        unlocked = [e for e in self.entries if not e.locked]
+        mappings: list[GlossaryEntry] = []
+        identities: list[GlossaryEntry] = []
+        for e in self.entries:
+            term = normalize_term(e.term)
+            if term and term == normalize_term(e.translation):
+                identities.append(e)
+            else:
+                mappings.append(e)
 
-        def entry_line(e: GlossaryEntry, mark: str = "") -> str:
+        def entry_line(e: GlossaryEntry) -> str:
             # `note` is deliberately NOT rendered. It is explanatory prose for
             # the human reviewing the glossary; the model only needs the
             # term → translation pair to stay consistent. On a real 491-entry
             # book glossary every entry carried one, and the notes were 78% of
             # the rendered weight (8482 words with them, 1868 without) — they
             # crowded out the very mappings the glossary exists to enforce.
-            suffix = f" [LOCKED]{mark}" if e.locked else mark
+            suffix = " [LOCKED]" if e.locked else ""
             return f"  {e.term} → {e.translation}{suffix}"
 
         lines: list[str] = []
         used_tokens = 0
 
-        # Always include all locked entries.
-        for e in locked:
-            line = entry_line(e)
-            lines.append(line)
-            used_tokens += len(line.split())
-
-        # Add unlocked entries until token budget is exhausted.
-        for e in unlocked:
+        # Always include all locked mappings, then spend what is left of the
+        # budget on unlocked ones.
+        for e in mappings:
+            if e.locked:
+                line = entry_line(e)
+                lines.append(line)
+                used_tokens += len(line.split())
+        for e in mappings:
+            if e.locked:
+                continue
             line = entry_line(e)
             cost = len(line.split())
             if used_tokens + cost > budget_tokens:
@@ -116,7 +166,50 @@ class Glossary(BaseModel):
             lines.append(line)
             used_tokens += cost
 
+        identity_line = self._render_identity_line(
+            identities, budget_tokens - used_tokens
+        )
+        if identity_line:
+            lines.append(identity_line)
+
         return "\n".join(lines)
+
+    @staticmethod
+    def _render_identity_line(
+        identities: list[GlossaryEntry], remaining_tokens: int
+    ) -> str:
+        """Return the compact do-not-translate line, or "" if there is nothing to say.
+
+        Locked terms are always named, even when ``remaining_tokens`` is
+        already spent; unlocked ones are appended while they fit. The header is
+        charged against the budget like any other content, but it is never the
+        reason a locked term goes missing.
+        """
+        if not identities:
+            return ""
+
+        header = "  DO NOT TRANSLATE (copy verbatim):"
+        used = len(header.split())
+        terms: list[str] = []
+
+        for e in identities:
+            if e.locked:
+                term = normalize_term(e.term)
+                terms.append(term)
+                used += len(term.split())
+        for e in identities:
+            if e.locked:
+                continue
+            term = normalize_term(e.term)
+            cost = len(term.split())
+            if used + cost > remaining_tokens:
+                break
+            terms.append(term)
+            used += cost
+
+        if not terms:
+            return ""
+        return f"{header} {', '.join(terms)}"
 
 
 class RollingSummary(BaseModel):

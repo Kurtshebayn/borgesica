@@ -460,3 +460,172 @@ def test_srt_static_block_still_cacheable_and_stable():
     config = make_config(source_type=SourceType.SRT)
 
     assert cm.get_static_block(config) == cm.get_static_block(config)
+
+
+# ---------------------------------------------------------------------------
+# B1d — identity entries (term == translation) are compacted
+#
+# Measured on the real 491-entry book glossary of job 13b43ac6: 337 entries
+# (69%) had term == translation. Those are proper nouns that correctly must
+# not be translated, but rendering each as "Aaru -> Aaru" spent two thirds of
+# the per-call glossary budget repeating every term back to itself. They are
+# now collapsed into a single do-not-translate line.
+# ---------------------------------------------------------------------------
+
+
+def _identity_terms_line(rendered: str) -> str:
+    """Return the compact do-not-translate line, or "" if absent."""
+    for line in rendered.splitlines():
+        if "DO NOT TRANSLATE" in line:
+            return line
+    return ""
+
+
+def test_render_compacts_identity_entries_into_one_line():
+    """term == translation entries share a single line instead of one each."""
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Aaru", translation="Aaru"),
+            GlossaryEntry(term="Alupi", translation="Alupi"),
+            GlossaryEntry(term="Crannog", translation="Crannog"),
+        ]
+    )
+
+    rendered = glossary.render()
+
+    line = _identity_terms_line(rendered)
+    assert line, "expected a do-not-translate line"
+    for term in ("Aaru", "Alupi", "Crannog"):
+        assert term in line
+    assert "→" not in rendered, "identity entries must not render as arrow pairs"
+
+
+def test_render_keeps_real_mappings_as_arrow_pairs():
+    """A term that genuinely changes still needs its explicit mapping."""
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Gleaner", translation="Segador"),
+            GlossaryEntry(term="Aaru", translation="Aaru"),
+        ]
+    )
+
+    rendered = glossary.render()
+
+    assert "Gleaner → Segador" in rendered
+    assert "Aaru" in _identity_terms_line(rendered)
+
+
+def test_render_compaction_is_cheaper_than_arrow_pairs():
+    """The whole point: the compact form must cost materially fewer words."""
+    terms = [f"Propio{i:03d}" for i in range(337)]
+    glossary = Glossary(
+        entries=[GlossaryEntry(term=t, translation=t) for t in terms]
+    )
+
+    compact_words = len(glossary.render().split())
+    arrow_words = len(" ".join(f"{t} → {t}" for t in terms).split())
+
+    assert compact_words < arrow_words / 2, (
+        f"compact form cost {compact_words} words vs {arrow_words} as arrow pairs"
+    )
+
+
+def test_render_identity_detection_ignores_whitespace_and_composition():
+    """Normalisation decides identity, so stray spacing does not force a pair."""
+    glossary = Glossary(entries=[GlossaryEntry(term="Caer  Dathyl", translation="Caer Dathyl ")])
+
+    rendered = glossary.render()
+
+    assert "Caer Dathyl" in _identity_terms_line(rendered)
+    assert "→" not in rendered
+
+
+def test_render_treats_a_case_difference_as_a_real_mapping():
+    """"Alupi -> alupi" instructs a change; it is not a do-not-translate term."""
+    glossary = Glossary(entries=[GlossaryEntry(term="Alupi", translation="alupi")])
+
+    rendered = glossary.render()
+
+    assert "Alupi → alupi" in rendered
+    assert _identity_terms_line(rendered) == ""
+
+
+def test_render_always_includes_locked_identity_terms():
+    """The locked guarantee holds in the compact form too."""
+    locked = [
+        GlossaryEntry(term=f"Pinned{i:02d}", translation=f"Pinned{i:02d}", locked=True)
+        for i in range(10)
+    ]
+    filler = [
+        GlossaryEntry(term=f"Relleno{i:03d}", translation=f"Traducido{i:03d}")
+        for i in range(200)
+    ]
+    glossary = Glossary(entries=locked + filler)
+
+    rendered = glossary.render(budget_tokens=40)
+
+    for i in range(10):
+        assert f"Pinned{i:02d}" in rendered, f"locked Pinned{i:02d} must always appear"
+
+
+def test_render_trims_unlocked_identity_terms_when_the_budget_runs_out():
+    """Compaction lowers the cost of identity terms; it does not exempt them."""
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term=f"Propio{i:03d}", translation=f"Propio{i:03d}")
+            for i in range(300)
+        ]
+    )
+
+    rendered = glossary.render(budget_tokens=30)
+
+    line = _identity_terms_line(rendered)
+    kept = [t for t in line.split() if t.startswith("Propio")]
+    assert 0 < len(kept) < 300
+
+
+def test_render_spends_the_budget_on_real_mappings_before_identity_terms():
+    """A mapping teaches a translation; an identity term only withholds one."""
+    mappings = [
+        GlossaryEntry(term=f"Ingles{i:02d}", translation=f"Espanol{i:02d}")
+        for i in range(10)
+    ]
+    identities = [
+        GlossaryEntry(term=f"Propio{i:03d}", translation=f"Propio{i:03d}")
+        for i in range(300)
+    ]
+    glossary = Glossary(entries=identities + mappings)
+
+    rendered = glossary.render(budget_tokens=45)
+
+    for i in range(10):
+        assert f"Ingles{i:02d}" in rendered, f"mapping Ingles{i:02d} was crowded out"
+
+
+def test_render_respects_the_budget_with_a_mixed_glossary():
+    """The compact line is charged against the budget like everything else."""
+    identities = [
+        GlossaryEntry(term=f"Propio{i:03d}", translation=f"Propio{i:03d}")
+        for i in range(300)
+    ]
+    mappings = [
+        GlossaryEntry(term=f"Ingles{i:03d}", translation=f"Espanol{i:03d}")
+        for i in range(100)
+    ]
+    glossary = Glossary(entries=identities + mappings)
+
+    rendered = glossary.render(budget_tokens=200)
+
+    assert len(rendered.split()) <= 200
+
+
+def test_render_emits_no_do_not_translate_line_without_identity_entries():
+    """No identity entries means no wasted header."""
+    glossary = Glossary(entries=[GlossaryEntry(term="Gleaner", translation="Segador")])
+
+    assert _identity_terms_line(glossary.render()) == ""
+
+
+def test_render_of_an_empty_glossary_is_still_empty():
+    """An empty glossary must not grow a header."""
+    assert Glossary().render() == ""
