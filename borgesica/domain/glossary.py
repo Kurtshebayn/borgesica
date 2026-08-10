@@ -20,17 +20,22 @@ Mid-run addition staging logic:
 """
 from __future__ import annotations
 
-import re
-import unicodedata
-
 from borgesica.domain.models import (
     Glossary,
     GlossaryEntry,
     JobConfig,
+    normalize_term,
 )
 from borgesica.domain.ports import TranslationProvider
 
-_WHITESPACE_RUN = re.compile(r"\s+")
+__all__ = [
+    "LlmGlossaryExtractor",
+    "NullGlossaryExtractor",
+    "dedupe_glossary",
+    "get_extractor",
+    "merge_additions",
+    "normalize_term",
+]
 
 # ---------------------------------------------------------------------------
 # Glossary-extraction system prompt
@@ -147,24 +152,6 @@ def get_extractor(
 # ---------------------------------------------------------------------------
 # Term normalisation and deduplication
 # ---------------------------------------------------------------------------
-
-
-def normalize_term(term: str) -> str:
-    """Return the canonical display form of a glossary term.
-
-    Canonicalises the two ways the same term can be spelled without anyone
-    meaning anything different by it:
-      - surrounding and repeated internal whitespace (models emit both
-        "Ddram cyfraith" and "Ddram  cyfraith ");
-      - Unicode composition, so a precomposed "ó" and an "o" followed by a
-        combining acute compare equal — they render identically and would
-        otherwise persist as two entries in an accented-Spanish glossary.
-
-    Casing is deliberately preserved: it is not part of the identity of a term
-    (see ``_dedupe_key``), but it *is* how the entry is shown to the model and
-    to the human editing the glossary.
-    """
-    return _WHITESPACE_RUN.sub(" ", unicodedata.normalize("NFC", term)).strip()
 
 
 def _dedupe_key(term: str) -> str:
