@@ -5,6 +5,7 @@ No real API key required.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -835,3 +836,112 @@ class TestProgressPrinter:
         line = self._line(capsys, position=0, total_chunks=0)
 
         assert "(0%)" in line, line
+
+
+# ---------------------------------------------------------------------------
+# B1d — the CLI must not claim a rejected glossary edit succeeded
+#
+# `glossary update` printed "Updated glossary entry: ..." unconditionally, so
+# once the direction guard started rejecting contradictory entries the CLI was
+# telling the user an edit had landed when it had not.
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_glossary_update_reports_a_rejected_entry(capsys: pytest.CaptureFixture) -> None:
+    """A rejected edit exits non-zero and never claims success."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.errors import GlossaryEntryRejectedError
+    from borgesica.domain.models import GlossaryEntry
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.update_glossary.side_effect = GlossaryEntryRejectedError(
+            job_id="job-1",
+            rejected=[GlossaryEntry(term="Voluntad", translation="Will")],
+        )
+        mock_build.return_value = engine
+
+        code = main(["glossary", "update", "job-1", "Voluntad", "Will"])
+
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert "Updated glossary entry" not in out
+    assert "Voluntad" in err
+    assert "--lock" in err
+
+
+def test_cmd_glossary_update_still_confirms_an_accepted_entry(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The success path is unchanged."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        mock_build.return_value = engine
+
+        code = main(["glossary", "update", "job-1", "Gleaner", "Segador"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert "Updated glossary entry" in out
+
+
+def test_cmd_glossary_show_notes_repaired_entries_on_stderr(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Printing fewer entries than are stored needs an explanation.
+
+    The note goes to stderr so it cannot corrupt the JSON on stdout.
+    """
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.get_glossary.return_value = Glossary(
+            entries=[GlossaryEntry(term="Alupi", translation="Alupi")]
+        )
+        engine.glossary_repairs.return_value = [
+            GlossaryEntry(term="alupi", translation="alupi")
+        ]
+        mock_build.return_value = engine
+
+        code = main(["glossary", "show", "job-1"])
+
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert json.loads(out) == [
+        {"term": "Alupi", "translation": "Alupi", "locked": False, "note": None}
+    ]
+    assert "1" in err
+
+
+def test_cmd_glossary_show_stays_quiet_for_a_clean_glossary(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """No repairs, no noise."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.get_glossary.return_value = Glossary(
+            entries=[GlossaryEntry(term="Gleaner", translation="Segador")]
+        )
+        engine.glossary_repairs.return_value = []
+        mock_build.return_value = engine
+
+        code = main(["glossary", "show", "job-1"])
+
+    _, err = capsys.readouterr()
+    assert code == 0
+    assert err == ""

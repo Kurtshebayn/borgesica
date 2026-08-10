@@ -18,7 +18,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
 
 from borgesica.api import TranslatorEngine
-from borgesica.domain.errors import BorgesicaError, JobNotFoundError, JobStateError
+from borgesica.domain.errors import (
+    BorgesicaError,
+    GlossaryEntryRejectedError,
+    JobNotFoundError,
+    JobStateError,
+)
 from borgesica.domain.models import JobConfig, JobStatus, SourceType
 from borgesica.serve.runner import JobRunner
 from borgesica.serve.schemas import (
@@ -117,14 +122,22 @@ def create_app(
     app.state.runner = runner  # exposed for tests/introspection
 
     # Error mapping (design endpoints table): JobNotFound->404,
-    # JobStateError->409, pydantic validation->422 (FastAPI default),
-    # any other BorgesicaError->500.
+    # JobStateError->409, GlossaryEntryRejected->409, pydantic
+    # validation->422 (FastAPI default), any other BorgesicaError->500.
     @app.exception_handler(JobNotFoundError)
     async def _job_not_found_handler(_request: Request, exc: JobNotFoundError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
 
     @app.exception_handler(JobStateError)
     async def _job_state_handler(_request: Request, exc: JobStateError) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(GlossaryEntryRejectedError)
+    async def _glossary_rejected_handler(
+        _request: Request, exc: GlossaryEntryRejectedError
+    ) -> JSONResponse:
+        # 409: the submitted entry conflicts with what the glossary already
+        # states, and nothing was persisted.
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(BorgesicaError)

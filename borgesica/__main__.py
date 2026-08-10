@@ -68,7 +68,12 @@ from typing import Any
 from dotenv import find_dotenv, load_dotenv
 
 from borgesica.api import TranslatorEngine
-from borgesica.domain.errors import BorgesicaError, JobNotFoundError, UnsupportedFormatError
+from borgesica.domain.errors import (
+    BorgesicaError,
+    GlossaryEntryRejectedError,
+    JobNotFoundError,
+    UnsupportedFormatError,
+)
 from borgesica.domain.models import GlossaryEntry, JobConfig, Progress, SourceType
 
 # Map file extension → SourceType and back (extension → format detection).
@@ -521,6 +526,17 @@ def _cmd_glossary_show(args: argparse.Namespace, engine: TranslatorEngine) -> in
         glossary = engine.get_glossary(args.job_id)
         data = [e.model_dump() for e in glossary.entries]
         print(json.dumps(data, indent=2, ensure_ascii=False))
+        # The stored glossary may hold entries the hygiene rules remove on
+        # read. Say so, or printing fewer entries than were saved looks like
+        # data loss. Goes to stderr so it cannot corrupt the JSON on stdout.
+        repairs = engine.glossary_repairs(args.job_id)
+        if repairs:
+            terms = ", ".join(repr(e.term) for e in repairs)
+            print(
+                f"NOTE: {len(repairs)} stored entrie(s) omitted as duplicates or "
+                f"reversed entries: {terms}",
+                file=sys.stderr,
+            )
         return 0
     except JobNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -599,6 +615,13 @@ def _cmd_glossary_update(args: argparse.Namespace, engine: TranslatorEngine) -> 
         engine.update_glossary(args.job_id, [entry])
         print(f"Updated glossary entry: {args.term!r} → {args.translation!r}")
         return 0
+    except GlossaryEntryRejectedError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print(
+            "Re-run with --lock to keep it anyway.",
+            file=sys.stderr,
+        )
+        return 1
     except JobNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -909,19 +909,6 @@ def test_update_glossary_preserves_the_position_of_an_upserted_entry(
     assert [e.term for e in updated.entries] == ["Aaru", "Gleaner", "Draoi"]
 
 
-def test_update_glossary_rejects_a_reversed_hand_edit(tmp_path: Path) -> None:
-    """The direction guard applies to hand edits too."""
-    engine, job = _engine_with_glossary(
-        tmp_path, [GlossaryEntry(term="Will", translation="Voluntad")]
-    )
-
-    updated = engine.update_glossary(
-        job.id, [GlossaryEntry(term="Voluntad", translation="Will")]
-    )
-
-    assert [e.term for e in updated.entries] == ["Will"]
-
-
 def test_update_glossary_honours_a_locked_entry_the_guard_would_reject(
     tmp_path: Path,
 ) -> None:
@@ -951,3 +938,138 @@ def test_update_glossary_persists_the_cleaned_glossary(tmp_path: Path) -> None:
 
     stored = engine._checkpoint.load_glossary(job.id)
     assert [e.term for e in stored.entries] == ["Alupi", "Aaru"]
+
+
+# ---------------------------------------------------------------------------
+# B1d — a rejected hand edit must be reported, never silently discarded
+#
+# The direction guard runs on update_glossary, so a caller's own entry could
+# be dropped with no trace. The CLI printed "Updated glossary entry: ..."
+# unconditionally, so the user was told the edit had landed when it had not.
+# ---------------------------------------------------------------------------
+
+
+def test_update_glossary_raises_when_the_callers_entry_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """Asking for something and not getting it is an error, not a no-op."""
+    from borgesica.domain.errors import GlossaryEntryRejectedError
+
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Will", translation="Voluntad")]
+    )
+
+    with pytest.raises(GlossaryEntryRejectedError) as exc_info:
+        engine.update_glossary(
+            job.id, [GlossaryEntry(term="Voluntad", translation="Will")]
+        )
+
+    assert [e.term for e in exc_info.value.rejected] == ["Voluntad"]
+
+
+def test_rejected_entry_error_names_the_term_and_the_way_out(tmp_path: Path) -> None:
+    """The message has to be actionable — locking is the documented override."""
+    from borgesica.domain.errors import GlossaryEntryRejectedError
+
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Will", translation="Voluntad")]
+    )
+
+    with pytest.raises(GlossaryEntryRejectedError) as exc_info:
+        engine.update_glossary(
+            job.id, [GlossaryEntry(term="Voluntad", translation="Will")]
+        )
+
+    message = str(exc_info.value)
+    assert "Voluntad" in message
+    assert "locked" in message
+
+
+def test_update_glossary_does_not_persist_a_rejected_edit(tmp_path: Path) -> None:
+    """A rejected update must leave the stored glossary exactly as it was."""
+    from borgesica.domain.errors import GlossaryEntryRejectedError
+
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Will", translation="Voluntad")]
+    )
+
+    with pytest.raises(GlossaryEntryRejectedError):
+        engine.update_glossary(
+            job.id, [GlossaryEntry(term="Voluntad", translation="Will")]
+        )
+
+    stored = engine._checkpoint.load_glossary(job.id)
+    assert [e.term for e in stored.entries] == ["Will"]
+
+
+def test_update_glossary_does_not_raise_for_a_locked_override(tmp_path: Path) -> None:
+    """The escape hatch must actually work — locking is not rejected."""
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Will", translation="Voluntad")]
+    )
+
+    updated = engine.update_glossary(
+        job.id, [GlossaryEntry(term="Voluntad", translation="Will", locked=True)]
+    )
+
+    assert [e.term for e in updated.entries] == ["Will", "Voluntad"]
+
+
+def test_update_glossary_does_not_raise_when_only_old_contamination_is_cleaned(
+    tmp_path: Path,
+) -> None:
+    """Repairing what was already stored is maintenance, not a rejected request."""
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(term="Will", translation="Voluntad"),
+            GlossaryEntry(term="Voluntad", translation="Will"),
+        ],
+    )
+
+    updated = engine.update_glossary(
+        job.id, [GlossaryEntry(term="Aaru", translation="Aaru")]
+    )
+
+    assert [e.term for e in updated.entries] == ["Will", "Aaru"]
+
+
+def test_update_glossary_accepts_two_case_variants_in_one_call(tmp_path: Path) -> None:
+    """Collapsing a caller's own duplicate is deduplication, not rejection."""
+    engine, job = _engine_with_glossary(tmp_path, [])
+
+    updated = engine.update_glossary(
+        job.id,
+        [
+            GlossaryEntry(term="Alupi", translation="Alupi"),
+            GlossaryEntry(term="alupi", translation="Alupi"),
+        ],
+    )
+
+    assert len(updated.entries) == 1
+
+
+def test_glossary_repairs_reports_what_cleaning_would_remove(tmp_path: Path) -> None:
+    """`glossary show` must be able to say why it prints fewer entries than are stored."""
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(term="Alupi", translation="Alupi"),
+            GlossaryEntry(term="alupi", translation="alupi"),
+            GlossaryEntry(term="Will", translation="Voluntad"),
+            GlossaryEntry(term="Voluntad", translation="Will"),
+        ],
+    )
+
+    repairs = engine.glossary_repairs(job.id)
+
+    assert [e.term for e in repairs] == ["alupi", "Voluntad"]
+
+
+def test_glossary_repairs_is_empty_for_a_clean_glossary(tmp_path: Path) -> None:
+    """Nothing to repair means nothing to report."""
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Gleaner", translation="Segador")]
+    )
+
+    assert engine.glossary_repairs(job.id) == []

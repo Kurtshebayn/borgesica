@@ -7,7 +7,7 @@ domain purity intact (see tests/unit/test_domain_purity.py).
 """
 from __future__ import annotations
 
-from borgesica.domain.models import Usage
+from borgesica.domain.models import GlossaryEntry, Usage
 
 
 class BorgesicaError(Exception):
@@ -65,6 +65,29 @@ class JobStateError(BorgesicaError):
         )
         self.job_id = job_id
         self.current_status = current_status
+
+
+class GlossaryEntryRejectedError(BorgesicaError):
+    """Raised when a caller's own glossary entry contradicts the glossary.
+
+    The glossary hygiene rules also repair contamination that was already
+    stored, and that is maintenance — it happens quietly. This error is only
+    for entries the CALLER just supplied: asking for something and not getting
+    it is a failure, not a no-op, and the update is not persisted.
+
+    The message names the offending terms and points at ``locked=True``, which
+    is the supported way to state that the entry is intended.
+    """
+
+    def __init__(self, *, job_id: str, rejected: list[GlossaryEntry]) -> None:
+        terms = ", ".join(repr(e.term) for e in rejected)
+        super().__init__(
+            f"Glossary entries rejected for job {job_id!r}: {terms}. "
+            f"Each contradicts an existing entry by translating back into the "
+            f"source language. Mark the entry locked=True to keep it anyway."
+        )
+        self.job_id = job_id
+        self.rejected = rejected
 
 
 class UnsupportedFormatError(BorgesicaError):
