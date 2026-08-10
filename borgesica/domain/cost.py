@@ -28,8 +28,10 @@ from borgesica.domain.models import (
     Chunk,
     ChunkStatus,
     CostEstimate,
+    Glossary,
     Job,
     JobConfig,
+    RollingSummary,
     translation_tool_schema,
 )
 from borgesica.domain.ports import TranslationProvider
@@ -37,9 +39,16 @@ from borgesica.domain.ports import TranslationProvider
 if TYPE_CHECKING:
     from borgesica.domain.context import ContextManager
 
-# Dynamic system-prompt budget paid on EVERY call: rendered glossary (≤ 300)
-# + rolling summary (≤ 200). Mirrors ContextManager._build_dynamic_block.
-_DYNAMIC_BLOCK_BUDGET_TOKENS = 500
+# Rolling-summary allowance, in WORDS, used only for the CEILING bound. The
+# summary a future chunk will carry cannot be known before the run, and unlike
+# the glossary it has no configured cap, so the ceiling assumes a summary of
+# this size on every call. The FLOOR uses the job's actual summary.
+_SUMMARY_BUDGET_WORDS = 200
+
+# Filler token used to price a WORD budget. Glossary budgets are expressed in
+# words (Glossary.render counts len(line.split())) but cost math needs tokens,
+# so a budget of N words is priced by asking the provider to count N words.
+_BUDGET_FILLER_WORD = "palabra"
 
 # Output tokens BEYOND the translation itself: the provider returns the full
 # JSON envelope — summary_update (3-5 sentences) + glossary_additions + keys.
@@ -74,6 +83,27 @@ def _waste_factor(provider: object) -> float:
     declaring `retry_waste_factor` change the ceiling.
     """
     return float(getattr(provider, "retry_waste_factor", _DEFAULT_WASTE_FACTOR))
+
+
+def _word_budget_tokens(
+    provider: TranslationProvider,  # type: ignore[type-arg]
+    words: int,
+    model: str,
+) -> int:
+    """Price a WORD budget in tokens using the provider's own counter.
+
+    Glossary budgets are word counts, not token counts (see Glossary.render).
+    Routing the conversion through `count_tokens` instead of hardcoding a ratio
+    means a provider that ships a real tokenizer corrects this for free.
+
+    NOTE: every adapter currently approximates count_tokens as words x 1.3, so
+    this conversion inherits that approximation. Calibrating it against real
+    `usage.input_tokens` is tracked separately (C1, cause 2); it is deliberately
+    NOT papered over with a second invented constant here.
+    """
+    if words <= 0:
+        return 0
+    return provider.count_tokens(" ".join([_BUDGET_FILLER_WORD] * words), model)
 
 
 def _tool_schema_tokens(
@@ -117,8 +147,25 @@ class CostEstimator:
         chunks: list[Chunk],
         config: JobConfig,
         output_tokens_per_chunk: int | None = None,
+        glossary: Glossary | None = None,
+        summary: RollingSummary | None = None,
     ) -> CostEstimate:
         """Compute a CostEstimate covering only PENDING chunks.
+
+        The two bounds differ in more than retry waste. The glossary rides in
+        the DYNAMIC (uncached) prompt block and is paid on EVERY call, but it
+        GROWS during a run — a fresh job starts empty and a real 502-chunk book
+        finished with 491 entries. No pre-flight measurement can predict that
+        growth, so:
+
+          usd_low  — the dynamic block the job has RIGHT NOW (empty on a fresh
+                     job, the accumulated glossary on a resumed one).
+          usd_high — a full `config.glossary_budget_tokens` glossary plus a
+                     summary on every call, times the retry-waste factor.
+
+        The band is therefore genuinely wide on a fresh job. That is honest:
+        the floor is what the first chunk costs, the ceiling is what the last
+        one costs.
 
         Args:
             job: The Job (used for model and budget info via config).
@@ -128,11 +175,16 @@ class CostEstimator:
                 per provider call. Default (None) models the real JSON
                 envelope: source-sized translation + _OUTPUT_ENVELOPE_TOKENS.
                 Pass an explicit value in tests for deterministic arithmetic.
+            glossary: The job's current glossary, used for the FLOOR bound.
+                None is treated as empty (a job that has not run yet).
+            summary: The job's current rolling summary, used for the FLOOR
+                bound. None is treated as empty.
 
         Returns:
             CostEstimate with input_tokens, output_tokens, usd, model,
             cached (whether the static block qualifies for prompt caching —
             informational; no adapter applies it), and within_budget.
+            input_tokens reports the FLOOR, matching `usd` (= usd_low).
 
         NOTE: Prompt cache-write cost is NOT included. See module docstring.
         """
@@ -164,11 +216,46 @@ class CostEstimator:
         # omitting it under-estimated a full-movie job 16x (job 0b86d4f2).
         # Without a context_manager the static block is unknown; overhead
         # stays 0 (backward compat, same contract as `cached`).
-        overhead_tokens = 0
+        #
+        # The dynamic block is MEASURED, never mirrored: cost.py once restated
+        # its shape as a literal 500 tokens, the glossary budget moved to 2500
+        # words, and every estimate under-counted by ~6.6x (job 13b43ac6:
+        # estimated $0.275-$0.826, real $1.2349).
+        overhead_low = 0
+        overhead_high = 0
         if self._context_manager is not None:
-            overhead_tokens = token_count + _DYNAMIC_BLOCK_BUDGET_TOKENS
+            dynamic_block = self._context_manager.build_dynamic_block(
+                glossary if glossary is not None else Glossary(),
+                summary if summary is not None else RollingSummary(),
+                config.glossary_budget_tokens,
+            )
+            dynamic_low = self._provider.count_tokens(dynamic_block, config.model)
+            # Ceiling: the same block structure, but with the glossary and the
+            # summary each filled to their budget. Measuring the empty block
+            # keeps the [GLOSSARY]/[SUMMARY] scaffolding counted exactly once.
+            scaffolding = self._provider.count_tokens(
+                self._context_manager.build_dynamic_block(
+                    Glossary(), RollingSummary(), config.glossary_budget_tokens
+                ),
+                config.model,
+            )
+            dynamic_high = (
+                scaffolding
+                + _word_budget_tokens(
+                    self._provider, config.glossary_budget_tokens, config.model
+                )
+                + _word_budget_tokens(
+                    self._provider, _SUMMARY_BUDGET_WORDS, config.model
+                )
+            )
+            # A glossary already over budget must not push the floor past the
+            # ceiling (render() always emits locked entries, budget or not).
+            dynamic_low = min(dynamic_low, dynamic_high)
+            overhead_low = token_count + dynamic_low
+            overhead_high = token_count + dynamic_high
 
         total_input = 0
+        total_input_high = 0
         total_output = 0
 
         for chunk in pending:
@@ -186,18 +273,24 @@ class CostEstimator:
                 if self._context_manager is not None
                 else 0
             )
-            total_input += (chunk_input + overhead_tokens + schema_tokens) * passes
+            total_input += (chunk_input + overhead_low + schema_tokens) * passes
+            total_input_high += (chunk_input + overhead_high + schema_tokens) * passes
             total_output += chunk_output * passes
 
         in_usd_per_mtok, out_usd_per_mtok = self._provider.price(config.model)
-        # usd_low: happy path — one billed call per chunk (× passes).
+        # usd_low: happy path — one billed call per chunk (× passes), carrying
+        # only the dynamic block the job has today.
         usd_low = (
             total_input / 1_000_000 * in_usd_per_mtok
             + total_output / 1_000_000 * out_usd_per_mtok
         )
-        # usd_high: ceiling — folds in the provider's retry / tier-fallthrough
-        # waste that no static token math can predict.
-        usd_high = usd_low * _waste_factor(self._provider)
+        # usd_high: ceiling — a full glossary budget on every call, PLUS the
+        # provider's retry / tier-fallthrough waste that no static token math
+        # can predict.
+        usd_high = (
+            total_input_high / 1_000_000 * in_usd_per_mtok
+            + total_output / 1_000_000 * out_usd_per_mtok
+        ) * _waste_factor(self._provider)
 
         # The budget guard protects against the CEILING, not the optimistic
         # point. A public user who is promised a number must not blow past it

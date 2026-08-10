@@ -44,6 +44,22 @@ def make_chunk(index: int, status: ChunkStatus = ChunkStatus.PENDING, text: str 
     return Chunk(index=index, source_text=text, status=status)
 
 
+def _empty_dynamic_tokens(provider, context_manager, config) -> int:
+    """Tokens of the dynamic block a job with no glossary and no summary pays.
+
+    Measured, not hardcoded. cost.py used to encode this as a flat 500 and the
+    literal went stale when the glossary budget moved to 2500 words (C1).
+    """
+    from borgesica.domain.models import Glossary
+
+    return provider.count_tokens(
+        context_manager.build_dynamic_block(
+            Glossary(), RollingSummary(), config.glossary_budget_tokens
+        ),
+        config.model,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — fast mode: 4 pending chunks → 4 passes
 # ---------------------------------------------------------------------------
@@ -271,7 +287,7 @@ def test_estimate_includes_per_call_system_prompt_overhead():
     """With a context_manager, input tokens include the system prompt
     (static block + dynamic budget) once per chunk per pass — not just source."""
     from borgesica.domain.context import ContextManager
-    from borgesica.domain.cost import _DYNAMIC_BLOCK_BUDGET_TOKENS, CostEstimator
+    from borgesica.domain.cost import CostEstimator
 
     provider = FakeTranslationProvider()
     context_manager = ContextManager()
@@ -293,7 +309,8 @@ def test_estimate_includes_per_call_system_prompt_overhead():
     schema_tokens = provider.count_tokens(
         _json.dumps(translation_tool_schema(None)), config.model
     )
-    expected_input = 3 * (2 + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens)
+    dynamic_tokens = _empty_dynamic_tokens(provider, context_manager, config)
+    expected_input = 3 * (2 + static_tokens + dynamic_tokens + schema_tokens)
     assert est.input_tokens == expected_input, (
         f"Expected {expected_input} input tokens (source + system prompt + tool "
         f"schema per call), got {est.input_tokens} — per-call overhead not counted"
@@ -463,7 +480,7 @@ def test_estimate_counts_tool_schema_in_per_call_overhead():
     import json
 
     from borgesica.domain.context import ContextManager
-    from borgesica.domain.cost import _DYNAMIC_BLOCK_BUDGET_TOKENS, CostEstimator
+    from borgesica.domain.cost import CostEstimator
     from borgesica.domain.models import translation_tool_schema
 
     provider = FakeTranslationProvider()
@@ -482,8 +499,172 @@ def test_estimate_counts_tool_schema_in_per_call_overhead():
     schema_tokens = provider.count_tokens(
         json.dumps(translation_tool_schema(None)), config.model
     )
-    expected_input = 2 * (2 + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens)
+    dynamic_tokens = _empty_dynamic_tokens(provider, context_manager, config)
+    expected_input = 2 * (2 + static_tokens + dynamic_tokens + schema_tokens)
     assert est.input_tokens == expected_input, (
         f"Expected {expected_input} (source + static + dynamic + tool schema), "
         f"got {est.input_tokens} — tool schema not counted"
+    )
+
+
+# ---------------------------------------------------------------------------
+# C1 — the dynamic-block overhead was a STALE CONSTANT.
+#
+# cost.py hand-mirrored ContextManager's dynamic block as a flat 500 tokens
+# ("glossary <= 300 + summary <= 200"). The glossary budget later moved to
+# DEFAULT_GLOSSARY_BUDGET_TOKENS = 2500 WORDS (~3.3k tokens) and the mirror was
+# never updated, so both the estimate and the budget guard under-counted the
+# per-call overhead by ~6.6x. Measured on job 13b43ac6: estimated $0.275-$0.826,
+# real $1.2349 — above the CEILING.
+#
+# The fix stops mirroring: the estimator measures the real dynamic block for the
+# floor and the configured budget for the ceiling.
+# ---------------------------------------------------------------------------
+
+
+def _estimator_with_ctx(provider=None):
+    from borgesica.domain.context import ContextManager
+    from borgesica.domain.cost import CostEstimator
+
+    provider = provider or FakeTranslationProvider()
+    ctx = ContextManager()
+    return CostEstimator(provider=provider, context_manager=ctx), provider, ctx
+
+
+def test_ceiling_overhead_scales_with_configured_glossary_budget():
+    """usd_high must grow when config.glossary_budget_tokens grows.
+
+    The glossary rides in the DYNAMIC (uncached) block, so it is paid on EVERY
+    call. A job configured for a 2500-word glossary has a materially higher
+    ceiling than one capped at 300. With the stale flat constant both estimates
+    were identical.
+    """
+    estimator, _, _ = _estimator_with_ctx()
+    chunks = [make_chunk(i, text="hello world") for i in range(3)]
+
+    small_cfg = make_config(quality_mode="fast", glossary_budget_tokens=300)
+    big_cfg = make_config(quality_mode="fast", glossary_budget_tokens=2500)
+
+    small = estimator.estimate(make_job(small_cfg, total=3), chunks, small_cfg)
+    big = estimator.estimate(make_job(big_cfg, total=3), chunks, big_cfg)
+
+    assert big.usd_high > small.usd_high, (
+        f"A 2500-word glossary budget must project a higher ceiling than a "
+        f"300-word one (got {big.usd_high} vs {small.usd_high}) — the dynamic "
+        f"block is paid on every call and must not be a flat constant."
+    )
+
+
+def test_ceiling_is_more_than_the_floor_times_the_waste_factor():
+    """usd_high folds in the glossary ceiling ON TOP OF retry waste.
+
+    A fresh job has an empty glossary, so its FLOOR pays almost no dynamic
+    block. Its CEILING pays a full budget's worth on every call. If the dynamic
+    block were a single constant shared by both bounds, the only difference
+    between them would be the retry-waste factor.
+    """
+    from borgesica.domain.cost import _waste_factor
+
+    estimator, provider, _ = _estimator_with_ctx()
+    config = make_config(quality_mode="fast", glossary_budget_tokens=2500)
+    chunks = [make_chunk(0, text="hello world")]
+
+    est = estimator.estimate(make_job(config, total=1), chunks, config)
+
+    assert est.usd_high > est.usd_low * _waste_factor(provider), (
+        f"usd_high ({est.usd_high}) must exceed usd_low ({est.usd_low}) x the "
+        f"waste factor ({_waste_factor(provider)}): the ceiling also carries a "
+        f"full glossary budget that the empty-glossary floor does not."
+    )
+
+
+def test_floor_uses_the_real_glossary_not_a_constant():
+    """usd_low must reflect the glossary the job ACTUALLY has.
+
+    A resumed job carrying 400 accumulated entries pays for them on every
+    remaining call; a fresh job pays nothing. The floor must tell them apart.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    estimator, _, _ = _estimator_with_ctx()
+    config = make_config(quality_mode="fast", glossary_budget_tokens=2500)
+    chunks = [make_chunk(0, text="hello world")]
+    job = make_job(config, total=1)
+
+    populated = Glossary(
+        entries=[
+            GlossaryEntry(term=f"term{i}", translation=f"termino{i}")
+            for i in range(200)
+        ]
+    )
+
+    empty_est = estimator.estimate(job, chunks, config, glossary=Glossary())
+    full_est = estimator.estimate(job, chunks, config, glossary=populated)
+
+    assert full_est.usd_low > empty_est.usd_low, (
+        f"A job with 200 accumulated glossary entries must project a higher "
+        f"floor ({full_est.usd_low}) than one with an empty glossary "
+        f"({empty_est.usd_low}) — the glossary is paid on every call."
+    )
+
+
+def test_floor_never_exceeds_the_ceiling():
+    """Even a glossary that overflows its budget keeps usd_low <= usd_high."""
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    estimator, _, _ = _estimator_with_ctx()
+    config = make_config(quality_mode="fast", glossary_budget_tokens=300)
+    chunks = [make_chunk(0, text="hello world")]
+    job = make_job(config, total=1)
+
+    huge = Glossary(
+        entries=[
+            GlossaryEntry(term=f"term{i}", translation=f"termino{i}")
+            for i in range(2000)
+        ]
+    )
+
+    est = estimator.estimate(job, chunks, config, glossary=huge)
+
+    assert est.usd_low <= est.usd_high, (
+        f"usd_low ({est.usd_low}) must never exceed usd_high ({est.usd_high})"
+    )
+
+
+def test_estimate_overhead_measures_the_real_context_manager_block():
+    """The estimator must MEASURE ContextManager's dynamic block, not mirror it.
+
+    This is the regression that caused C1: cost.py described the block in a
+    comment and encoded it as a literal. Measuring the real builder means the
+    two can never drift again.
+    """
+    from borgesica.domain.models import Glossary, RollingSummary as _RS
+
+    estimator, provider, ctx = _estimator_with_ctx()
+    config = make_config(quality_mode="fast", glossary_budget_tokens=2500)
+    chunks = [make_chunk(0, text="hello world")]
+    job = make_job(config, total=1)
+
+    glossary = Glossary()
+    summary = _RS(text="prior context here")
+
+    est = estimator.estimate(job, chunks, config, glossary=glossary, summary=summary)
+
+    import json as _json
+
+    from borgesica.domain.models import translation_tool_schema
+
+    static_tokens = provider.count_tokens(ctx.get_static_block(config), config.model)
+    schema_tokens = provider.count_tokens(
+        _json.dumps(translation_tool_schema(None)), config.model
+    )
+    dynamic_tokens = provider.count_tokens(
+        ctx.build_dynamic_block(glossary, summary, config.glossary_budget_tokens),
+        config.model,
+    )
+    expected_input = 2 + static_tokens + dynamic_tokens + schema_tokens
+
+    assert est.input_tokens == expected_input, (
+        f"input_tokens ({est.input_tokens}) must equal source + static + the "
+        f"MEASURED dynamic block + tool schema ({expected_input})"
     )

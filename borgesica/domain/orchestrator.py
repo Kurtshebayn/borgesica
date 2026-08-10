@@ -57,7 +57,6 @@ from datetime import UTC, datetime
 
 from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import (
-    _DYNAMIC_BLOCK_BUDGET_TOKENS,
     _OUTPUT_ENVELOPE_TOKENS,
     _tool_schema_tokens,
     _waste_factor,
@@ -285,8 +284,10 @@ class TranslationOrchestrator:
         # Mutable glossary reference — may grow via mid-run additions.
         live_glossary = glossary
 
-        # Process each chunk in order.
-        for chunk in ordered_chunks:
+        # Process each chunk in order. `position` is 1-based within this run:
+        # extracted chunks keep their ORIGINAL book indices, so chunk.index is
+        # not a fraction of total_chunks and must never be used as one.
+        for position, chunk in enumerate(ordered_chunks, start=1):
             # Skip already-DONE chunks (resume semantics).
             if chunk.status == ChunkStatus.DONE:
                 continue
@@ -305,7 +306,9 @@ class TranslationOrchestrator:
 
             # Budget check — BEFORE the provider call.
             if config.budget_usd is not None:
-                projected = self._project_chunk_cost(chunk, config)
+                projected = self._project_chunk_cost(
+                    chunk, config, live_glossary, current_summary
+                )
                 if running_cost + projected > config.budget_usd:
                     paused_job = job.model_copy(
                         update={
@@ -341,6 +344,7 @@ class TranslationOrchestrator:
                     Progress(
                         job_id=job.id,
                         chunk_index=chunk.index,
+                        position=position,
                         total_chunks=len(ordered_chunks),
                         cost_usd=running_cost,
                         status=JobStatus.RUNNING,
@@ -404,6 +408,7 @@ class TranslationOrchestrator:
                     Progress(
                         job_id=job.id,
                         chunk_index=chunk.index,
+                        position=position,
                         total_chunks=len(ordered_chunks),
                         cost_usd=running_cost,
                         status=JobStatus.RUNNING,
@@ -444,6 +449,7 @@ class TranslationOrchestrator:
                 Progress(
                     job_id=job.id,
                     chunk_index=chunk.index,
+                    position=position,
                     total_chunks=len(ordered_chunks),
                     cost_usd=running_cost,
                     status=JobStatus.RUNNING,
@@ -478,25 +484,47 @@ class TranslationOrchestrator:
         # and SQLite implementations (see design section 5).
         return self._checkpoint.load_summary(job_id)
 
-    def _project_chunk_cost(self, chunk: Chunk, config: JobConfig) -> float:
+    def _project_chunk_cost(
+        self,
+        chunk: Chunk,
+        config: JobConfig,
+        glossary: Glossary | None = None,
+        summary: RollingSummary | None = None,
+    ) -> float:
         """Estimate the cost of translating a single chunk (pre-call budget GUARD only).
 
         This is a CONSERVATIVE PROJECTION used before the provider call to decide
         whether to proceed.  It is NOT used to accrue actual cost — that comes from
         TranslationResult.usage after each real call.  Do NOT remove this method;
         the budget guard requires it.
+
+        Unlike the pre-flight CostEstimator, this runs mid-loop with the LIVE
+        glossary and summary in hand — the very objects that build the next
+        prompt — so the dynamic block is measured exactly rather than budgeted.
+        The projection therefore RISES as the glossary accumulates, which is
+        when the real per-call cost rises too. A job may now pause partway
+        through where it previously blew past its budget in silence.
         """
         source_tokens = self._provider.count_tokens(chunk.source_text, config.model)
-        # Per-call system prompt (static block + glossary/summary budget) is
-        # paid on EVERY call — on thin SRT chunks it dominates the call cost.
+        # Per-call system prompt (static block + dynamic block) is paid on
+        # EVERY call — on thin SRT chunks it dominates the call cost.
         static_tokens = self._provider.count_tokens(
             self._ctx.get_static_block(config), config.model
         )
+        # Measured, not mirrored: this is the same builder that produces the
+        # prompt a few lines later in run(). See cost.py for the stale-constant
+        # regression that made mirroring it a bug.
+        dynamic_tokens = self._provider.count_tokens(
+            self._ctx.build_dynamic_block(
+                glossary if glossary is not None else Glossary(),
+                summary if summary is not None else RollingSummary(),
+                config.glossary_budget_tokens,
+            ),
+            config.model,
+        )
         # Tool schema (input_schema in tools=) is billed as input on every call.
         schema_tokens = _tool_schema_tokens(self._provider, chunk, config.model)
-        input_tokens = (
-            source_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens
-        )
+        input_tokens = source_tokens + static_tokens + dynamic_tokens + schema_tokens
         # Output = source-sized translation + JSON envelope (same as CostEstimator).
         output_tokens = source_tokens + _OUTPUT_ENVELOPE_TOKENS
         # Nav-label chunks always single-pass, regardless of quality_mode (D3):
@@ -635,6 +663,10 @@ class TranslationOrchestrator:
         segment_kwargs = (
             {} if segment_count is None else {"segment_count": segment_count}
         )
+        # Same **kwargs discipline for the per-job output cap: only jobs that
+        # set one pass it, so providers and fakes that predate it keep working.
+        if config.max_output_tokens is not None:
+            segment_kwargs["max_output_tokens"] = config.max_output_tokens
 
         # Nav-label chunks always single-pass, regardless of quality_mode (D3):
         # short factual nav labels gain nothing from critique/revise, and the
@@ -829,6 +861,10 @@ class TranslationOrchestrator:
         segment_kwargs = (
             {} if segment_count is None else {"segment_count": segment_count}
         )
+        # Same **kwargs discipline for the per-job output cap: only jobs that
+        # set one pass it, so providers and fakes that predate it keep working.
+        if config.max_output_tokens is not None:
+            segment_kwargs["max_output_tokens"] = config.max_output_tokens
 
         try:
             # Step 1: Draft translation (user prompt has tags)

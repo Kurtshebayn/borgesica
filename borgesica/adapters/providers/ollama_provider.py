@@ -60,6 +60,12 @@ class OllamaProvider(OpenAICompatibleProvider):
         _client:       Injectable transport for unit testing (no network).
     """
 
+    # The parent disables reasoning by default (deepseek-v4-flash spends its
+    # entire output budget on a reasoning trace). Local models reached through
+    # Ollama's OpenAI-compatible shim reject unknown parameters with a 400
+    # instead of ignoring them, so the knob is omitted here entirely.
+    reasoning_effort: str | None = None
+
     def __init__(
         self,
         base_url: str | None = None,

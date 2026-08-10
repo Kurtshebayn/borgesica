@@ -209,3 +209,22 @@ class TestOllamaProviderPresets:
         # Clean up: reload back to default state
         monkeypatch.delenv("OLLAMA_HOST", raising=False)
         importlib.reload(_mod)
+
+
+def test_ollama_does_not_send_reasoning_effort():
+    """Ollama must NOT inherit the OpenAI-compatible reasoning knob.
+
+    The parent disables reasoning by default because deepseek-v4-flash spends
+    its whole output budget on a reasoning trace. Ollama talks to local models
+    through an OpenAI-compatible shim that rejects unknown parameters with a
+    400 rather than ignoring them, so the knob must be omitted entirely.
+    """
+    from borgesica.adapters.providers.ollama_provider import OllamaProvider
+
+    fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+    provider = OllamaProvider(_client=fake_client)
+
+    provider.translate("system", "Hello world", "llama3")
+
+    assert provider.reasoning_effort is None
+    assert "reasoning_effort" not in fake_client.call_log[0]

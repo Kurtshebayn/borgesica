@@ -868,3 +868,132 @@ class TestSegmentedOutput:
         tier3_user = fake_client.call_log[2]["messages"][1]["content"]
         assert '"minItems": 3' in tier3_user
         assert '"translations"' in tier3_user
+
+
+# ---------------------------------------------------------------------------
+# Reasoning tokens (measured 2026-08-06).
+#
+# deepseek-v4-flash became a reasoning model: it spends ~20k reasoning tokens
+# before emitting anything. At the 8192 output cap every tier returned
+# finish_reason='length' with NO tool_call and NO content, so all three tiers
+# failed identically (~80s each) and every chunk ended in MalformedOutput.
+# Measured: reasoning_effort='none' -> 1.6s, 0 reasoning tokens, correct output.
+# ---------------------------------------------------------------------------
+
+
+class TestReasoningEffort:
+    def test_deepseek_disables_reasoning_by_default(self):
+        """Every tier must send reasoning_effort='none' on an OpenAI-compatible
+        provider, or the output budget is consumed by the reasoning trace."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert fake_client.call_log[0].get("reasoning_effort") == "none", (
+            "reasoning must be disabled by default: a reasoning trace eats the "
+            "whole output budget and the call returns no tool_call at all"
+        )
+
+    def test_reasoning_effort_is_overridable(self):
+        """An explicit reasoning_effort must reach the provider call."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+        provider.reasoning_effort = "minimal"
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert fake_client.call_log[0].get("reasoning_effort") == "minimal"
+
+    def test_reasoning_effort_omitted_when_none(self):
+        """Providers that do not understand the knob must not receive it.
+
+        Ollama subclasses this provider and talks to local models through the
+        OpenAI-compatible shim; an unknown parameter there is a 400, not a
+        no-op.
+        """
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+        provider.reasoning_effort = None
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert "reasoning_effort" not in fake_client.call_log[0]
+
+
+class TestMaxOutputTokensOverride:
+    def test_translate_honors_an_explicit_cap(self):
+        """A per-job output cap must override the module default on every tier."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate(
+                "system", "Hello world", "deepseek-v4-flash", max_output_tokens=32000
+            )
+
+        assert fake_client.call_log[0].get("max_tokens") == 32000
+
+    def test_default_cap_is_unchanged_when_not_given(self):
+        """Omitting the override keeps the historical module constant."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "deepseek-v4-flash")
+
+        assert fake_client.call_log[0].get("max_tokens") == _MAX_OUTPUT_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# count_tokens calibration (C1 cause 2, measured 2026-08-06).
+#
+# The old heuristic was words x 1.3. Measured against the LIVE DeepSeek
+# tokenizer (usage.prompt_tokens, chat-template overhead subtracted) over real
+# book text, it under-counted EVERY kind of text:
+#
+#   text kind        real tokens/word   heuristic error
+#   English prose          1.384             -6%
+#   Spanish prose          1.710            -24%
+#   static block           1.506            -14%
+#   rendered glossary      2.584            -50%
+#
+# Words are the unstable unit: tokens/word ranged 1.29-2.58 (CV 21.7%) while
+# chars/token held 2.65-4.34 (CV 13.6%). Counting characters and dividing by a
+# measured per-provider constant is both more accurate and more stable.
+# ---------------------------------------------------------------------------
+
+
+class TestCountTokensCalibration:
+    def test_counts_characters_against_the_measured_constant(self):
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=object())
+        text = "x" * 3853
+
+        assert provider.count_tokens(text, "deepseek-v4-flash") == pytest.approx(
+            1000, rel=0.01
+        )
+
+    def test_empty_text_is_zero(self):
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=object())
+        assert provider.count_tokens("", "deepseek-v4-flash") == 0
+
+    def test_accented_spanish_no_longer_under_counts(self):
+        """Spanish prose measured at 1.710 real tokens/word; the old heuristic
+        assumed 1.3 and under-counted it by 24%. The calibrated count must land
+        above the old value for the same text."""
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=object())
+        spanish = (
+            "El resplandor furioso del fuego iluminaba nubes bajas y veloces "
+            "mientras la cacofonía de la batalla se acercaba al muro. "
+        ) * 20
+
+        old_heuristic = round(len(spanish.split()) * 1.3)
+        assert provider.count_tokens(spanish, "deepseek-v4-flash") > old_heuristic
+
+    def test_calibration_constant_is_documented_on_the_class(self):
+        """The constant is per-provider because tokenizers differ measurably;
+        it must be an overridable attribute, not a literal buried in the body."""
+        assert OpenAICompatibleProvider.chars_per_token == pytest.approx(3.853)

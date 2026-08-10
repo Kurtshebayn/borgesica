@@ -361,13 +361,16 @@ def _build_engine(
 
 
 def _print_progress(progress: Progress) -> None:
+    # Progress.position, never chunk_index: extracted chunks keep their
+    # ORIGINAL book indices, so `--extract 20 --from 380` printed
+    # "chunk 387/20 (1935%)".
     pct = (
-        int(100 * (progress.chunk_index + 1) / progress.total_chunks)
+        int(100 * progress.position / progress.total_chunks)
         if progress.total_chunks > 0
         else 0
     )
     print(
-        f"  chunk {progress.chunk_index + 1}/{progress.total_chunks}"
+        f"  chunk {progress.position}/{progress.total_chunks}"
         f"  ({pct}%)  cost=${progress.cost_usd:.5f}",
         flush=True,
     )

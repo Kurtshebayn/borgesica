@@ -237,10 +237,23 @@ class AnthropicProvider:
         # All retries exhausted with malformed output — carry the billed waste.
         raise MalformedOutput(job_id="unknown", chunk_index=-1, usage=wasted) from last_error
 
-    def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
-        """Approximate token count using a word-count heuristic — never the network.
+    # Characters per token, MEASURED via the SDK's own count_tokens endpoint
+    # (exact, and it does not bill) on the same real book text used to
+    # calibrate DeepSeek: mean 3.390, CV 18.1%. Anthropic's tokenizer is denser
+    # than DeepSeek's 3.853, which is why this constant is per-provider rather
+    # than one shared number.
+    chars_per_token: float = 3.390
 
-        This deliberately does NOT call ``client.messages.count_tokens``.
+    def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
+        """Approximate token count: characters ÷ `chars_per_token` — never the network.
+
+        It used to be `words × 1.3`. Measured 2026-08-06 against this SDK's own
+        count_tokens endpoint, that under-counted real text by ~30% on average
+        (1.861 real tokens/word), and words proved the unstable unit: tokens per
+        word ranged 1.45-3.24 (CV 30.0%) against 18.1% for chars/token.
+
+        This deliberately does NOT call ``client.messages.count_tokens`` AT
+        RUNTIME.
         chunk_prose calls this once per prose node, so a round-trip per node
         made `create` unusable on a real book: a 502-node EPUB hung for 15+
         minutes before translating a single word. The port documents the return
@@ -256,7 +269,12 @@ class AnthropicProvider:
         nothing behavioural rides on it today. Wiring caching up will need a
         sharper measurement than this.
         """
-        return max(0, round(len(text.split()) * 1.3))
+        # Whitespace-only text counts as nothing. Character counting would
+        # otherwise bill blank padding, and callers (the orchestrator prose
+        # guard, chunk_prose) rely on blank nodes costing zero.
+        if not text.strip():
+            return 0
+        return max(0, round(len(text) / self.chars_per_token))
 
     def price(self, model: str) -> tuple[float, float]:
         """Return (input_usd_per_mtok, output_usd_per_mtok) for the given model.

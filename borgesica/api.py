@@ -194,7 +194,16 @@ class TranslatorEngine:
         """
         job = self._load_job_or_raise(job_id)
         chunks = self._checkpoint.load_chunks(job_id)
-        return self._cost_est.estimate(job, chunks, job.config)
+        # The floor bound prices the glossary/summary the job carries TODAY, so
+        # a resumed job with an accumulated glossary is not estimated as if it
+        # were starting from empty.
+        return self._cost_est.estimate(
+            job,
+            chunks,
+            job.config,
+            glossary=self._checkpoint.load_glossary(job_id),
+            summary=self._checkpoint.load_summary(job_id),
+        )
 
     # ------------------------------------------------------------------
     # run_job

@@ -52,6 +52,7 @@ def make_config(
     quality_mode: str = "fast",
     budget_usd: float | None = None,
     continue_on_error: bool = True,
+    **overrides,
 ) -> JobConfig:
     return JobConfig(
         source_type=SourceType.SRT,
@@ -59,6 +60,7 @@ def make_config(
         quality_mode=quality_mode,  # type: ignore[arg-type]
         budget_usd=budget_usd,
         continue_on_error=continue_on_error,
+        **overrides,
     )
 
 
@@ -2350,11 +2352,10 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     import json as _json
 
     from borgesica.domain.cost import (
-        _DYNAMIC_BLOCK_BUDGET_TOKENS,
         _OUTPUT_ENVELOPE_TOKENS,
         _waste_factor,
     )
-    from borgesica.domain.models import translation_tool_schema
+    from borgesica.domain.models import Glossary, translation_tool_schema
 
     orch, provider, _ = make_orchestrator()
     config = make_config(quality_mode="fast")
@@ -2368,10 +2369,18 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     schema_tokens = provider.count_tokens(
         _json.dumps(translation_tool_schema(None)), config.model
     )
+    # The dynamic block is MEASURED from the same builder that produces the real
+    # prompt, not restated as a literal (C1: the literal went stale at 500).
+    dynamic_tokens = provider.count_tokens(
+        orch._ctx.build_dynamic_block(
+            Glossary(), RollingSummary(), config.glossary_budget_tokens
+        ),
+        config.model,
+    )
     src_tokens = 2  # "hello world" with the word-count fake
     in_price, out_price = provider.price(config.model)
     base = (
-        (src_tokens + static_tokens + _DYNAMIC_BLOCK_BUDGET_TOKENS + schema_tokens)
+        (src_tokens + static_tokens + dynamic_tokens + schema_tokens)
         / 1_000_000 * in_price
         + (src_tokens + _OUTPUT_ENVELOPE_TOKENS) / 1_000_000 * out_price
     )
@@ -3129,3 +3138,129 @@ def test_correct_spanish_is_not_retried():
     assert saved.status == ChunkStatus.DONE
     assert saved.passed_validation is True
     assert provider.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-job output cap. Reasoning tokens are billed as output and drawn from the
+# SAME cap as the answer, so a job targeting a reasoning model needs headroom.
+# Passed as **kwargs like segment_count so the ~40 pre-existing 3-arg provider
+# fakes keep working untouched.
+# ---------------------------------------------------------------------------
+
+
+class _CapRecordingProvider:
+    """Records the kwargs the orchestrator passes to translate()."""
+
+    retry_waste_factor = 1.0
+
+    def __init__(self):
+        self.calls = []
+
+    def translate(self, system, user, model, **kwargs):
+        self.calls.append(kwargs)
+        return TranslationResult(
+            unit=TranslationUnit(translation="hola", summary_update="s"),
+            usage=Usage(input_tokens=1, output_tokens=1),
+        )
+
+    def count_tokens(self, text: str, model: str) -> int:
+        return len(text.split())
+
+    def price(self, model: str) -> tuple[float, float]:
+        return (1.0, 1.0)
+
+
+def _run_one_chunk_with(config_kwargs):
+    provider = _CapRecordingProvider()
+    orch, _, _ = make_orchestrator(provider=provider)
+    config = make_config(quality_mode="fast", **config_kwargs)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="hello world", status=ChunkStatus.PENDING)]
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+    return provider
+
+
+def test_orchestrator_forwards_the_configured_output_cap():
+    provider = _run_one_chunk_with({"max_output_tokens": 32000})
+    assert provider.calls, "provider was never called"
+    assert provider.calls[0].get("max_output_tokens") == 32000
+
+
+def test_orchestrator_omits_the_cap_when_unset():
+    """Default jobs must not pass the kwarg at all — pre-existing provider
+    fakes and adapters that predate it keep working."""
+    provider = _run_one_chunk_with({})
+    assert provider.calls, "provider was never called"
+    assert "max_output_tokens" not in provider.calls[0]
+
+
+# ---------------------------------------------------------------------------
+# Progress position. Extracted chunks KEEP their original book indices by
+# design (--extract 20 --from 380 yields indices 380-399), so chunk_index is
+# the wrong numerator for "how far along is this run" — the CLI printed
+# "chunk 387/20 (1935%)". Progress carries an explicit 1-based position.
+# ---------------------------------------------------------------------------
+
+
+def test_progress_position_is_relative_to_the_run_not_the_book():
+    seen: list[tuple[int, int, int]] = []
+
+    orch, _, _ = make_orchestrator()
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=3)
+    # An extract window: original book indices, far from zero.
+    chunks = [
+        Chunk(index=i, source_text="hello world", status=ChunkStatus.PENDING)
+        for i in (380, 381, 382)
+    ]
+
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: seen.append((p.position, p.chunk_index, p.total_chunks)),
+        cancel_flag=threading.Event(),
+    )
+
+    assert [s[0] for s in seen] == [1, 2, 3], (
+        f"position must count within the run, got {[s[0] for s in seen]}"
+    )
+    assert [s[1] for s in seen] == [380, 381, 382], (
+        "chunk_index must keep the ORIGINAL book index — the writer and the "
+        "checkpoint both depend on it"
+    )
+    assert all(s[0] <= s[2] for s in seen), "position must never exceed total_chunks"
+
+
+def test_progress_position_accounts_for_already_done_chunks_on_resume():
+    """A resumed job skips DONE chunks; position must still reflect the real
+    place in the book segment, not restart at 1."""
+    seen: list[int] = []
+
+    orch, _, store = make_orchestrator()
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=3)
+    chunks = [
+        Chunk(index=380, source_text="a", status=ChunkStatus.DONE, translated_text="a"),
+        Chunk(index=381, source_text="b", status=ChunkStatus.DONE, translated_text="b"),
+        Chunk(index=382, source_text="hello world", status=ChunkStatus.PENDING),
+    ]
+
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: seen.append(p.position),
+        cancel_flag=threading.Event(),
+    )
+
+    assert seen == [3], f"resumed run must report position 3 of 3, got {seen}"

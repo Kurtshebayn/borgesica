@@ -309,6 +309,14 @@ class JobConfig(BaseModel):
     glossary_budget_tokens: int = Field(
         default=DEFAULT_GLOSSARY_BUDGET_TOKENS, ge=1
     )
+    # Output-token cap per provider call. None (default) lets the adapter pick
+    # its own. Raise it only for a model whose reasoning trace must fit in the
+    # SAME budget as the answer: reasoning tokens are billed as output and are
+    # drawn from this cap, so a trace larger than the cap truncates the call
+    # before it emits anything (deepseek-v4-flash, measured 2026-08-06, spends
+    # ~20k). Prefer disabling reasoning at the adapter over raising this — a
+    # reasoning run cost ~23x the output tokens and ~100x the wall time.
+    max_output_tokens: int | None = Field(default=None, ge=1)
 
 
 class Job(BaseModel):
@@ -327,7 +335,15 @@ class Progress(BaseModel):
     """Progress update pushed to the caller after each chunk completes."""
 
     job_id: str
+    # Position of this chunk in the SOURCE, which for an extract job is its
+    # original book index (--extract 20 --from 380 yields 380-399). Keep it:
+    # the writer and the checkpoint both key off it.
     chunk_index: int
+    # 1-based position within THIS run, so `position/total_chunks` is a real
+    # fraction. chunk_index is not: on an extract it made the CLI print
+    # "chunk 387/20 (1935%)". Defaults to 0 for callers that build a Progress
+    # without one.
+    position: int = 0
     total_chunks: int
     cost_usd: float
     status: JobStatus

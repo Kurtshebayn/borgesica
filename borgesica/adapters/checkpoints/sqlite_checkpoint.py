@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     prose_chunk_tokens INTEGER NOT NULL DEFAULT 800,
     prose_segmentation TEXT NOT NULL DEFAULT 'batch',
     continue_on_error INTEGER NOT NULL DEFAULT 1,
-    glossary_budget_tokens INTEGER NOT NULL DEFAULT {DEFAULT_GLOSSARY_BUDGET_TOKENS}
+    glossary_budget_tokens INTEGER NOT NULL DEFAULT {DEFAULT_GLOSSARY_BUDGET_TOKENS},
+    max_output_tokens INTEGER
 )
 """
 
@@ -79,6 +80,9 @@ _JOBS_MIGRATIONS = {
     "glossary_budget_tokens": (
         f"INTEGER NOT NULL DEFAULT {DEFAULT_GLOSSARY_BUDGET_TOKENS}"
     ),
+    # Nullable on purpose: NULL means "the adapter picks its own cap".
+    # Also read at RUN time, so it must survive resume for the same reason.
+    "max_output_tokens": "INTEGER",
 }
 
 _CREATE_CHUNKS = """
@@ -241,13 +245,15 @@ class SQLiteCheckpointStore:
             budget_usd, chunk_size, line_length, glossary_strategy, quality_mode,
             total_chunks, completed_chunks, cost_usd, created_at, updated_at,
             prose_chunk_tokens, prose_segmentation, continue_on_error,
-            glossary_budget_tokens
+            glossary_budget_tokens,
+            max_output_tokens
         ) VALUES (
             :id, :source_type, :source_path, :target_lang, :model, :status,
             :budget_usd, :chunk_size, :line_length, :glossary_strategy, :quality_mode,
             :total_chunks, :completed_chunks, :cost_usd, :created_at, :updated_at,
             :prose_chunk_tokens, :prose_segmentation, :continue_on_error,
-            :glossary_budget_tokens
+            :glossary_budget_tokens,
+            :max_output_tokens
         )
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
@@ -278,6 +284,7 @@ class SQLiteCheckpointStore:
                 "prose_segmentation": job.config.prose_segmentation,
                 "continue_on_error": 1 if job.config.continue_on_error else 0,
                 "glossary_budget_tokens": job.config.glossary_budget_tokens,
+                "max_output_tokens": job.config.max_output_tokens,
             })
 
     def load_job(self, job_id: str) -> Job | None:
@@ -301,6 +308,7 @@ class SQLiteCheckpointStore:
             prose_segmentation=row["prose_segmentation"],
             continue_on_error=bool(row["continue_on_error"]),
             glossary_budget_tokens=row["glossary_budget_tokens"],
+            max_output_tokens=row["max_output_tokens"],
         )
         return Job(
             id=row["id"],

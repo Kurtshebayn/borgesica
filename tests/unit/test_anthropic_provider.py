@@ -594,12 +594,21 @@ class TestCountTokensIsLocal:
 
         client.messages.count_tokens.assert_not_called()
 
-    def test_count_tokens_uses_the_word_count_heuristic(self):
-        """Same heuristic the other adapters use: words x 1.3."""
-        provider = AnthropicProvider(client=MagicMock())
+    def test_count_tokens_uses_the_calibrated_char_heuristic(self):
+        """Characters / chars_per_token, not the superseded words x 1.3.
 
-        assert provider.count_tokens("one two three four five", "claude-sonnet-5") == round(
-            5 * 1.3
+        Measured 2026-08-06 via the SDK count_tokens endpoint: words were the
+        unstable unit (CV 30.0% vs 18.1% for chars/token) and x 1.3
+        under-counted real text by ~30%.
+        """
+        provider = AnthropicProvider(client=MagicMock())
+        text = "one two three four five"
+
+        assert provider.count_tokens(text, "claude-sonnet-5") == round(
+            len(text) / AnthropicProvider.chars_per_token
+        )
+        assert provider.count_tokens(text, "claude-sonnet-5") > round(
+            len(text.split()) * 1.3
         )
 
     def test_count_tokens_of_empty_text_is_zero(self):
@@ -645,3 +654,36 @@ class TestAnthropicProviderLive:
         assert isinstance(result, TranslationResult)
         assert result.unit.translation.strip()
         assert result.unit.summary_update.strip()
+
+
+class TestAnthropicCountTokensCalibration:
+    """Measured 2026-08-06 via the FREE client.messages.count_tokens endpoint
+    (exact, and it does not bill), over the same real book text used to
+    calibrate DeepSeek. Anthropic's tokenizer is denser: 3.390 chars/token vs
+    DeepSeek's 3.853, so the constant is per-provider, not shared."""
+
+    def test_counts_characters_against_the_measured_constant(self):
+        provider = AnthropicProvider(api_key="fake-key")
+        text = "x" * 3390
+
+        assert provider.count_tokens(text, "claude-haiku-4-5") == pytest.approx(
+            1000, rel=0.01
+        )
+
+    def test_is_denser_than_the_openai_compatible_default(self):
+        from borgesica.adapters.providers.openai_compatible_provider import (
+            OpenAICompatibleProvider,
+        )
+
+        text = "the quick brown fox jumps over the lazy dog " * 50
+        anthropic_count = AnthropicProvider(api_key="fake-key").count_tokens(
+            text, "claude-haiku-4-5"
+        )
+        deepseek_count = OpenAICompatibleProvider.deepseek(
+            api_key="sk-fake", _client=object()
+        ).count_tokens(text, "deepseek-v4-flash")
+
+        assert anthropic_count > deepseek_count
+
+    def test_empty_text_is_zero(self):
+        assert AnthropicProvider(api_key="fake-key").count_tokens("", "claude-haiku-4-5") == 0

@@ -258,7 +258,7 @@ class ContextManager:
             SystemPrompt carrying the assembled .text.
         """
         static_block = self.get_static_block(config)
-        dynamic_block = self._build_dynamic_block(
+        dynamic_block = self.build_dynamic_block(
             glossary, summary, config.glossary_budget_tokens
         )
         return SystemPrompt(text=static_block + "\n\n" + dynamic_block)
@@ -282,17 +282,22 @@ class ContextManager:
             parts.append(_NEUTRAL_SPANISH)
         return "\n\n".join(parts)
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _build_dynamic_block(
+    def build_dynamic_block(
         self,
         glossary: Glossary,
         summary: RollingSummary,
         glossary_budget_tokens: int,
     ) -> str:
-        """Build the per-chunk dynamic section."""
+        """Build the per-chunk dynamic section.
+
+        PUBLIC because cost math must MEASURE this block rather than describe
+        it. It used to be private, and `borgesica.domain.cost` mirrored it as a
+        hand-written literal ("glossary <= 300 + summary <= 200" = 500 tokens).
+        When the glossary budget moved to 2500 words the mirror went stale and
+        every estimate and budget projection under-counted the per-call overhead
+        by roughly 6.6x. Callers that need the size of this block must build it
+        and count it — never restate its shape.
+        """
         rendered_glossary = glossary.render(budget_tokens=glossary_budget_tokens)
         summary_text = summary.text if summary.text else "No prior context."
 
