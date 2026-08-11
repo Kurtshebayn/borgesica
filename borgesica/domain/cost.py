@@ -22,7 +22,7 @@ user and the HTTP schema carries it.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from borgesica.domain.models import (
     Chunk,
@@ -32,6 +32,7 @@ from borgesica.domain.models import (
     Job,
     JobConfig,
     RollingSummary,
+    SourceType,
     translation_tool_schema,
 )
 from borgesica.domain.ports import TranslationProvider
@@ -76,6 +77,27 @@ _BUDGET_FILLER_WORD = "palabra"
 _OUTPUT_EXPANSION = 1.25
 _OUTPUT_EXPANSION_HIGH = 1.48
 
+# SRT cue batches are NOT prose and must not borrow its numbers. Same
+# instrumentation, 2026-08-11, 20 cue-batch chunks of job 0b86d4f2 (25 segments
+# each), 21 billed calls:
+#
+#   translation / count_tokens(source)   1.325 median, 1.508 p90
+#   envelope                             310 median, 311 mean, 458 p90
+#   output density                       2.826 chars/token (prose: 3.295)
+#
+# Two effects pull in OPPOSITE directions and the density wins. Spanish
+# subtitles are SHORTER in words than their English source — 0.91-0.94 across
+# five stored SRT jobs, against 1.009 for prose — because subtitling compresses
+# and `line_length` caps the result. But the reply is a `translations` array of
+# 25 quoted strings, so brackets, quotes and commas make it denser than one
+# prose blob, and the expansion ends up HIGHER than prose (1.32 vs 1.25).
+#
+# It matters more here than in prose: a cue batch is thin (~185 source tokens),
+# so the envelope is over half the projected output instead of a fifth. Pricing
+# SRT with the prose model came to 0.885x of measured; these come to 0.998x.
+_SRT_OUTPUT_EXPANSION = 1.32
+_SRT_OUTPUT_EXPANSION_HIGH = 1.51
+
 # Output tokens BEYOND the translation itself: the provider returns the full
 # JSON envelope — summary_update (3-5 sentences) + glossary_additions + keys.
 #
@@ -94,6 +116,51 @@ _OUTPUT_ENVELOPE_TOKENS = 260
 # budget as a second invented token constant — the exact mistake that produced
 # the 150-vs-200 contradiction above.
 _OUTPUT_JSON_SCAFFOLDING_TOKENS = 45
+
+# SRT counterparts of the two constants above, measured on the same 20
+# cue-batch calls. The scaffolding is double prose's because a `translations`
+# array of 25 strings pays brackets, quotes and commas 25 times over, where
+# prose pays them once around a single blob.
+_SRT_OUTPUT_ENVELOPE_TOKENS = 310
+_SRT_OUTPUT_JSON_SCAFFOLDING_TOKENS = 89
+
+
+class _OutputModel(NamedTuple):
+    """How a chunk's source size maps to the tokens the model emits back.
+
+    Selected by SourceType because a cue-batch reply and a prose reply are
+    different shapes, not the same shape at different scales — see the
+    constants above for the measurement that separates them.
+    """
+
+    expansion: float
+    expansion_high: float
+    envelope: int
+    json_scaffolding: int
+
+
+_PROSE_OUTPUT_MODEL = _OutputModel(
+    expansion=_OUTPUT_EXPANSION,
+    expansion_high=_OUTPUT_EXPANSION_HIGH,
+    envelope=_OUTPUT_ENVELOPE_TOKENS,
+    json_scaffolding=_OUTPUT_JSON_SCAFFOLDING_TOKENS,
+)
+_SRT_OUTPUT_MODEL = _OutputModel(
+    expansion=_SRT_OUTPUT_EXPANSION,
+    expansion_high=_SRT_OUTPUT_EXPANSION_HIGH,
+    envelope=_SRT_OUTPUT_ENVELOPE_TOKENS,
+    json_scaffolding=_SRT_OUTPUT_JSON_SCAFFOLDING_TOKENS,
+)
+
+
+def output_model(source_type: SourceType) -> _OutputModel:
+    """Return the measured output model for this source type.
+
+    PDF rides with EPUB on the prose model: both send prose blobs through the
+    single-string schema, which is what was measured. Only SRT requests the
+    segmented `translations` array, and only SRT was measured separately.
+    """
+    return _SRT_OUTPUT_MODEL if source_type == SourceType.SRT else _PROSE_OUTPUT_MODEL
 
 # reflective mode runs 3 passes: translate (draft) + critique + revise
 _REFLECTIVE_PASSES = 3
@@ -147,7 +214,7 @@ def _word_budget_tokens(
     return provider.count_tokens(" ".join([_BUDGET_FILLER_WORD] * words), model)
 
 
-def chunk_output_tokens(source_tokens: int) -> int:
+def chunk_output_tokens(source_tokens: int, source_type: SourceType) -> int:
     """Projected output tokens for ONE provider call on a chunk this size.
 
     PUBLIC because two callers need it — CostEstimator's pre-flight floor and
@@ -163,7 +230,8 @@ def chunk_output_tokens(source_tokens: int) -> int:
     sharing a model. Callers that need the size of a chunk's output must call
     this — never restate its shape.
     """
-    return round(source_tokens * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
+    model = output_model(source_type)
+    return round(source_tokens * model.expansion) + model.envelope
 
 
 def _tool_schema_tokens(
@@ -328,9 +396,10 @@ class CostEstimator:
         # Ceiling allowance for the summary the model EMITS, priced through the
         # same helper and the same word budget the input side uses for the
         # summary it RECEIVES. One budget, two sides, one conversion.
+        out_model = output_model(config.source_type)
         output_envelope_high = (
             _word_budget_tokens(self._provider, _SUMMARY_BUDGET_WORDS, config.model)
-            + _OUTPUT_JSON_SCAFFOLDING_TOKENS
+            + out_model.json_scaffolding
         )
         # Input tokens the provider can serve from its prompt cache on the
         # happy path. Caching matches the longest common PREFIX of a request,
@@ -352,9 +421,9 @@ class CostEstimator:
             if output_tokens_per_chunk is not None:
                 chunk_output = chunk_output_high = output_tokens_per_chunk
             else:
-                chunk_output = chunk_output_tokens(chunk_input)
+                chunk_output = chunk_output_tokens(chunk_input, config.source_type)
                 chunk_output_high = (
-                    round(chunk_input * _OUTPUT_EXPANSION_HIGH) + output_envelope_high
+                    round(chunk_input * out_model.expansion_high) + output_envelope_high
                 )
                 # The ceiling envelope is a WORD budget converted by the
                 # provider's own counter, while the floor is a measured TOKEN

@@ -533,7 +533,7 @@ class TranslationOrchestrator:
         # the English it renders) plus the JSON envelope. This line used to read
         # `source_tokens + _OUTPUT_ENVELOPE_TOKENS`, which kept the parity
         # assumption after cost.py dropped it and under-projected output ~16%.
-        output_tokens = chunk_output_tokens(source_tokens)
+        output_tokens = chunk_output_tokens(source_tokens, config.source_type)
         # Nav-label chunks always single-pass, regardless of quality_mode (D3):
         # the critique/revise cycle yields no quality gain for short factual
         # nav labels, and the orchestrator must not over-project 3x budget for

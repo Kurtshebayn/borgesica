@@ -2381,7 +2381,7 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     base = (
         (src_tokens + static_tokens + dynamic_tokens + schema_tokens)
         / 1_000_000 * in_price
-        + chunk_output_tokens(src_tokens) / 1_000_000 * out_price
+        + chunk_output_tokens(src_tokens, config.source_type) / 1_000_000 * out_price
     )
     expected = base * _waste_factor(provider)
     assert projection == pytest.approx(expected, rel=1e-9), (
@@ -2405,9 +2405,9 @@ def test_project_chunk_cost_uses_the_shared_output_model():
     import json as _json
 
     from borgesica.domain.cost import (
-        _OUTPUT_ENVELOPE_TOKENS,
         _waste_factor,
         chunk_output_tokens,
+        output_model,
     )
     from borgesica.domain.models import Glossary, translation_tool_schema
 
@@ -2420,8 +2420,8 @@ def test_project_chunk_cost_uses_the_shared_output_model():
 
     projection = orch._project_chunk_cost(chunk, config)
 
-    expanded_output = chunk_output_tokens(src_tokens)
-    assert expanded_output > src_tokens + _OUTPUT_ENVELOPE_TOKENS, (
+    expanded_output = chunk_output_tokens(src_tokens, config.source_type)
+    assert expanded_output > src_tokens + output_model(config.source_type).envelope, (
         "Vacuous unless the shared model expands past the old parity model."
     )
 
