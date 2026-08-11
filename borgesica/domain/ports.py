@@ -84,6 +84,16 @@ class TranslationProvider(Protocol):
         """Return (input_usd_per_mtok, output_usd_per_mtok) for the model."""
         ...
 
+    def cache_price(self, model: str) -> float:
+        """Return USD per Mtok for input tokens served from the prompt cache.
+
+        Separate from ``price`` because it applies to the ``cached_input_tokens``
+        subset of a call's Usage, not to all input. Implementations with no
+        measured cache rate should return the ordinary input price, so an
+        unknown rate can never make a job look cheaper than it is.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Checkpoint store port (8 methods per design §3)

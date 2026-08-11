@@ -283,6 +283,17 @@ class AnthropicProvider:
         """
         return self._price_table.get(model, _DEFAULT_PRICE)
 
+    def cache_price(self, model: str) -> float:
+        """Return the ordinary input price — no cache rate has been measured.
+
+        This adapter never sets ``cache_control`` on a request, so no call it
+        makes can produce a cache hit and ``Usage.cached_input_tokens`` is
+        always 0 here; the value is therefore unused today. Returning the full
+        input price keeps it safe if that changes: an unmeasured rate must
+        never make a job look cheaper than it is.
+        """
+        return self.price(model)[0]
+
     # --- Internal helpers ---
 
     def _extract_usage(self, response: Any) -> Usage:
@@ -343,6 +354,7 @@ def _sum_usage(a: Usage, b: Usage) -> Usage:
     return Usage(
         input_tokens=a.input_tokens + b.input_tokens,
         output_tokens=a.output_tokens + b.output_tokens,
+        cached_input_tokens=a.cached_input_tokens + b.cached_input_tokens,
     )
 
 

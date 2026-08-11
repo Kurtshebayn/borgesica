@@ -668,3 +668,109 @@ def test_estimate_overhead_measures_the_real_context_manager_block():
         f"input_tokens ({est.input_tokens}) must equal source + static + the "
         f"MEASURED dynamic block + tool schema ({expected_input})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cache-aware cost — cached input tokens are not billed at the miss rate
+#
+# Measured against the DeepSeek dashboard over 1,114 real requests:
+#   hit 5,115,392 / miss 892,787 / output 1,941,028 tokens, billed $0.68.
+# The miss and output rates ($0.14 / $0.28) alone account for $0.66848 of
+# that, i.e. 98.3% — so the price table was right and the cache rate is a
+# small residual, ~$0.00225/Mtok (1.6% of the miss rate).
+#
+# Pricing every input token at the miss rate computed $1.38463 for the same
+# tokens: a 2.04x overstatement. That number feeds the budget guard, so a job
+# with budget_usd set would raise BudgetExceeded at roughly half the budget it
+# had actually spent.
+# ---------------------------------------------------------------------------
+
+
+def test_usage_carries_cached_input_tokens_defaulting_to_zero():
+    """Providers that report no cache detail must keep behaving as before."""
+    from borgesica.domain.models import Usage
+
+    assert Usage().cached_input_tokens == 0
+    assert Usage(input_tokens=10, output_tokens=5).cached_input_tokens == 0
+
+
+def test_cached_input_tokens_are_a_subset_of_input_tokens():
+    """The OpenAI wire format reports cached tokens as part of prompt_tokens."""
+    from borgesica.domain.models import Usage
+
+    usage = Usage(input_tokens=1000, output_tokens=100, cached_input_tokens=850)
+
+    assert usage.cached_input_tokens <= usage.input_tokens
+
+
+def test_usage_cost_prices_cached_tokens_at_the_cache_rate():
+    """The whole point: 850 of 1000 input tokens must not cost the miss rate."""
+    from borgesica.domain.models import Usage
+    from borgesica.domain.orchestrator import TranslationOrchestrator
+
+    usage = Usage(input_tokens=1000, output_tokens=100, cached_input_tokens=850)
+
+    cost = TranslationOrchestrator._usage_cost(
+        usage, in_price=0.14, out_price=0.28, cache_price=0.00225
+    )
+
+    expected = 150 / 1e6 * 0.14 + 850 / 1e6 * 0.00225 + 100 / 1e6 * 0.28
+    assert cost == pytest.approx(expected)
+
+
+def test_usage_cost_without_cached_tokens_is_unchanged():
+    """A provider reporting no cache hits must price exactly as it always did."""
+    from borgesica.domain.models import Usage
+    from borgesica.domain.orchestrator import TranslationOrchestrator
+
+    usage = Usage(input_tokens=1000, output_tokens=100)
+
+    cost = TranslationOrchestrator._usage_cost(
+        usage, in_price=0.14, out_price=0.28, cache_price=0.00225
+    )
+
+    assert cost == pytest.approx(1000 / 1e6 * 0.14 + 100 / 1e6 * 0.28)
+
+
+def test_usage_cost_reproduces_the_measured_dashboard_bill():
+    """The real 1,114-request workload must price to what DeepSeek charged."""
+    from borgesica.domain.models import Usage
+    from borgesica.domain.orchestrator import TranslationOrchestrator
+
+    usage = Usage(
+        input_tokens=5_115_392 + 892_787,
+        output_tokens=1_941_028,
+        cached_input_tokens=5_115_392,
+    )
+
+    cost = TranslationOrchestrator._usage_cost(
+        usage, in_price=0.14, out_price=0.28, cache_price=0.00225
+    )
+
+    # Dashboard rounds to the cent; the residual method fixes the cache rate
+    # only to within that rounding, so assert against $0.68 +- half a cent.
+    assert cost == pytest.approx(0.68, abs=0.005)
+
+
+def test_naive_pricing_would_have_doubled_the_measured_bill():
+    """Guards the regression: ignoring the cache overstates by ~2x, not a little."""
+    from borgesica.domain.models import Usage
+    from borgesica.domain.orchestrator import TranslationOrchestrator
+
+    usage = Usage(
+        input_tokens=5_115_392 + 892_787,
+        output_tokens=1_941_028,
+        cached_input_tokens=5_115_392,
+    )
+
+    cache_aware = TranslationOrchestrator._usage_cost(
+        usage, in_price=0.14, out_price=0.28, cache_price=0.00225
+    )
+    naive = TranslationOrchestrator._usage_cost(
+        usage.model_copy(update={"cached_input_tokens": 0}),
+        in_price=0.14,
+        out_price=0.28,
+        cache_price=0.00225,
+    )
+
+    assert naive / cache_aware > 2.0

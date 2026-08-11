@@ -997,3 +997,105 @@ class TestCountTokensCalibration:
         """The constant is per-provider because tokenizers differ measurably;
         it must be an overridable attribute, not a literal buried in the body."""
         assert OpenAICompatibleProvider.chars_per_token == pytest.approx(3.853)
+
+
+# ---------------------------------------------------------------------------
+# Cache-aware usage — DeepSeek reports cached prompt tokens and bills them at
+# a steep discount (measured: ~$0.00225/Mtok vs $0.14 for a miss).
+# ---------------------------------------------------------------------------
+
+
+def test_extract_usage_reads_cached_prompt_tokens():
+    """prompt_tokens_details.cached_tokens is the subset that hit the cache."""
+    from types import SimpleNamespace
+
+    from borgesica.adapters.providers.openai_compatible_provider import (
+        OpenAICompatibleProvider,
+    )
+
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=1000,
+            completion_tokens=100,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=850),
+        )
+    )
+
+    usage = OpenAICompatibleProvider._extract_usage(response)
+
+    assert usage.input_tokens == 1000
+    assert usage.output_tokens == 100
+    assert usage.cached_input_tokens == 850
+
+
+def test_extract_usage_defaults_cached_to_zero_when_absent():
+    """Endpoints without cache reporting must keep working unchanged."""
+    from types import SimpleNamespace
+
+    from borgesica.adapters.providers.openai_compatible_provider import (
+        OpenAICompatibleProvider,
+    )
+
+    response = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=100)
+    )
+
+    usage = OpenAICompatibleProvider._extract_usage(response)
+
+    assert usage.input_tokens == 1000
+    assert usage.cached_input_tokens == 0
+
+
+def test_extract_usage_tolerates_null_cached_tokens():
+    """A present-but-null details field must not blow up the call."""
+    from types import SimpleNamespace
+
+    from borgesica.adapters.providers.openai_compatible_provider import (
+        OpenAICompatibleProvider,
+    )
+
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=1000,
+            completion_tokens=100,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=None),
+        )
+    )
+
+    assert OpenAICompatibleProvider._extract_usage(response).cached_input_tokens == 0
+
+
+def test_sum_usage_adds_cached_input_tokens():
+    """Retry tiers accrue usage; the cached count must accrue with it."""
+    from borgesica.adapters.providers.openai_compatible_provider import _sum_usage
+    from borgesica.domain.models import Usage
+
+    total = _sum_usage(
+        Usage(input_tokens=100, output_tokens=10, cached_input_tokens=80),
+        Usage(input_tokens=200, output_tokens=20, cached_input_tokens=150),
+    )
+
+    assert total.cached_input_tokens == 230
+
+
+def test_deepseek_cache_price_is_the_measured_rate():
+    """Derived from a real bill, not from documentation or memory."""
+    from borgesica.adapters.providers.openai_compatible_provider import (
+        OpenAICompatibleProvider,
+    )
+
+    provider = OpenAICompatibleProvider.deepseek(api_key="k", _client=object())
+
+    assert provider.cache_price("deepseek-v4-flash") == pytest.approx(0.00225)
+
+
+def test_cache_price_falls_back_to_the_input_rate_for_unknown_models():
+    """No measured cache rate means assume no discount — never under-bill."""
+    from borgesica.adapters.providers.openai_compatible_provider import (
+        OpenAICompatibleProvider,
+    )
+
+    provider = OpenAICompatibleProvider.deepseek(api_key="k", _client=object())
+    in_price, _out = provider.price("some-unknown-model")
+
+    assert provider.cache_price("some-unknown-model") == in_price
