@@ -320,22 +320,19 @@ def test_estimate_includes_per_call_system_prompt_overhead():
 def test_estimate_default_output_scales_with_source():
     """Default output per chunk = translation (source x expansion) + JSON envelope
     (summary_update + glossary_additions), not a flat 150 tokens."""
-    from borgesica.domain.cost import (
-        _OUTPUT_ENVELOPE_TOKENS,
-        _OUTPUT_EXPANSION,
-        CostEstimator,
-    )
+    from borgesica.domain.cost import CostEstimator, output_model
 
     provider = FakeTranslationProvider()
     estimator = CostEstimator(provider=provider)
     config = make_config(quality_mode="fast")
     job = make_job(config, total=1)
+    m = output_model(config.source_type)
 
     est_small = estimator.estimate(job, [make_chunk(0, text="hello world")], config)
     est_large = estimator.estimate(job, [make_chunk(0, text="w " * 400)], config)
 
-    assert est_small.output_tokens == round(2 * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
-    assert est_large.output_tokens == round(400 * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
+    assert est_small.output_tokens == round(2 * m.expansion) + m.envelope
+    assert est_large.output_tokens == round(400 * m.expansion) + m.envelope
 
 
 # ---------------------------------------------------------------------------
@@ -909,24 +906,21 @@ def test_default_output_prices_translation_expansion_not_source_parity():
     replies in tokenizes denser than the prose inside it. Measured, the
     translation alone is 1.25x the source's token count.
     """
-    from borgesica.domain.cost import (
-        _OUTPUT_ENVELOPE_TOKENS,
-        _OUTPUT_EXPANSION,
-        CostEstimator,
-    )
+    from borgesica.domain.cost import CostEstimator, output_model
 
     provider = FakeTranslationProvider()
     estimator = CostEstimator(provider=provider)
     config = make_config(quality_mode="fast")
     job = make_job(config, total=1)
     source_tokens = 400
+    m = output_model(config.source_type)
 
     est = estimator.estimate(job, [make_chunk(0, text="w " * source_tokens)], config)
 
-    assert est.output_tokens == round(source_tokens * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
-    assert est.output_tokens > source_tokens + _OUTPUT_ENVELOPE_TOKENS, (
+    assert est.output_tokens == round(source_tokens * m.expansion) + m.envelope
+    assert est.output_tokens > source_tokens + m.envelope, (
         f"Output ({est.output_tokens}) must exceed source-parity "
-        f"({source_tokens + _OUTPUT_ENVELOPE_TOKENS}): the translation is Spanish."
+        f"({source_tokens + m.envelope}): the translation is Spanish."
     )
 
 
@@ -963,25 +957,25 @@ def test_output_ceiling_prices_the_summary_at_its_declared_word_budget():
     contradiction.
     """
     from borgesica.domain.cost import (
-        _OUTPUT_EXPANSION_HIGH,
-        _OUTPUT_JSON_SCAFFOLDING_TOKENS,
         _SUMMARY_BUDGET_WORDS,
         CostEstimator,
         _word_budget_tokens,
+        output_model,
     )
 
     provider = FakeTranslationProvider()
     estimator = CostEstimator(provider=provider)
     config = make_config(quality_mode="fast")
     job = make_job(config, total=1)
+    m = output_model(config.source_type)
 
     est = estimator.estimate(job, [make_chunk(0, text="w " * 400)], config)
 
     ceiling_envelope = (
         _word_budget_tokens(provider, _SUMMARY_BUDGET_WORDS, config.model)
-        + _OUTPUT_JSON_SCAFFOLDING_TOKENS
+        + m.json_scaffolding
     )
-    assert est.output_tokens_high == round(400 * _OUTPUT_EXPANSION_HIGH) + ceiling_envelope
+    assert est.output_tokens_high == round(400 * m.expansion_high) + ceiling_envelope
 
 
 def test_output_ceiling_exceeds_the_output_floor():
@@ -1038,3 +1032,53 @@ def test_output_ceiling_never_falls_below_the_output_floor():
 
     assert est.output_tokens_high >= est.output_tokens
     assert est.usd_high >= est.usd_low
+
+
+def test_srt_and_prose_are_priced_with_different_output_models():
+    """A cue batch and a prose blob of the SAME source size cost different output.
+
+    They are different reply SHAPES, not one shape at two scales. SRT answers
+    with a `translations` array of 25 quoted strings — brackets, quotes and
+    commas paid 25 times — so it tokenizes denser (2.826 chars/token measured,
+    against prose's 3.295) and carries a bigger envelope (310 vs 260). Spanish
+    subtitles are even SHORTER in words than their English source (0.91-0.94
+    across five stored jobs, against 1.009 for prose), and the density still
+    wins.
+
+    Pricing SRT with the prose model came to 0.885x of measured spend. The
+    envelope is over half a thin cue batch's output, so borrowing prose's
+    numbers is not a rounding difference there.
+    """
+    from borgesica.domain.cost import CostEstimator, chunk_output_tokens
+
+    provider = FakeTranslationProvider()
+    estimator = CostEstimator(provider=provider)
+    source_tokens = 185  # a real cue batch measures ~185 source tokens
+    text = "w " * source_tokens
+
+    srt_config = make_config(quality_mode="fast", source_type=SourceType.SRT)
+    epub_config = make_config(quality_mode="fast", source_type=SourceType.EPUB)
+
+    srt = estimator.estimate(
+        make_job(srt_config, total=1), [make_chunk(0, text=text)], srt_config
+    )
+    epub = estimator.estimate(
+        make_job(epub_config, total=1), [make_chunk(0, text=text)], epub_config
+    )
+
+    assert srt.output_tokens > epub.output_tokens, (
+        f"SRT ({srt.output_tokens}) must project more output than prose "
+        f"({epub.output_tokens}) for the same source size — denser array reply "
+        f"plus a bigger envelope."
+    )
+    assert srt.output_tokens == chunk_output_tokens(source_tokens, SourceType.SRT)
+    assert epub.output_tokens == chunk_output_tokens(source_tokens, SourceType.EPUB)
+
+
+def test_pdf_rides_the_prose_output_model():
+    """PDF was never measured separately; it must not silently get SRT's numbers."""
+    from borgesica.domain.cost import chunk_output_tokens
+
+    assert chunk_output_tokens(185, SourceType.PDF) == chunk_output_tokens(
+        185, SourceType.EPUB
+    )
