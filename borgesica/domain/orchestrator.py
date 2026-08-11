@@ -57,9 +57,9 @@ from datetime import UTC, datetime
 
 from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import (
-    _OUTPUT_ENVELOPE_TOKENS,
     _tool_schema_tokens,
     _waste_factor,
+    chunk_output_tokens,
     CostEstimator,
 )
 from borgesica.domain.errors import (
@@ -528,8 +528,12 @@ class TranslationOrchestrator:
         # Tool schema (input_schema in tools=) is billed as input on every call.
         schema_tokens = _tool_schema_tokens(self._provider, chunk, config.model)
         input_tokens = source_tokens + static_tokens + dynamic_tokens + schema_tokens
-        # Output = source-sized translation + JSON envelope (same as CostEstimator).
-        output_tokens = source_tokens + _OUTPUT_ENVELOPE_TOKENS
+        # Output through the SHARED model, not a local restatement of it: the
+        # translation EXPANDS against its source (Spanish costs more tokens than
+        # the English it renders) plus the JSON envelope. This line used to read
+        # `source_tokens + _OUTPUT_ENVELOPE_TOKENS`, which kept the parity
+        # assumption after cost.py dropped it and under-projected output ~16%.
+        output_tokens = chunk_output_tokens(source_tokens)
         # Nav-label chunks always single-pass, regardless of quality_mode (D3):
         # the critique/revise cycle yields no quality gain for short factual
         # nav labels, and the orchestrator must not over-project 3x budget for

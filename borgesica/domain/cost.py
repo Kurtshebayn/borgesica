@@ -147,6 +147,25 @@ def _word_budget_tokens(
     return provider.count_tokens(" ".join([_BUDGET_FILLER_WORD] * words), model)
 
 
+def chunk_output_tokens(source_tokens: int) -> int:
+    """Projected output tokens for ONE provider call on a chunk this size.
+
+    PUBLIC because two callers need it — CostEstimator's pre-flight floor and
+    the orchestrator's runtime budget guard — and they must not each keep their
+    own copy. They already drifted once: the guard mirrored
+    `source_tokens + _OUTPUT_ENVELOPE_TOKENS` and kept the source-PARITY
+    assumption after this module dropped it.
+
+    That drift was hard to see precisely BECAUSE the two shared the envelope
+    constant: the 150 -> 260 correction propagated to the guard on its own,
+    while the 1.25x expansion did not, leaving a guard that looked synchronised
+    and under-projected output by ~16% on prose. Sharing a constant is not
+    sharing a model. Callers that need the size of a chunk's output must call
+    this — never restate its shape.
+    """
+    return round(source_tokens * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
+
+
 def _tool_schema_tokens(
     provider: TranslationProvider,  # type: ignore[type-arg]
     chunk: Chunk,
@@ -333,9 +352,7 @@ class CostEstimator:
             if output_tokens_per_chunk is not None:
                 chunk_output = chunk_output_high = output_tokens_per_chunk
             else:
-                chunk_output = (
-                    round(chunk_input * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
-                )
+                chunk_output = chunk_output_tokens(chunk_input)
                 chunk_output_high = (
                     round(chunk_input * _OUTPUT_EXPANSION_HIGH) + output_envelope_high
                 )

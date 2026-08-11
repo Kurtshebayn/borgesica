@@ -2353,10 +2353,7 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     protects against the CEILING."""
     import json as _json
 
-    from borgesica.domain.cost import (
-        _OUTPUT_ENVELOPE_TOKENS,
-        _waste_factor,
-    )
+    from borgesica.domain.cost import _waste_factor, chunk_output_tokens
     from borgesica.domain.models import Glossary, translation_tool_schema
 
     orch, provider, _ = make_orchestrator()
@@ -2384,12 +2381,72 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     base = (
         (src_tokens + static_tokens + dynamic_tokens + schema_tokens)
         / 1_000_000 * in_price
-        + (src_tokens + _OUTPUT_ENVELOPE_TOKENS) / 1_000_000 * out_price
+        + chunk_output_tokens(src_tokens) / 1_000_000 * out_price
     )
     expected = base * _waste_factor(provider)
     assert projection == pytest.approx(expected, rel=1e-9), (
         f"Projection {projection} must include system-prompt + tool-schema "
         f"overhead and the retry-waste ceiling factor (expected {expected})"
+    )
+
+
+def test_project_chunk_cost_uses_the_shared_output_model():
+    """The runtime guard must price output through the SAME model as the
+    pre-flight estimator, not a second copy of it.
+
+    The guard mirrored `source_tokens + _OUTPUT_ENVELOPE_TOKENS` and kept the
+    source-PARITY assumption after cost.py dropped it — and it looked
+    synchronised, because sharing the envelope constant meant the 150→260
+    correction propagated on its own while the 1.25x expansion did not. A
+    Spanish translation costs more tokens than the English it renders; a guard
+    that under-projects output by ~16% lets a job run past the budget it was
+    promised, which is the one thing this guard exists to prevent.
+    """
+    import json as _json
+
+    from borgesica.domain.cost import (
+        _OUTPUT_ENVELOPE_TOKENS,
+        _waste_factor,
+        chunk_output_tokens,
+    )
+    from borgesica.domain.models import Glossary, translation_tool_schema
+
+    orch, provider, _ = make_orchestrator()
+    config = make_config(quality_mode="fast")
+    src_tokens = 400
+    chunk = Chunk(
+        index=0, source_text="w " * src_tokens, status=ChunkStatus.PENDING
+    )
+
+    projection = orch._project_chunk_cost(chunk, config)
+
+    expanded_output = chunk_output_tokens(src_tokens)
+    assert expanded_output > src_tokens + _OUTPUT_ENVELOPE_TOKENS, (
+        "Vacuous unless the shared model expands past the old parity model."
+    )
+
+    static_tokens = provider.count_tokens(
+        orch._ctx.get_static_block(config), config.model
+    )
+    schema_tokens = provider.count_tokens(
+        _json.dumps(translation_tool_schema(None)), config.model
+    )
+    dynamic_tokens = provider.count_tokens(
+        orch._ctx.build_dynamic_block(
+            Glossary(), RollingSummary(), config.glossary_budget_tokens
+        ),
+        config.model,
+    )
+    in_price, out_price = provider.price(config.model)
+    expected = (
+        (src_tokens + static_tokens + dynamic_tokens + schema_tokens)
+        / 1_000_000 * in_price
+        + expanded_output / 1_000_000 * out_price
+    ) * _waste_factor(provider)
+    assert projection == pytest.approx(expected, rel=1e-9), (
+        f"Projection {projection} must price output as "
+        f"chunk_output_tokens({src_tokens}) = {expanded_output}, the same "
+        f"model CostEstimator uses (expected {expected})"
     )
 
 
