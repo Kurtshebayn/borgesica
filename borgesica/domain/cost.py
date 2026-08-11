@@ -191,6 +191,10 @@ class CostEstimator:
         # Determine whether the static instruction block qualifies for prompt caching.
         # This is independent of whether there are pending chunks.
         cached: bool = False
+        # 0 without a context manager: the static block is unknown, so nothing
+        # is known to be cacheable either (same backward-compat contract as
+        # `cached` and the per-call overhead).
+        token_count = 0
         if self._context_manager is not None:
             static_block = self._context_manager.get_static_block(config)
             token_count = self._provider.count_tokens(static_block, config.model)
@@ -257,6 +261,20 @@ class CostEstimator:
         total_input = 0
         total_input_high = 0
         total_output = 0
+        # Input tokens the provider can serve from its prompt cache on the
+        # happy path. Caching matches the longest common PREFIX of a request,
+        # and only two parts of a call are invariant across a whole job: the
+        # static block and the tool schema. The dynamic block sits after them
+        # and changes — the summary every chunk, the glossary whenever a term
+        # is added — so it truncates the shared prefix and is never counted
+        # here.
+        #
+        # Measured on job 13b43ac6: static ~1,124 tok and schema ~1,400 tok
+        # against ~5,400 tok of input per call, so this is roughly 47%. A
+        # fixed-prompt experiment showed 85.7% cached, but that held the
+        # system prompt constant across every call and is NOT what a real run
+        # looks like; using that figure here would UNDERSTATE cost.
+        cacheable_input = 0
 
         for chunk in pending:
             chunk_input = self._provider.count_tokens(chunk.source_text, config.model)
@@ -276,17 +294,35 @@ class CostEstimator:
             total_input += (chunk_input + overhead_low + schema_tokens) * passes
             total_input_high += (chunk_input + overhead_high + schema_tokens) * passes
             total_output += chunk_output * passes
+            # One cached prefix per chunk after the first: the first call of
+            # the job populates the cache, and in reflective mode the critique
+            # and revise passes carry their own system prompts, so they share
+            # no prefix with the translate pass. Counting a single pass is the
+            # conservative reading — it can only leave the estimate high.
+            if chunk is not pending[0]:
+                cacheable_input += token_count + schema_tokens
 
         in_usd_per_mtok, out_usd_per_mtok = self._provider.price(config.model)
+        cache_usd_per_mtok = self._provider.cache_price(config.model)
         # usd_low: happy path — one billed call per chunk (× passes), carrying
-        # only the dynamic block the job has today.
+        # only the dynamic block the job has today, and reusing the invariant
+        # prefix from the provider's prompt cache on every chunk after the
+        # first.
+        cached_input = min(cacheable_input, total_input)
         usd_low = (
-            total_input / 1_000_000 * in_usd_per_mtok
+            (total_input - cached_input) / 1_000_000 * in_usd_per_mtok
+            + cached_input / 1_000_000 * cache_usd_per_mtok
             + total_output / 1_000_000 * out_usd_per_mtok
         )
         # usd_high: ceiling — a full glossary budget on every call, PLUS the
         # provider's retry / tier-fallthrough waste that no static token math
         # can predict.
+        #
+        # Deliberately assumes a COLD cache: no discount at all. A job whose
+        # glossary grows on every chunk reuses nothing beyond the static block,
+        # a first run starts cold, and the budget guard gates on this number.
+        # Discounting it would admit jobs that then overspend. Cache behaviour
+        # is uncertainty, and the low/high band is where uncertainty belongs.
         usd_high = (
             total_input_high / 1_000_000 * in_usd_per_mtok
             + total_output / 1_000_000 * out_usd_per_mtok

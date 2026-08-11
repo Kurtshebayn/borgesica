@@ -774,3 +774,114 @@ def test_naive_pricing_would_have_doubled_the_measured_bill():
     )
 
     assert naive / cache_aware > 2.0
+
+
+# ---------------------------------------------------------------------------
+# Cache-aware estimate — the discount belongs in usd_low, never in usd_high
+#
+# Prompt caching matches the longest common PREFIX of a request. Verified
+# against the measured run: 778 uncached tokens per call versus a 765-token
+# average chunk source, i.e. exactly the user message missed and everything
+# before it hit, because that experiment held the system prompt fixed.
+#
+# A REAL run is different. The dynamic block sits after the static one and
+# changes: the summary every chunk, the glossary whenever a term is added. So
+# the invariant prefix is the static block plus the tool schema (~47% of input
+# on job 13b43ac6); the glossary only extends it on chunks that add nothing,
+# which was 365 of 502. The measured 85.7% hit rate is therefore an artefact
+# of the experiment, and applying it here would UNDERSTATE cost.
+#
+# usd_low is defined as the happy path and usd_high as the ceiling the budget
+# guard gates on, so cache uncertainty is exactly what that band is for.
+# ---------------------------------------------------------------------------
+
+
+class _CachingProvider(FakeTranslationProvider):
+    """Fake whose cache is 100x cheaper than a miss, to make the effect visible."""
+
+    def price(self, model: str) -> tuple[float, float]:  # noqa: ARG002
+        return (1.0, 5.0)
+
+    def cache_price(self, model: str) -> float:  # noqa: ARG002
+        return 0.01
+
+
+def _chunks(n: int) -> list:
+    """n PENDING chunks of identical, realistic size."""
+    return [make_chunk(i, text="the quick brown fox jumps over the lazy dog") for i in range(n)]
+
+
+def _estimate_with(provider, chunks, **cfg_kwargs):
+    from borgesica.domain.context import ContextManager
+    from borgesica.domain.cost import CostEstimator
+
+    estimator = CostEstimator(provider=provider, context_manager=ContextManager())
+    config = make_config(**cfg_kwargs) if cfg_kwargs else make_config()
+    return estimator.estimate(make_job(config, total=len(chunks)), chunks, config)
+
+
+def test_estimate_low_discounts_the_invariant_prefix():
+    """usd_low must price the static block + schema at the cache rate."""
+    chunks = _chunks(6)
+
+    cheap = _estimate_with(_CachingProvider(), chunks)
+    plain = _estimate_with(FakeTranslationProvider(), chunks)
+
+    assert cheap.usd_low < plain.usd_low
+
+
+def test_estimate_high_ignores_the_cache_entirely():
+    """The ceiling the budget guard gates on must assume a cold cache.
+
+    A run whose glossary changes on every chunk gets no prefix reuse beyond
+    the static block, and a cold start gets none at all. Discounting the
+    ceiling would admit jobs that then overspend.
+    """
+    chunks = _chunks(6)
+
+    cheap = _estimate_with(_CachingProvider(), chunks)
+    plain = _estimate_with(FakeTranslationProvider(), chunks)
+
+    assert cheap.usd_high == pytest.approx(plain.usd_high)
+
+
+def test_estimate_charges_the_first_chunk_at_full_price():
+    """Nothing is cached before the first call populates the cache."""
+    one = _estimate_with(_CachingProvider(), _chunks(1))
+    plain_one = _estimate_with(FakeTranslationProvider(), _chunks(1))
+
+    assert one.usd_low == pytest.approx(plain_one.usd_low)
+
+
+def test_estimate_discount_grows_with_chunk_count():
+    """More chunks means more calls reusing the same prefix."""
+    provider = _CachingProvider()
+    plain = FakeTranslationProvider()
+
+    def ratio(n: int) -> float:
+        return _estimate_with(provider, _chunks(n)).usd_low / _estimate_with(
+            plain, _chunks(n)
+        ).usd_low
+
+    assert ratio(50) < ratio(5)
+
+
+def test_estimate_unchanged_for_a_provider_without_a_cache_discount():
+    """cache_price == input price must reproduce the previous numbers exactly."""
+    chunks = _chunks(6)
+
+    est = _estimate_with(FakeTranslationProvider(), chunks)
+
+    # FakeTranslationProvider.cache_price returns its input price, so the
+    # cache-aware path must collapse back onto the plain arithmetic.
+    assert est.usd_low == pytest.approx(est.usd, rel=1e-12)
+
+
+def test_estimate_within_budget_still_gates_on_the_ceiling():
+    """The cache discount must not sneak a job past the budget gate."""
+    chunks = _chunks(40)
+    est = _estimate_with(_CachingProvider(), chunks)
+
+    tight = _estimate_with(_CachingProvider(), chunks, budget_usd=est.usd_high * 0.5)
+
+    assert tight.within_budget is False
