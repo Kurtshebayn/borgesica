@@ -160,12 +160,18 @@ class OpenAICompatibleProvider:
     """
 
     # Retry-waste ceiling factor (consumed by the cost estimator / budget guard):
-    # OpenAI-compatible endpoints fall through tier-1 tool → tier-2 JSON → tier-3,
-    # and each tier that returns HTTP 200 is billed while re-sending the full
-    # prompt. On the segmented SRT schema this fallthrough is common, so real
-    # cost runs ~3x the happy-path estimate (job 0b86d4f2: est $0.012 vs real
-    # $0.0395) — a heavy ceiling. Subclasses (Ollama) inherit it; local models
-    # are free, so the factor is inert there.
+    # any OpenAI-compatible endpoint may fall through tier-1 tool → tier-2 JSON →
+    # tier-3, and each tier that returns HTTP 200 is billed while re-sending the
+    # full prompt. This is the default for an endpoint nobody has MEASURED, so it
+    # stays heavy. Subclasses (Ollama) inherit it; local models are free, so the
+    # factor is inert there.
+    #
+    # It was once justified by DeepSeek job 0b86d4f2 ("est $0.012 vs real
+    # $0.0395"), but that ratio compared a then-broken estimate against a
+    # reasoning-inflated bill and isolated nothing. Both presets that have been
+    # instrumented — .deepseek() and .openai() — now override this per instance.
+    # Do not re-derive this number from an aggregate bill: bills contain every
+    # defect the code had on the day they were issued.
     retry_waste_factor: float = 3.0
 
     # Completion-tokens parameter name sent to the API for the output-length
@@ -250,11 +256,24 @@ class OpenAICompatibleProvider:
         Prices: deepseek-v4-flash ≈ ($0.14, $0.28)/Mtok,
                 deepseek-v4-pro   ≈ ($0.435, $0.87)/Mtok.
         The model string passed to translate() is forwarded unchanged.
+
+        retry_waste_factor is overridden to 1.5 as an INSTANCE attribute (same
+        pattern as .openai()). The class default of 3.0 was derived FROM this
+        provider — job 0b86d4f2, "est $0.012 vs real $0.0395" — but that ratio
+        is confounded: the job ran 2026-07-06, predating both
+        reasoning_effort='none' and the per-call overhead fix that cost.py
+        records as under-estimating that same job 16x. Measured directly on
+        that job's own cue-batch chunks (2026-08-11, instrumented): 21 billed
+        calls for 20 chunks, 20 of them answered at tier-1. See the preset test
+        for the full measurement and why 1.5 rather than the measured 1.038.
+
+        The class attribute stays 3.0: it is what an UNMEASURED
+        OpenAI-compatible endpoint inherits, and nothing is known about one.
         """
         table = dict(_DEFAULT_DEEPSEEK_PRICE_TABLE)
         if extra_price_table:
             table.update(extra_price_table)
-        return cls(
+        provider = cls(
             base_url="https://api.deepseek.com",
             api_key=api_key,
             default_model=default_model,
@@ -262,6 +281,8 @@ class OpenAICompatibleProvider:
             _client=_client,
             cache_price_table=dict(_DEEPSEEK_CACHE_PRICE),
         )
+        provider.retry_waste_factor = 1.5
+        return provider
 
     @classmethod
     def openai(

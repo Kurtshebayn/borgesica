@@ -589,11 +589,46 @@ class TestPriceAndCountTokens:
         assert len(result) == 2
 
     def test_declares_heavy_retry_waste_factor(self):
-        """OpenAI-compatible endpoints fall through tier-1 tool → tier-2 JSON →
-        tier-3 (each billed), so the retry-waste ceiling factor is heavy (≥ 3x).
-        Real DeepSeek SRT runs cost ~3x the happy-path estimate (job 0b86d4f2)."""
+        """An UNMEASURED OpenAI-compatible endpoint keeps the heavy 3.0 default.
+
+        Any endpoint may fall through tier-1 tool → tier-2 JSON → tier-3, each
+        billed, and nothing is known about an arbitrary one. Presets for
+        endpoints that have actually been measured override this per instance
+        (see the deepseek and openai preset tests); the class default is what a
+        stranger gets, and it stays conservative.
+        """
         provider, _ = _make_provider([], price_table={})
         assert provider.retry_waste_factor >= 3.0
+
+    def test_deepseek_preset_sets_measured_retry_waste_factor(self):
+        """DeepSeek is Tier-1-reliable in measurement, so it must not inherit 3.0.
+
+        The 3.0 was justified by job 0b86d4f2 — "est $0.012 vs real $0.0395" on
+        the segmented SRT schema. That ratio is confounded three ways: the job
+        ran 2026-07-06, predating BOTH reasoning_effort='none' (2d0e175) and the
+        per-call overhead fix that cost.py records as under-estimating this very
+        job 16x. A broken estimate over a reasoning-inflated bill cannot isolate
+        tier fallthrough.
+
+        MEASURED 2026-08-11 on that same job's cue-batch chunks, instrumented:
+        21 billed calls for 20 chunks (1.05 calls/chunk, 1.038x in cost), 20 of
+        21 answered at tier-1, zero reasoning tokens. A 3.0 ceiling put a real
+        502-chunk book at $2.37 against $0.40 of measured spend — 5.9x — and
+        `within_budget` gates on that number, so it rejected jobs that fit and
+        paused runs that had headroom.
+
+        1.5 rather than the measured 1.038: one chunk in twenty DID fall through
+        to tier-2, so the mechanism is real, and 40 instrumented calls cannot
+        bound the tail. The ceiling keeps headroom; it just stops being fiction.
+        """
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake")
+        assert provider.retry_waste_factor == 1.5
+
+    def test_deepseek_preset_does_not_mutate_the_class_default(self):
+        """DeepSeek's override must be an INSTANCE attribute, like OpenAI's."""
+        OpenAICompatibleProvider.deepseek(api_key="sk-fake")  # construct + discard
+        plain_provider, _ = _make_provider([], price_table={})
+        assert plain_provider.retry_waste_factor == 3.0
 
     def test_count_tokens_returns_non_negative_int(self):
         """count_tokens returns a non-negative int."""
