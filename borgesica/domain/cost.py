@@ -50,9 +50,50 @@ _SUMMARY_BUDGET_WORDS = 200
 # so a budget of N words is priced by asking the provider to count N words.
 _BUDGET_FILLER_WORD = "palabra"
 
+# Output tokens per token of SOURCE. The old model was `chunk_input + envelope`,
+# which assumed PARITY: that the Spanish translation costs the same tokens as
+# the English it renders. It does not, for two independent reasons that
+# multiply:
+#
+#   Spanish prose runs 1.710 tok/word against English's 1.384  → 1.24x
+#   the JSON envelope tokenizes at 3.295 chars/token, not the 3.853
+#   `count_tokens` assumes for prose                            → 1.17x
+#
+# and count_tokens(source) is an English-prose count, so the first factor
+# applies against a ~1.01 word ratio: 1.06 x 1.17 = 1.24.
+#
+# MEASURED 2026-08-11, deepseek-v4-flash, EPUB en->es: 20 instrumented calls,
+# one per chunk, sampled across a 502-chunk book with the real accumulated
+# glossary and each chunk's real inbound summary, pairing
+# usage.completion_tokens with the exact bytes returned:
+#
+#   translation tokens / count_tokens(source)   1.254 median, 1.475 p90
+#
+# The HIGH figure is the p90, not the max. One call in twenty emitted 4,799
+# tokens for 4,692 chars (0.98 chars/token — a degenerate repetition, not a
+# retry); that tail is what _waste_factor and the band absorb, and calibrating
+# the ceiling on it would price every job for the worst chunk in the book.
+_OUTPUT_EXPANSION = 1.25
+_OUTPUT_EXPANSION_HIGH = 1.48
+
 # Output tokens BEYOND the translation itself: the provider returns the full
 # JSON envelope — summary_update (3-5 sentences) + glossary_additions + keys.
-_OUTPUT_ENVELOPE_TOKENS = 150
+#
+# This was 150, which contradicted _SUMMARY_BUDGET_WORDS in this same file: the
+# SAME rolling summary was priced at 200 WORDS on the input side but expected
+# to fit in 150 TOKENS on the output side, alongside glossary_additions and
+# every JSON key. At the calibrated Spanish rate those 200 words are ~342
+# tokens on their own. Measured on the 20 calls above: 260 median, 271 mean,
+# 351 p90 (summary ~215, JSON scaffolding ~45).
+_OUTPUT_ENVELOPE_TOKENS = 260
+
+# The non-summary part of the envelope: glossary_additions plus the JSON keys,
+# braces, and escaping. Split out from _OUTPUT_ENVELOPE_TOKENS so the CEILING
+# can price the summary through _word_budget_tokens at the same
+# _SUMMARY_BUDGET_WORDS the input block already uses, instead of restating that
+# budget as a second invented token constant — the exact mistake that produced
+# the 150-vs-200 contradiction above.
+_OUTPUT_JSON_SCAFFOLDING_TOKENS = 45
 
 # reflective mode runs 3 passes: translate (draft) + critique + revise
 _REFLECTIVE_PASSES = 3
@@ -161,7 +202,8 @@ class CostEstimator:
           usd_low  — the dynamic block the job has RIGHT NOW (empty on a fresh
                      job, the accumulated glossary on a resumed one).
           usd_high — a full `config.glossary_budget_tokens` glossary plus a
-                     summary on every call, times the retry-waste factor.
+                     summary on every call, the p90 output expansion, and a
+                     full-budget summary EMITTED, times the retry-waste factor.
 
         The band is therefore genuinely wide on a fresh job. That is honest:
         the floor is what the first chunk costs, the ceiling is what the last
@@ -173,8 +215,10 @@ class CostEstimator:
             config: JobConfig (model, quality_mode, budget_usd).
             output_tokens_per_chunk: Override for estimated output token count
                 per provider call. Default (None) models the real JSON
-                envelope: source-sized translation + _OUTPUT_ENVELOPE_TOKENS.
-                Pass an explicit value in tests for deterministic arithmetic.
+                envelope: the translation EXPANDED against its source
+                (_OUTPUT_EXPANSION — Spanish costs more tokens than the English
+                it renders) plus _OUTPUT_ENVELOPE_TOKENS. An explicit value
+                pins both bounds, for deterministic arithmetic in tests.
             glossary: The job's current glossary, used for the FLOOR bound.
                 None is treated as empty (a job that has not run yet).
             summary: The job's current rolling summary, used for the FLOOR
@@ -261,6 +305,14 @@ class CostEstimator:
         total_input = 0
         total_input_high = 0
         total_output = 0
+        total_output_high = 0
+        # Ceiling allowance for the summary the model EMITS, priced through the
+        # same helper and the same word budget the input side uses for the
+        # summary it RECEIVES. One budget, two sides, one conversion.
+        output_envelope_high = (
+            _word_budget_tokens(self._provider, _SUMMARY_BUDGET_WORDS, config.model)
+            + _OUTPUT_JSON_SCAFFOLDING_TOKENS
+        )
         # Input tokens the provider can serve from its prompt cache on the
         # happy path. Caching matches the longest common PREFIX of a request,
         # and only two parts of a call are invariant across a whole job: the
@@ -278,11 +330,21 @@ class CostEstimator:
 
         for chunk in pending:
             chunk_input = self._provider.count_tokens(chunk.source_text, config.model)
-            chunk_output = (
-                output_tokens_per_chunk
-                if output_tokens_per_chunk is not None
-                else chunk_input + _OUTPUT_ENVELOPE_TOKENS
-            )
+            if output_tokens_per_chunk is not None:
+                chunk_output = chunk_output_high = output_tokens_per_chunk
+            else:
+                chunk_output = (
+                    round(chunk_input * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
+                )
+                chunk_output_high = (
+                    round(chunk_input * _OUTPUT_EXPANSION_HIGH) + output_envelope_high
+                )
+                # The ceiling envelope is a WORD budget converted by the
+                # provider's own counter, while the floor is a measured TOKEN
+                # constant; a provider whose counter reads low enough can price
+                # the 200-word budget under the measured floor and invert the
+                # band. Same guard, same reason, as dynamic_low above.
+                chunk_output_high = max(chunk_output_high, chunk_output)
             # The tool schema is per-call input overhead like the system prompt,
             # so it is gated on context_manager presence (bare token-math mode
             # counts neither — same backward-compat contract as `cached`).
@@ -294,6 +356,7 @@ class CostEstimator:
             total_input += (chunk_input + overhead_low + schema_tokens) * passes
             total_input_high += (chunk_input + overhead_high + schema_tokens) * passes
             total_output += chunk_output * passes
+            total_output_high += chunk_output_high * passes
             # One cached prefix per chunk after the first: the first call of
             # the job populates the cache, and in reflective mode the critique
             # and revise passes carry their own system prompts, so they share
@@ -325,7 +388,7 @@ class CostEstimator:
         # is uncertainty, and the low/high band is where uncertainty belongs.
         usd_high = (
             total_input_high / 1_000_000 * in_usd_per_mtok
-            + total_output / 1_000_000 * out_usd_per_mtok
+            + total_output_high / 1_000_000 * out_usd_per_mtok
         ) * _waste_factor(self._provider)
 
         # The budget guard protects against the CEILING, not the optimistic
@@ -340,6 +403,7 @@ class CostEstimator:
         return CostEstimate(
             input_tokens=total_input,
             output_tokens=total_output,
+            output_tokens_high=total_output_high,
             usd=usd_low,
             usd_low=usd_low,
             usd_high=usd_high,

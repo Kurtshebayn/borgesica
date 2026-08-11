@@ -358,6 +358,11 @@ class CostEstimate(BaseModel):
     # factor). The budget guard protects against usd_high, the ceiling.
     usd_low: float | None = None
     usd_high: float | None = None
+    # Output is a range for the same reason cost is. It is not a rescaling of
+    # input: the translation expands against its source, and one measured call
+    # in twenty emitted 3.6x the floor's projection for a single (non-retried)
+    # call. output_tokens reports the FLOOR, matching input_tokens and usd.
+    output_tokens_high: int | None = None
     model: str
     cached: bool = False
     within_budget: bool = True
@@ -369,6 +374,8 @@ class CostEstimate(BaseModel):
             self.usd_low = self.usd
         if self.usd_high is None:
             self.usd_high = self.usd
+        if self.output_tokens_high is None:
+            self.output_tokens_high = self.output_tokens
         return self
 
 

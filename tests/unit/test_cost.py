@@ -318,9 +318,13 @@ def test_estimate_includes_per_call_system_prompt_overhead():
 
 
 def test_estimate_default_output_scales_with_source():
-    """Default output per chunk = translation (≈ source size) + JSON envelope
+    """Default output per chunk = translation (source x expansion) + JSON envelope
     (summary_update + glossary_additions), not a flat 150 tokens."""
-    from borgesica.domain.cost import _OUTPUT_ENVELOPE_TOKENS, CostEstimator
+    from borgesica.domain.cost import (
+        _OUTPUT_ENVELOPE_TOKENS,
+        _OUTPUT_EXPANSION,
+        CostEstimator,
+    )
 
     provider = FakeTranslationProvider()
     estimator = CostEstimator(provider=provider)
@@ -330,8 +334,8 @@ def test_estimate_default_output_scales_with_source():
     est_small = estimator.estimate(job, [make_chunk(0, text="hello world")], config)
     est_large = estimator.estimate(job, [make_chunk(0, text="w " * 400)], config)
 
-    assert est_small.output_tokens == 2 + _OUTPUT_ENVELOPE_TOKENS
-    assert est_large.output_tokens == 400 + _OUTPUT_ENVELOPE_TOKENS
+    assert est_small.output_tokens == round(2 * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
+    assert est_large.output_tokens == round(400 * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -885,3 +889,152 @@ def test_estimate_within_budget_still_gates_on_the_ceiling():
     tight = _estimate_with(_CachingProvider(), chunks, budget_usd=est.usd_high * 0.5)
 
     assert tight.within_budget is False
+
+
+# ---------------------------------------------------------------------------
+# Output-token calibration — the translation is Spanish, the source is English
+#
+# MEASURED 2026-08-11 against deepseek-v4-flash: 20 instrumented calls, one per
+# chunk, each pairing usage.completion_tokens with the exact bytes returned.
+# See _OUTPUT_EXPANSION in cost.py for the full measurement.
+# ---------------------------------------------------------------------------
+
+
+def test_default_output_prices_translation_expansion_not_source_parity():
+    """A translation costs MORE output tokens than its source costs input ones.
+
+    `chunk_input + envelope` assumed parity: that Spanish renders in the same
+    token count as the English it translates. It does not — Spanish prose runs
+    1.710 tok/word against English's 1.384, and the JSON envelope the model
+    replies in tokenizes denser than the prose inside it. Measured, the
+    translation alone is 1.25x the source's token count.
+    """
+    from borgesica.domain.cost import (
+        _OUTPUT_ENVELOPE_TOKENS,
+        _OUTPUT_EXPANSION,
+        CostEstimator,
+    )
+
+    provider = FakeTranslationProvider()
+    estimator = CostEstimator(provider=provider)
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=1)
+    source_tokens = 400
+
+    est = estimator.estimate(job, [make_chunk(0, text="w " * source_tokens)], config)
+
+    assert est.output_tokens == round(source_tokens * _OUTPUT_EXPANSION) + _OUTPUT_ENVELOPE_TOKENS
+    assert est.output_tokens > source_tokens + _OUTPUT_ENVELOPE_TOKENS, (
+        f"Output ({est.output_tokens}) must exceed source-parity "
+        f"({source_tokens + _OUTPUT_ENVELOPE_TOKENS}): the translation is Spanish."
+    )
+
+
+def test_output_envelope_is_not_smaller_than_the_summary_it_carries():
+    """The envelope must fit the rolling summary the model is asked to emit.
+
+    _OUTPUT_ENVELOPE_TOKENS was 150 while _SUMMARY_BUDGET_WORDS in the same
+    file priced that same summary at 200 WORDS on the input side — and 200
+    words of Spanish is ~342 tokens on its own, before glossary_additions or a
+    single JSON key. Measured summaries came back at 215 tokens median.
+    """
+    from borgesica.domain.cost import _OUTPUT_ENVELOPE_TOKENS, _SUMMARY_BUDGET_WORDS
+
+    spanish_tokens_per_word = 1.710
+    measured_summary_tokens = 215
+
+    assert _OUTPUT_ENVELOPE_TOKENS >= measured_summary_tokens, (
+        f"The envelope ({_OUTPUT_ENVELOPE_TOKENS}) must cover the measured "
+        f"summary ({measured_summary_tokens} tok) plus JSON keys."
+    )
+    assert _SUMMARY_BUDGET_WORDS * spanish_tokens_per_word > _OUTPUT_ENVELOPE_TOKENS, (
+        "The CEILING summary budget is the high-side allowance; if the floor "
+        "envelope already covered it there would be no band left to widen."
+    )
+
+
+def test_output_ceiling_prices_the_summary_at_its_declared_word_budget():
+    """usd_high must price the summary with the same budget the input side uses.
+
+    The floor carries the measured summary; the ceiling carries the full
+    _SUMMARY_BUDGET_WORDS allowance, priced through the SAME _word_budget_tokens
+    helper the input block already uses. Pricing one side in words and the
+    other in an invented token constant is what produced the 150-vs-200
+    contradiction.
+    """
+    from borgesica.domain.cost import (
+        _OUTPUT_EXPANSION_HIGH,
+        _OUTPUT_JSON_SCAFFOLDING_TOKENS,
+        _SUMMARY_BUDGET_WORDS,
+        CostEstimator,
+        _word_budget_tokens,
+    )
+
+    provider = FakeTranslationProvider()
+    estimator = CostEstimator(provider=provider)
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=1)
+
+    est = estimator.estimate(job, [make_chunk(0, text="w " * 400)], config)
+
+    ceiling_envelope = (
+        _word_budget_tokens(provider, _SUMMARY_BUDGET_WORDS, config.model)
+        + _OUTPUT_JSON_SCAFFOLDING_TOKENS
+    )
+    assert est.output_tokens_high == round(400 * _OUTPUT_EXPANSION_HIGH) + ceiling_envelope
+
+
+def test_output_ceiling_exceeds_the_output_floor():
+    """Output uncertainty belongs in the band, like every other unknown here.
+
+    One measured call emitted 4,799 tokens for a chunk the floor model prices
+    at 1,325 — a 3.6x tail on a single call, not a retry. usd_high must carry
+    that; a ceiling that shares the floor's output number would admit a job
+    that then overspends.
+    """
+    from borgesica.domain.cost import CostEstimator
+
+    provider = FakeTranslationProvider()
+    estimator = CostEstimator(provider=provider)
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=1)
+
+    est = estimator.estimate(job, [make_chunk(0, text="w " * 400)], config)
+
+    assert est.output_tokens_high > est.output_tokens
+
+
+def test_explicit_output_override_still_pins_both_bounds():
+    """output_tokens_per_chunk stays the deterministic escape hatch for tests."""
+    from borgesica.domain.cost import CostEstimator
+
+    estimator = CostEstimator(provider=FakeTranslationProvider())
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=1)
+
+    est = estimator.estimate(
+        job, [make_chunk(0, text="w " * 400)], config, output_tokens_per_chunk=99
+    )
+
+    assert est.output_tokens == 99
+    assert est.output_tokens_high == 99
+
+
+def test_output_ceiling_never_falls_below_the_output_floor():
+    """A low-reading token counter must not invert the output band.
+
+    The ceiling envelope is a WORD budget converted through the provider's own
+    counter; the floor is a measured TOKEN constant. A provider that counts a
+    token per word prices the 200-word budget at 200 — below the 260-token
+    floor — and would hand back usd_high < usd_low.
+    """
+    from borgesica.domain.cost import CostEstimator
+
+    estimator = CostEstimator(provider=FakeTranslationProvider())
+    config = make_config(quality_mode="fast")
+    job = make_job(config, total=1)
+
+    est = estimator.estimate(job, [make_chunk(0, text="hello world")], config)
+
+    assert est.output_tokens_high >= est.output_tokens
+    assert est.usd_high >= est.usd_low
