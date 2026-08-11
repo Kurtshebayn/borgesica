@@ -324,6 +324,15 @@ class Usage(BaseModel):
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
+    """The SUBSET of ``input_tokens`` that hit the provider's prompt cache.
+
+    Defaults to 0 so a provider that reports no cache detail prices exactly as
+    it always did. Measured on a real DeepSeek bill of 1,114 requests: 5.12M of
+    6.01M input tokens were cache hits, billed at roughly 1.6% of the miss
+    rate. Pricing them as misses overstated that bill 2.04x — and the same
+    figure feeds the budget guard, which would then pause a job at about half
+    the budget it had really spent."""
 
 
 class TranslationResult(BaseModel):

@@ -715,6 +715,7 @@ def test_reflective_carries_draft_cost_when_critique_raises():
             config=config,
             in_price=1.0,
             out_price=5.0,
+            cache_price=1.0,
         )
 
     # Draft billed Usage(10, 5); nothing else succeeded.
@@ -735,6 +736,7 @@ def test_reflective_carries_draft_and_critique_cost_when_revise_raises():
             config=config,
             in_price=1.0,
             out_price=5.0,
+            cache_price=1.0,
         )
 
     # Draft + critique each billed Usage(10, 5) → summed.
@@ -3168,6 +3170,9 @@ class _CapRecordingProvider:
 
     def price(self, model: str) -> tuple[float, float]:
         return (1.0, 1.0)
+
+    def cache_price(self, model: str) -> float:  # noqa: ARG002
+        return 1.0
 
 
 def _run_one_chunk_with(config_kwargs):

@@ -160,6 +160,7 @@ def _add_usage(a: Usage, b: Usage) -> Usage:
     return Usage(
         input_tokens=a.input_tokens + b.input_tokens,
         output_tokens=a.output_tokens + b.output_tokens,
+        cached_input_tokens=a.cached_input_tokens + b.cached_input_tokens,
     )
 
 
@@ -357,6 +358,7 @@ class TranslationOrchestrator:
 
             # Fetch price once per chunk (same model throughout — no need to re-fetch per call).
             in_price, out_price = self._provider.price(config.model)
+            cache_price = self._provider.cache_price(config.model)
 
             # PRIMARY: send source_text WITH tags (do NOT strip up front).
             # The system prompt instructs the model to carry every tag with its word.
@@ -373,6 +375,7 @@ class TranslationOrchestrator:
                 config=config,
                 in_price=in_price,
                 out_price=out_price,
+                cache_price=cache_price,
             )
 
             # Accrue the real cost of ALL calls made (regardless of success or failure).
@@ -534,6 +537,14 @@ class TranslationOrchestrator:
         is_nav_label = chunk.meta.get("kind") == "nav-label"
         passes = 1 if is_nav_label else (3 if config.quality_mode == "reflective" else 1)
         in_price, out_price = self._provider.price(config.model)
+        # This PROJECTION deliberately prices every input token at the cache-MISS
+        # rate, unlike the accrual of real spend in _usage_cost. Projecting the
+        # discount would mean predicting how much of the next chunk's prompt the
+        # provider will serve from cache, which nothing here can know. Assuming
+        # no cache is the conservative direction for a budget guard: it pauses
+        # early rather than overspending. The accrued running_cost it is compared
+        # against IS cache-aware, so the guard no longer fires at half the real
+        # budget — it now errs only on the side of caution.
         happy_path = (
             input_tokens * passes / 1_000_000 * in_price
             + output_tokens * passes / 1_000_000 * out_price
@@ -582,10 +593,23 @@ class TranslationOrchestrator:
             )
 
     @staticmethod
-    def _usage_cost(usage: Usage, in_price: float, out_price: float) -> float:
-        """Compute the USD cost for a single provider call's real Usage."""
+    def _usage_cost(
+        usage: Usage, in_price: float, out_price: float, cache_price: float
+    ) -> float:
+        """Compute the USD cost for a single provider call's real Usage.
+
+        ``cached_input_tokens`` is the subset of ``input_tokens`` the provider
+        served from its prompt cache, and it is billed at ``cache_price``, not
+        at ``in_price``. Pricing all input at the miss rate overstated a real
+        DeepSeek bill 2.04x, and because this figure is what the budget guard
+        accrues, a job with ``budget_usd`` set would raise BudgetExceeded at
+        roughly half the budget it had actually spent.
+        """
+        cached = min(usage.cached_input_tokens, usage.input_tokens)
+        missed = usage.input_tokens - cached
         return (
-            usage.input_tokens / 1_000_000 * in_price
+            missed / 1_000_000 * in_price
+            + cached / 1_000_000 * cache_price
             + usage.output_tokens / 1_000_000 * out_price
         )
 
@@ -596,6 +620,7 @@ class TranslationOrchestrator:
         config: JobConfig,
         in_price: float,
         out_price: float,
+        cache_price: float,
     ) -> tuple[TranslationUnit | None, str | None, float, bool, str | None]:
         """Attempt translation using the tags-in-text PRIMARY path, with up to
         _MAX_TAG_RETRIES retries on tag-count mismatch, then a deterministic
@@ -687,6 +712,7 @@ class TranslationOrchestrator:
                         config=config,
                         in_price=in_price,
                         out_price=out_price,
+                        cache_price=cache_price,
                         segment_count=segment_count,
                     )
                     total_call_cost += call_cost
@@ -699,7 +725,9 @@ class TranslationOrchestrator:
                     )
                     unit = result.unit
                     translated_text = result.unit.translation
-                    total_call_cost += self._usage_cost(result.usage, in_price, out_price)
+                    total_call_cost += self._usage_cost(
+                        result.usage, in_price, out_price, cache_price
+                    )
             except (MalformedOutput, ProviderError) as exc:
                 # The provider gave up on this attempt (after its own tiers/retries).
                 # Treat it as a failed attempt: retry, or fall through to the
@@ -709,7 +737,7 @@ class TranslationOrchestrator:
                 # Cost fix: the provider's internal billed-but-failed calls carry
                 # real usage on the exception — accrue it so the budget guard sees
                 # the true spend of failed chunks (previously charged $0).
-                total_call_cost += self._usage_cost(exc.usage, in_price, out_price)
+                total_call_cost += self._usage_cost(exc.usage, in_price, out_price, cache_price)
                 continue
 
             # Segmented contract: an aligned translations array becomes the
@@ -800,7 +828,9 @@ class TranslationOrchestrator:
                 user=plain_source,
                 model=config.model,
             )
-            total_call_cost += self._usage_cost(fallback_result.usage, in_price, out_price)
+            total_call_cost += self._usage_cost(
+                fallback_result.usage, in_price, out_price, cache_price
+            )
             fallback_unit = fallback_result.unit
             fallback_text = reinsert(fallback_unit.translation, tags, plain_source)
             if validate_tags(chunk.source_text, fallback_text):
@@ -813,7 +843,7 @@ class TranslationOrchestrator:
             # instead of being silently mislabeled as a tag failure.
             # Cost fix: accrue the billed-but-failed usage carried on the exception
             # so the fallback call's real cost is not dropped.
-            total_call_cost += self._usage_cost(exc.usage, in_price, out_price)
+            total_call_cost += self._usage_cost(exc.usage, in_price, out_price, cache_price)
             validation_issues.append(f"fallback: provider error ({exc})")
 
         # Both primary and fallback failed.
@@ -826,6 +856,7 @@ class TranslationOrchestrator:
         config: JobConfig,
         in_price: float,
         out_price: float,
+        cache_price: float,
         segment_count: int | None = None,
     ) -> tuple[TranslationUnit, str, float]:
         """Execute the translate → critique → revise loop.
@@ -872,7 +903,7 @@ class TranslationOrchestrator:
                 system=system, user=user, model=config.model, **segment_kwargs
             )
             accrued_usage = _add_usage(accrued_usage, draft_result.usage)
-            total_cost += self._usage_cost(draft_result.usage, in_price, out_price)
+            total_cost += self._usage_cost(draft_result.usage, in_price, out_price, cache_price)
             draft_unit = draft_result.unit
             draft_text = draft_unit.translation
 
@@ -888,7 +919,7 @@ class TranslationOrchestrator:
                 model=config.model,
             )
             accrued_usage = _add_usage(accrued_usage, critique_result.usage)
-            total_cost += self._usage_cost(critique_result.usage, in_price, out_price)
+            total_cost += self._usage_cost(critique_result.usage, in_price, out_price, cache_price)
             critique_text = critique_result.unit.translation
 
             # Step 3: Revise
@@ -911,7 +942,7 @@ class TranslationOrchestrator:
                 **segment_kwargs,
             )
             accrued_usage = _add_usage(accrued_usage, revised_result.usage)
-            total_cost += self._usage_cost(revised_result.usage, in_price, out_price)
+            total_cost += self._usage_cost(revised_result.usage, in_price, out_price, cache_price)
             revised_unit = revised_result.unit
         except (MalformedOutput, ProviderError) as exc:
             # Fold the already-billed usage of prior successful steps into the

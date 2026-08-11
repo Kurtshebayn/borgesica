@@ -217,6 +217,9 @@ class _FakeProvider:
     def price(self, model: str):  # noqa: ARG002
         return (1.0, 5.0)
 
+    def cache_price(self, model: str):  # noqa: ARG002
+        return 1.0
+
 
 # ---------------------------------------------------------------------------
 # Helper: apply deterministic "translation" to a list of chunks.

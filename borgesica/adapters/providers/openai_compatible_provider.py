@@ -113,6 +113,23 @@ _DEFAULT_DEEPSEEK_PRICE_TABLE: dict[str, tuple[float, float]] = {
 
 _FALLBACK_PRICE: tuple[float, float] = (3.0, 15.0)
 
+# USD per Mtok for input tokens served from the provider's prompt cache.
+#
+# DERIVED FROM A REAL BILL, not from documentation. Over 1,114 requests the
+# DeepSeek dashboard reported hit 5,115,392 / miss 892,787 / output 1,941,028
+# tokens for $0.68. The miss and output rates above account for $0.66848 of
+# that (98.3%), which both confirms the price table and leaves the cache cost
+# as a $0.0115 residual over 5.12 Mtok:
+#
+#     (0.68 - 0.66848) / 5.115392 = $0.00225 / Mtok  (1.6% of the miss rate)
+#
+# The dashboard rounds to the cent, so the residual pins this only to roughly
+# $0.0013-$0.0032/Mtok. The midpoint is used. Re-derive it the same way if
+# DeepSeek changes pricing; do not replace it with a remembered figure.
+_DEEPSEEK_CACHE_PRICE: dict[str, float] = {
+    "deepseek-v4-flash": 0.00225,
+}
+
 # OpenAI price table — (input_usd_per_mtok, output_usd_per_mtok).
 # NOT used for billing; only for pre-flight cost estimates. o-series
 # (o1/o3/o4-mini) models are intentionally NOT listed — they remain out of
@@ -188,11 +205,13 @@ class OpenAICompatibleProvider:
         default_model: str,
         price_table: dict[str, tuple[float, float]],
         _client: Any | None = None,
+        cache_price_table: dict[str, float] | None = None,
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
         self._default_model = default_model
         self._price_table = price_table
+        self._cache_price_table = cache_price_table or {}
 
         if _client is not None:
             self._client = _client
@@ -241,6 +260,7 @@ class OpenAICompatibleProvider:
             default_model=default_model,
             price_table=table,
             _client=_client,
+            cache_price_table=dict(_DEEPSEEK_CACHE_PRICE),
         )
 
     @classmethod
@@ -500,6 +520,19 @@ class OpenAICompatibleProvider:
         """
         return self._price_table.get(model, _FALLBACK_PRICE)
 
+    def cache_price(self, model: str) -> float:
+        """Return USD per Mtok for input tokens served from the prompt cache.
+
+        Falls back to the model's ordinary input price when no cache rate has
+        been measured for it. That deliberately assumes NO discount: an unknown
+        rate must never make the engine believe a job is cheaper than it is,
+        because this figure feeds the budget guard.
+        """
+        measured = self._cache_price_table.get(model)
+        if measured is not None:
+            return measured
+        return self.price(model)[0]
+
     # ------------------------------------------------------------------
     # Tier internals
     # ------------------------------------------------------------------
@@ -514,9 +547,18 @@ class OpenAICompatibleProvider:
         """
         try:
             raw = response.usage
+            # usage.prompt_tokens_details.cached_tokens is the subset of
+            # prompt_tokens served from the provider's prompt cache. DeepSeek
+            # bills those at a small fraction of the miss rate, so ignoring
+            # them overstated a measured bill 2.04x. Absent or null on
+            # endpoints without cache reporting — treat that as no hits rather
+            # than failing the whole usage read.
+            details = getattr(raw, "prompt_tokens_details", None)
+            cached = getattr(details, "cached_tokens", 0) or 0
             return Usage(
                 input_tokens=int(raw.prompt_tokens),
                 output_tokens=int(raw.completion_tokens),
+                cached_input_tokens=int(cached),
             )
         except (AttributeError, TypeError, ValueError):
             return Usage()
@@ -668,6 +710,7 @@ def _sum_usage(a: Usage, b: Usage) -> Usage:
     return Usage(
         input_tokens=a.input_tokens + b.input_tokens,
         output_tokens=a.output_tokens + b.output_tokens,
+        cached_input_tokens=a.cached_input_tokens + b.cached_input_tokens,
     )
 
 

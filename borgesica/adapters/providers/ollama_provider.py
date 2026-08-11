@@ -89,6 +89,10 @@ class OllamaProvider(OpenAICompatibleProvider):
         """Return (0.0, 0.0) for all models — local inference has no per-token API cost."""
         return _OLLAMA_FALLBACK_PRICE
 
+    def cache_price(self, model: str) -> float:  # noqa: ARG002
+        """Return 0.0 — local inference bills nothing, cached or not."""
+        return 0.0
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers

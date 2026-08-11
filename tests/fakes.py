@@ -94,6 +94,15 @@ class FakeTranslationProvider:
         """Fixed price: $1/Mtok in, $5/Mtok out."""
         return (1.0, 5.0)
 
+    def cache_price(self, model: str) -> float:  # noqa: ARG002
+        """Same as the input price — the fake reports no cache hits.
+
+        Matches the contract for a provider with no measured cache rate, so
+        existing cost assertions stay valid: with cached_input_tokens = 0 the
+        rate is never applied anyway.
+        """
+        return 1.0
+
     # --- Helpers ---
 
     @property
