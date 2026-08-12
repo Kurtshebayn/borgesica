@@ -29,6 +29,7 @@ from borgesica.domain.models import (
     ChunkStatus,
     Glossary,
     GlossaryEntry,
+    GlossaryVotes,
     Job,
     JobConfig,
     JobStatus,
@@ -118,6 +119,16 @@ CREATE TABLE IF NOT EXISTS glossary (
 )
 """
 
+_CREATE_GLOSSARY_VOTES = """
+CREATE TABLE IF NOT EXISTS glossary_votes (
+    job_id          TEXT NOT NULL,
+    term            TEXT NOT NULL,
+    vote_order      INTEGER NOT NULL,
+    translation     TEXT NOT NULL,
+    PRIMARY KEY (job_id, term, vote_order)
+)
+"""
+
 _CREATE_SUMMARIES = """
 CREATE TABLE IF NOT EXISTS summaries (
     job_id          TEXT NOT NULL,
@@ -191,6 +202,7 @@ class SQLiteCheckpointStore:
             conn.execute(_CREATE_JOBS)
             conn.execute(_CREATE_CHUNKS)
             conn.execute(_CREATE_GLOSSARY)
+            conn.execute(_CREATE_GLOSSARY_VOTES)
             conn.execute(_CREATE_SUMMARIES)
             existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
             for column, ddl in _JOBS_MIGRATIONS.items():
@@ -393,6 +405,41 @@ class SQLiteCheckpointStore:
                     "locked": 1 if entry.locked else 0,
                     "note": entry.note,
                 })
+
+    def save_votes(self, job_id: str, votes: GlossaryVotes) -> None:
+        """Replace the provisional-rendering tally for this job (full overwrite).
+
+        Full overwrite rather than append because a term LEAVES the tally when
+        it settles; an append-only log would keep resurrecting settled terms on
+        the next load.
+        """
+        delete_sql = "DELETE FROM glossary_votes WHERE job_id = ?"
+        insert_sql = """
+        INSERT INTO glossary_votes (job_id, term, vote_order, translation)
+        VALUES (?, ?, ?, ?)
+        """
+        with self._connect() as conn:
+            conn.execute(delete_sql, (job_id,))
+            for term, proposals in votes.by_term.items():
+                for order, translation in enumerate(proposals):
+                    conn.execute(insert_sql, (job_id, term, order, translation))
+
+    def load_votes(self, job_id: str) -> GlossaryVotes:
+        # Ordered by vote_order: the sequence is the tie-break when no
+        # rendering reaches a plurality, so it is data, not presentation.
+        sql = (
+            "SELECT term, translation FROM glossary_votes "
+            "WHERE job_id = ? ORDER BY term, vote_order"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql, (job_id,)).fetchall()
+
+        by_term: dict[str, list[str]] = {}
+        for row in rows:
+            by_term.setdefault(row["term"], []).append(row["translation"])
+        return GlossaryVotes(
+            by_term={term: tuple(proposals) for term, proposals in by_term.items()}
+        )
 
     def load_glossary(self, job_id: str) -> Glossary:
         sql = "SELECT * FROM glossary WHERE job_id = ? ORDER BY term"

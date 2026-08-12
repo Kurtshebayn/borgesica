@@ -1073,3 +1073,41 @@ def test_glossary_repairs_is_empty_for_a_clean_glossary(tmp_path: Path) -> None:
     )
 
     assert engine.glossary_repairs(job.id) == []
+
+
+def test_update_glossary_settles_the_term_so_quorum_cannot_overwrite_a_hand_edit(
+    tmp_path: Path,
+) -> None:
+    """A hand edit is a human decision and outranks the model's tally.
+
+    Without this, editing a term that is still provisional leaves its votes
+    alive, and the next proposal that reaches quorum silently replaces the
+    rendering the human just chose.
+    """
+    from borgesica.domain.glossary import apply_additions
+    from borgesica.domain.models import GlossaryVotes
+
+    engine, job = _engine_with_glossary(
+        tmp_path, [GlossaryEntry(term="Birthright", translation="Primogenitura")]
+    )
+    engine._checkpoint.save_votes(
+        job.id, GlossaryVotes(by_term={"birthright": ("Primogenitura", "Herencia")})
+    )
+
+    engine.update_glossary(
+        job.id, [GlossaryEntry(term="Birthright", translation="Derecho de Cuna")]
+    )
+
+    votes = engine._checkpoint.load_votes(job.id)
+    assert "birthright" not in votes.by_term
+
+    # And the tally can no longer move it: one more proposal would have hit
+    # quorum under the old behaviour.
+    glossary, _votes = apply_additions(
+        engine._checkpoint.load_glossary(job.id),
+        votes,
+        [GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento")],
+    )
+    assert [(e.term, e.translation) for e in glossary.entries] == [
+        ("Birthright", "Derecho de Cuna")
+    ]

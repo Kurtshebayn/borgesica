@@ -13,6 +13,7 @@ from borgesica.domain.models import (
     Chunk,
     CorpusSample,
     Glossary,
+    GlossaryVotes,
     Job,
     JobConfig,
     Progress,
@@ -121,6 +122,18 @@ class CheckpointStore(Protocol):
         ...
 
     def load_glossary(self, job_id: str) -> Glossary:
+        ...
+
+    def save_votes(self, job_id: str, votes: GlossaryVotes) -> None:
+        """Replace the provisional-rendering tally for this job.
+
+        Separate from save_glossary because the tally is scaffolding, not
+        product: it exists only until each term settles, and a finished job's
+        glossary must stay readable without it.
+        """
+        ...
+
+    def load_votes(self, job_id: str) -> GlossaryVotes:
         ...
 
     def save_summary(self, job_id: str, s: RollingSummary) -> None:

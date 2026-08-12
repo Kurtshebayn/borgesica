@@ -68,7 +68,7 @@ from borgesica.domain.errors import (
     MalformedOutput,
     ProviderError,
 )
-from borgesica.domain.glossary import merge_additions
+from borgesica.domain.glossary import apply_additions
 from borgesica.domain.markup import (
     reinsert,
     strip,
@@ -284,6 +284,9 @@ class TranslationOrchestrator:
 
         # Mutable glossary reference — may grow via mid-run additions.
         live_glossary = glossary
+        # Provisional-rendering tally, loaded so a resumed job keeps counting
+        # instead of restarting every term's vote from scratch.
+        live_votes = self._checkpoint.load_votes(job.id)
 
         # Process each chunk in order. `position` is 1-based within this run:
         # extracted chunks keep their ORIGINAL book indices, so chunk.index is
@@ -443,9 +446,16 @@ class TranslationOrchestrator:
             self._checkpoint.save_summary(job.id, current_summary)
 
             # Merge glossary additions (locked wins; new terms added as unlocked).
+            # A new term is committed at once but stays provisional: repeated
+            # proposals are tallied and the plurality replaces it at quorum, so
+            # one draw at temperature > 0 no longer fixes the rendering for the
+            # rest of the book.
             if final_unit.glossary_additions:
-                live_glossary = merge_additions(live_glossary, final_unit.glossary_additions)
+                live_glossary, live_votes = apply_additions(
+                    live_glossary, live_votes, final_unit.glossary_additions
+                )
                 self._checkpoint.save_glossary(job.id, live_glossary)
+                self._checkpoint.save_votes(job.id, live_votes)
 
             # Emit progress callback.
             on_progress(

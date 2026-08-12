@@ -200,6 +200,33 @@ class TestSQLiteCheckpointStore:
         assert locked[0].term == "Tranca"
         assert locked[0].note == "wooden beam"
 
+    # --- save_votes + load_votes round-trip, proposal order preserved ---
+    def test_save_and_load_votes(self):
+        from borgesica.domain.models import GlossaryVotes
+
+        job = make_job()
+        self.store.save_job(job)
+        votes = GlossaryVotes(
+            by_term={
+                "birthright": ("Primogenitura", "Derecho de Nacimiento"),
+                "will cage": ("jaula de Voluntad",),
+            }
+        )
+        self.store.save_votes(job.id, votes)
+        loaded = self.store.load_votes(job.id)
+        # Order matters: it is the tie-break when no rendering gets a plurality.
+        assert loaded.by_term == votes.by_term
+
+    # --- save_votes is a full overwrite, like save_glossary ---
+    def test_save_votes_replaces_the_previous_tally(self):
+        from borgesica.domain.models import GlossaryVotes
+
+        job = make_job()
+        self.store.save_job(job)
+        self.store.save_votes(job.id, GlossaryVotes(by_term={"a": ("x", "y")}))
+        self.store.save_votes(job.id, GlossaryVotes(by_term={"a": ("x",)}))
+        assert self.store.load_votes(job.id).by_term == {"a": ("x",)}
+
     # --- Test 6: save_summary + load_summary round-trip ---
     def test_save_and_load_summary(self):
         job = make_job()

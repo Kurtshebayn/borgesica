@@ -3326,3 +3326,86 @@ def test_progress_position_accounts_for_already_done_chunks_on_resume():
     )
 
     assert seen == [3], f"resumed run must report position 3 of 3, got {seen}"
+
+
+# ===========================================================================
+# Confirmation by repetition: the run revises a bad first draw
+# ===========================================================================
+
+
+class _RenderingSequenceProvider(FakeTranslationProvider):
+    """Emits one glossary addition per chunk, cycling a list of renderings."""
+
+    def __init__(self, term: str, renderings: list[str]) -> None:
+        super().__init__()
+        self._term = term
+        self._renderings = renderings
+
+    def translate(self, system: str, user: str, model: str) -> TranslationResult:
+        from borgesica.domain.models import GlossaryEntry
+
+        self.call_log.append((system, user, model))
+        n = len(self.call_log) - 1
+        unit = TranslationUnit(
+            translation=f"Translation {n}.",
+            summary_update=f"Summary {n}.",
+            glossary_additions=[
+                GlossaryEntry(term=self._term, translation=self._renderings[n])
+            ],
+        )
+        return TranslationResult(
+            unit=unit,
+            usage=Usage(
+                input_tokens=self.count_tokens(system + " " + user, model),
+                output_tokens=self.count_tokens(unit.translation, model),
+            ),
+        )
+
+
+def _run(orch, store, config, job, chunks, glossary):
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, glossary)
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=glossary,
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+
+def test_run_replaces_a_minority_first_draw_once_quorum_is_reached():
+    """The whole point: chunk 1's single draw must stop deciding the book."""
+    store = InMemoryCheckpointStore()
+    provider = _RenderingSequenceProvider(
+        "Birthright", ["Primogenitura", "Derecho de Nacimiento", "Derecho de Nacimiento"]
+    )
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config()
+    job = make_job(config, total=3)
+
+    _run(orch, store, config, job, make_chunks(3), Glossary())
+
+    stored = store.load_glossary(job.id)
+    assert [(e.term, e.translation) for e in stored.entries] == [
+        ("Birthright", "Derecho de Nacimiento")
+    ]
+
+
+def test_votes_survive_between_runs_so_a_resumed_job_keeps_counting():
+    """Votes held only in memory would reset on resume, and a 502-chunk job
+    resumes often — the term would restart voting and never settle.
+    """
+    store = InMemoryCheckpointStore()
+    config = make_config()
+    job = make_job(config, total=2)
+
+    provider = _RenderingSequenceProvider("Birthright", ["Primogenitura", "Herencia"])
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    _run(orch, store, config, job, make_chunks(2), Glossary())
+
+    votes = store.load_votes(job.id)
+    assert votes.by_term == {"birthright": ("Primogenitura", "Herencia")}

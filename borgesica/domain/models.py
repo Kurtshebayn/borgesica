@@ -212,6 +212,26 @@ class Glossary(BaseModel):
         return f"{header} {', '.join(terms)}"
 
 
+class GlossaryVotes(BaseModel):
+    """Renderings proposed for terms that are still provisional, in order.
+
+    Keyed by the casefolded term, matching the identity ``dedupe_glossary``
+    uses, and holding every rendering the model proposed for it — order
+    included, because it breaks ties when nothing reaches a plurality.
+
+    Membership IS the provisional marker: a term with votes may still be
+    revised, a term without them is settled. That keeps the state out of
+    ``GlossaryEntry``, so nothing that reads or renders a glossary has to learn
+    that voting exists.
+
+    Lives here rather than beside the voting logic in ``domain.glossary``
+    because ``domain.ports`` has to name it in the CheckpointStore signature,
+    and glossary.py imports ports.py.
+    """
+
+    by_term: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+
+
 class RollingSummary(BaseModel):
     text: str = ""
     chunk_index: int = -1  # index of the last chunk that produced this summary

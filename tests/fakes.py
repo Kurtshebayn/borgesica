@@ -17,6 +17,7 @@ from borgesica.domain.models import (
     CorpusSample,
     Glossary,
     GlossaryEntry,
+    GlossaryVotes,
     Job,
     RollingSummary,
     TranslationResult,
@@ -130,6 +131,7 @@ class InMemoryCheckpointStore:
         # {job_id: {chunk_index: Chunk}}
         self._chunks: dict[str, dict[int, Chunk]] = {}
         self._glossaries: dict[str, Glossary] = {}
+        self._votes: dict[str, GlossaryVotes] = {}
         self._summaries: dict[str, dict[int, RollingSummary]] = {}
 
     # --- CheckpointStore Protocol methods ---
@@ -155,6 +157,12 @@ class InMemoryCheckpointStore:
 
     def load_glossary(self, job_id: str) -> Glossary:
         return self._glossaries.get(job_id, Glossary())
+
+    def save_votes(self, job_id: str, votes: GlossaryVotes) -> None:
+        self._votes[job_id] = votes
+
+    def load_votes(self, job_id: str) -> GlossaryVotes:
+        return self._votes.get(job_id, GlossaryVotes())
 
     def save_summary(self, job_id: str, s: RollingSummary) -> None:
         if job_id not in self._summaries:

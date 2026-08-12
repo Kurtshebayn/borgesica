@@ -641,3 +641,155 @@ def test_merge_cleans_a_reversed_pair_already_in_the_live_glossary():
     result = merge_additions(glossary, additions)
 
     assert [e.term for e in result.entries] == ["Religion", "Aaru"]
+
+
+# ---------------------------------------------------------------------------
+# Confirmation by repetition — the first draw no longer decides the book
+# ---------------------------------------------------------------------------
+
+
+def test_a_minority_first_draw_is_replaced_once_the_majority_reaches_quorum():
+    """Measured on 422 real calls: 'Birthright' drew 10 distinct renderings and
+    the dominant one won only 79% of first draws. Committing that single draw
+    pinned a minority rendering for the remaining ~470 chunks one run in five.
+    """
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary, votes = Glossary(), GlossaryVotes()
+
+    glossary, votes = apply_additions(
+        glossary, votes, [GlossaryEntry(term="Birthright", translation="Primogenitura")]
+    )
+    # Committed immediately: a term seen once must still reach the prompt, or
+    # rare terms would never be glossed at all.
+    assert [(e.term, e.translation) for e in glossary.entries] == [
+        ("Birthright", "Primogenitura")
+    ]
+
+    for _ in range(2):
+        glossary, votes = apply_additions(
+            glossary,
+            votes,
+            [GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento")],
+        )
+
+    assert [(e.term, e.translation) for e in glossary.entries] == [
+        ("Birthright", "Derecho de Nacimiento")
+    ]
+
+
+def test_a_term_proposed_once_keeps_its_first_draw():
+    """Rare terms must not be starved. "Will shells" appears in four chunks of a
+    502-chunk book, so a mechanism that only glossed terms reaching quorum would
+    leave it out of the prompt entirely.
+    """
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary, votes = apply_additions(
+        Glossary(),
+        GlossaryVotes(),
+        [GlossaryEntry(term="Will shells", translation="proyectiles de Voluntad")],
+    )
+
+    assert [(e.term, e.translation) for e in glossary.entries] == [
+        ("Will shells", "proyectiles de Voluntad")
+    ]
+    assert votes.by_term == {"will shells": ("proyectiles de Voluntad",)}
+
+
+def test_a_settled_term_ignores_later_proposals():
+    """Once quorum decided a rendering, the term stops listening — otherwise the
+    glossary would keep churning for the rest of the book.
+    """
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary, votes = Glossary(), GlossaryVotes()
+    for _ in range(3):
+        glossary, votes = apply_additions(
+            glossary, votes, [GlossaryEntry(term="Caer", translation="Caer")]
+        )
+    assert votes.by_term == {}
+
+    glossary, votes = apply_additions(
+        glossary, votes, [GlossaryEntry(term="Caer", translation="Otra Cosa")]
+    )
+
+    assert [(e.term, e.translation) for e in glossary.entries] == [("Caer", "Caer")]
+
+
+def test_a_locked_term_takes_no_votes_and_is_never_revised():
+    """Locking is a human decision; inference does not get to overrule it."""
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary = Glossary(
+        entries=[GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento", locked=True)]
+    )
+    votes = GlossaryVotes()
+    for _ in range(4):
+        glossary, votes = apply_additions(
+            glossary, votes, [GlossaryEntry(term="Birthright", translation="Primogenitura")]
+        )
+
+    assert [(e.term, e.translation) for e in glossary.entries] == [
+        ("Birthright", "Derecho de Nacimiento")
+    ]
+    assert votes.by_term == {}
+
+
+def test_quorum_breaks_a_three_way_tie_by_earliest_proposal():
+    """With no repetition to go on, the first draw is still the best evidence."""
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary, votes = Glossary(), GlossaryVotes()
+    for rendering in ("Herencia", "Primogenitura", "Legítimo Derecho"):
+        glossary, votes = apply_additions(
+            glossary, votes, [GlossaryEntry(term="Birthright", translation=rendering)]
+        )
+
+    assert [(e.term, e.translation) for e in glossary.entries] == [
+        ("Birthright", "Herencia")
+    ]
+
+
+def test_case_variants_of_one_rendering_count_as_the_same_vote():
+    """13 of 83 real proposals for "Will cage" differed only in capitalisation;
+    counting them apart would split the majority against itself.
+    """
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary, votes = Glossary(), GlossaryVotes()
+    for rendering in ("Jaula de Voluntad", "jaula de voluntad", "otra cosa"):
+        glossary, votes = apply_additions(
+            glossary, votes, [GlossaryEntry(term="Will cage", translation=rendering)]
+        )
+
+    assert [(e.term, e.translation) for e in glossary.entries] == [
+        ("Will cage", "Jaula de Voluntad")
+    ]
+
+
+def test_a_glossary_persisted_before_voting_existed_is_treated_as_settled():
+    """A resumed job carries entries but no votes. They must not reopen."""
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Aaru", translation="Aaru")])
+
+    glossary, votes = apply_additions(
+        glossary, GlossaryVotes(), [GlossaryEntry(term="Aaru", translation="Aarú")]
+    )
+
+    assert [(e.term, e.translation) for e in glossary.entries] == [("Aaru", "Aaru")]
+    assert votes.by_term == {}
+
+
+def test_a_reversed_proposal_is_still_dropped():
+    """The direction guard runs on the result like every other glossary boundary."""
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Will", translation="Voluntad")])
+
+    glossary, _votes = apply_additions(
+        glossary, GlossaryVotes(), [GlossaryEntry(term="Voluntad", translation="Will")]
+    )
+
+    assert [e.term for e in glossary.entries] == ["Will"]

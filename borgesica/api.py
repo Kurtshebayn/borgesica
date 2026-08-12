@@ -32,6 +32,7 @@ from borgesica.domain.models import (
     CostEstimate,
     Glossary,
     GlossaryEntry,
+    GlossaryVotes,
     Job,
     JobConfig,
     JobStatus,
@@ -479,6 +480,21 @@ class TranslatorEngine:
             raise GlossaryEntryRejectedError(job_id=job_id, rejected=rejected)
 
         self._checkpoint.save_glossary(job_id, updated)
+
+        # A hand edit SETTLES the term. Leaving its votes alive would let the
+        # next proposal that reaches quorum silently replace the rendering the
+        # human just chose — inference does not get to overrule a person, the
+        # same reason drop_reversed_entries never touches a locked entry.
+        votes = self._checkpoint.load_votes(job_id)
+        edited = {normalize_term(e.term).casefold() for e in entries}
+        remaining = {
+            term: proposals
+            for term, proposals in votes.by_term.items()
+            if term not in edited
+        }
+        if len(remaining) != len(votes.by_term):
+            self._checkpoint.save_votes(job_id, GlossaryVotes(by_term=remaining))
+
         return updated
 
     # ------------------------------------------------------------------
