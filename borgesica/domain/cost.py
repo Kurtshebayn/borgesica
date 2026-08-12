@@ -204,10 +204,27 @@ def _word_budget_tokens(
     Routing the conversion through `count_tokens` instead of hardcoding a ratio
     means a provider that ships a real tokenizer corrects this for free.
 
-    NOTE: every adapter currently approximates count_tokens as words x 1.3, so
-    this conversion inherits that approximation. Calibrating it against real
-    `usage.input_tokens` is tracked separately (C1, cause 2); it is deliberately
-    NOT papered over with a second invented constant here.
+    NOTE: this conversion inherits whatever `count_tokens` approximates, and
+    that approximation is now MEASURED rather than guessed at. (It is no longer
+    "words x 1.3" — 7e1bec8 moved every OpenAI-compatible adapter to
+    characters / 3.853; this note said otherwise for several commits.)
+
+    The residual is a real UNDER-count, and it is worst exactly here. Measured
+    2026-08-11 against `usage.prompt_tokens` on 20 instrumented prose calls:
+
+      whole prompt, count_tokens vs real   -15.9%
+      of which, the rendered glossary      2020 counted vs ~2757 real (-27%)
+      chat-template overhead (unseeable)   ~5% on every call, both source types
+
+    A glossary is a dense arrow table (~2.8 chars/token) being priced at prose
+    density (3.853), so a 2500-WORD budget prices at 5191 tokens against ~6460
+    real — 24% low, on every call. On a 502-chunk book that is ~11% of usd_high.
+
+    It is still NOT papered over with a second invented constant here: the fix
+    belongs in the counter, which is the provider's job, not in a domain-side
+    correction that every future provider would inherit whether or not its
+    tokenizer needs it. Until then the gap lives in the band, and the band is
+    wide enough to hold it — usd_high already sits ~2.9x above measured spend.
     """
     if words <= 0:
         return 0
