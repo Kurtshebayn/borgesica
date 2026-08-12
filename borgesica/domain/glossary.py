@@ -20,12 +20,10 @@ Mid-run addition staging logic:
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-
 from borgesica.domain.models import (
     Glossary,
     GlossaryEntry,
+    GlossaryVotes,
     JobConfig,
     normalize_term,
 )
@@ -376,19 +374,6 @@ Three, because two cannot break a disagreement: with two votes a tie has to be
 resolved by taking the first, which is exactly the single unreplicated draw this
 mechanism exists to replace.
 """
-
-
-@dataclass(frozen=True)
-class GlossaryVotes:
-    """Renderings proposed for terms that are still provisional, in order.
-
-    Membership IS the provisional marker: a term with votes may still be
-    revised, a term without them is settled. That keeps the state out of
-    ``GlossaryEntry``, so nothing that reads or renders a glossary has to learn
-    about voting.
-    """
-
-    by_term: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _plurality(proposals: tuple[str, ...]) -> str:
