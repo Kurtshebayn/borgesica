@@ -20,6 +20,9 @@ Mid-run addition staging logic:
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
 from borgesica.domain.models import (
     Glossary,
     GlossaryEntry,
@@ -29,8 +32,11 @@ from borgesica.domain.models import (
 from borgesica.domain.ports import TranslationProvider
 
 __all__ = [
+    "QUORUM",
+    "GlossaryVotes",
     "LlmGlossaryExtractor",
     "NullGlossaryExtractor",
+    "apply_additions",
     "dedupe_glossary",
     "drop_reversed_entries",
     "get_extractor",
@@ -357,3 +363,122 @@ def merge_additions(glossary: Glossary, additions: list[GlossaryEntry]) -> Gloss
 
     cleaned, _dropped = sanitize_glossary(Glossary(entries=new_entries))
     return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Confirmation by repetition — provisional entries and the revision window
+# ---------------------------------------------------------------------------
+
+QUORUM = 3
+"""Proposals a term collects before its rendering is settled for good.
+
+Three, because two cannot break a disagreement: with two votes a tie has to be
+resolved by taking the first, which is exactly the single unreplicated draw this
+mechanism exists to replace.
+"""
+
+
+@dataclass(frozen=True)
+class GlossaryVotes:
+    """Renderings proposed for terms that are still provisional, in order.
+
+    Membership IS the provisional marker: a term with votes may still be
+    revised, a term without them is settled. That keeps the state out of
+    ``GlossaryEntry``, so nothing that reads or renders a glossary has to learn
+    about voting.
+    """
+
+    by_term: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+def _plurality(proposals: tuple[str, ...]) -> str:
+    """Return the most-proposed rendering, earliest proposal breaking ties.
+
+    Grouped by ``casefold`` so "jaula de Voluntad" and "Jaula de Voluntad" are
+    one rendering rather than two competing ones — on the real data that case
+    split accounted for 13 of 83 proposals for a single term.
+    """
+    counts: dict[str, int] = {}
+    spelling: dict[str, str] = {}
+    for proposal in proposals:
+        rendering = normalize_term(proposal)
+        key = rendering.casefold()
+        counts[key] = counts.get(key, 0) + 1
+        spelling.setdefault(key, rendering)
+    # dict preserves insertion order and max() keeps the first maximum, so ties
+    # resolve to the rendering proposed earliest.
+    return spelling[max(counts, key=lambda key: counts[key])]
+
+
+def apply_additions(
+    glossary: Glossary,
+    votes: GlossaryVotes,
+    additions: list[GlossaryEntry],
+    quorum: int = QUORUM,
+) -> tuple[Glossary, GlossaryVotes]:
+    """Merge additions, letting repeated proposals correct a bad first draw.
+
+    ``merge_additions`` commits a term the first time the model emits it and
+    never revisits it. That single emission is one sample at temperature > 0,
+    and it decides the rendering for every remaining chunk. Measured over 422
+    real calls, "Birthright" drew ten distinct renderings and the dominant one
+    won 79% of first draws — so roughly one run in five pinned a minority
+    rendering for the rest of the book.
+
+    Here a new term is still committed immediately, because a term seen once
+    must reach the prompt (rare terms like "Will shells" appear in only four
+    chunks and would otherwise risk never being glossed at all). But it stays
+    PROVISIONAL: later proposals for the same term are counted, and at
+    ``quorum`` the plurality wins and replaces the committed rendering. Terms
+    that never reach quorum keep their first draw, exactly as today.
+
+    Locked entries take no votes and are never revised — locking is a human
+    decision. The result passes through ``sanitize_glossary`` like every other
+    glossary boundary.
+
+    Returns the updated glossary and the remaining provisional votes.
+    """
+    deduped, _duplicates = dedupe_glossary(glossary)
+    locked = {_dedupe_key(e.term) for e in deduped.entries if e.locked}
+    entries = list(deduped.entries)
+    index = {_dedupe_key(e.term): i for i, e in enumerate(entries)}
+    tally = {key: list(proposals) for key, proposals in votes.by_term.items()}
+
+    for addition in additions:
+        term = normalize_term(addition.term)
+        if not term:
+            # A blank term can never match source text.
+            continue
+        key = term.casefold()
+        if key in locked:
+            continue
+        if key in index and key not in tally:
+            # Settled: either it reached quorum or it predates this mechanism.
+            continue
+        tally.setdefault(key, []).append(normalize_term(addition.translation))
+        if key not in index:
+            entries.append(
+                GlossaryEntry(
+                    term=term,
+                    translation=addition.translation,
+                    locked=False,
+                    note=addition.note,
+                )
+            )
+            index[key] = len(entries) - 1
+
+    for key, proposals in list(tally.items()):
+        if len(proposals) < quorum:
+            continue
+        position = index.get(key)
+        if position is not None:
+            winner = _plurality(tuple(proposals))
+            entries[position] = entries[position].model_copy(
+                update={"translation": winner}
+            )
+        del tally[key]
+
+    cleaned, _dropped = sanitize_glossary(Glossary(entries=entries))
+    return cleaned, GlossaryVotes(
+        by_term={key: tuple(proposals) for key, proposals in tally.items()}
+    )
