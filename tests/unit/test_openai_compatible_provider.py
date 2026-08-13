@@ -1134,3 +1134,52 @@ def test_cache_price_falls_back_to_the_input_rate_for_unknown_models():
     in_price, _out = provider.price("some-unknown-model")
 
     assert provider.cache_price("some-unknown-model") == in_price
+
+
+# ---------------------------------------------------------------------------
+# Reasoning raises the output cap — the two are drawn from one budget
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_effort_raises_the_default_output_cap():
+    """Reasoning tokens are billed as output and drawn from the SAME cap as the
+    answer. Measured 2026-08-12 on deepseek-v4-flash at effort='medium': traces
+    ran 4 139 to 28 367 tokens, peaking at 29 558 completion tokens on one
+    chunk. At the 8192 default every tier returns finish_reason='length' with no
+    tool_call and no content — the failure this provider already documents.
+
+    So enabling reasoning must raise the cap by itself. Leaving that to each
+    caller is what broke the whole 3-tier chain last time.
+    """
+    provider = OpenAICompatibleProvider(
+        base_url="http://x", api_key="k", default_model="deepseek-v4-flash",
+        price_table={}, _client=object(),
+    )
+    provider.reasoning_effort = "medium"
+
+    kwargs = provider._output_kwargs()
+
+    assert kwargs["reasoning_effort"] == "medium"
+    assert kwargs["max_tokens"] >= 32000, "must clear the measured 29 558 peak"
+
+
+def test_reasoning_off_keeps_the_ordinary_cap():
+    """Nothing changes for the default path."""
+    provider = OpenAICompatibleProvider(
+        base_url="http://x", api_key="k", default_model="deepseek-v4-flash",
+        price_table={}, _client=object(),
+    )
+
+    assert provider.reasoning_effort == "none"
+    assert provider._output_kwargs()["max_tokens"] == _MAX_OUTPUT_TOKENS
+
+
+def test_an_explicit_cap_still_wins_over_the_reasoning_default():
+    """The raised cap is a floor for the default, not an override of the caller."""
+    provider = OpenAICompatibleProvider(
+        base_url="http://x", api_key="k", default_model="deepseek-v4-flash",
+        price_table={}, _client=object(),
+    )
+    provider.reasoning_effort = "high"
+
+    assert provider._output_kwargs(50000)["max_tokens"] == 50000
