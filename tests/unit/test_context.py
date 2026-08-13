@@ -673,3 +673,40 @@ def test_static_block_no_longer_scopes_the_vocabulary_rule_to_spanish_only(sourc
 
     assert "Do NOT add common English or Spanish vocabulary." in block
     assert "Do NOT add common Spanish vocabulary." not in block
+
+
+# ---------------------------------------------------------------------------
+# Dialogue punctuation — pinned, because an unpinned convention is sampled
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_pins_the_dialogue_punctuation_convention():
+    """Measured over 16 live calls on one book: with the convention unstated,
+    both a reasoning and a non-reasoning run flipped between the raya (—) and
+    angular quotes («») from chunk to chunk — 4 chunks one way and 3 the other
+    in a single arm. Nothing in the prompt chose, so every call re-sampled it
+    and a finished book would mix both conventions.
+    """
+    from borgesica.domain.context import ContextManager
+
+    text = ContextManager().build_system_prompt(
+        make_config(target_lang="es-neutral"), Glossary(), RollingSummary()
+    ).text
+
+    assert "raya" in text.lower(), "must name the raya as the dialogue mark"
+    assert "—" in text, "must show the raya itself, not only name it"
+    assert "«" in text, "must name the angular quotes it is ruling out"
+
+
+def test_dialogue_rule_survives_for_srt_jobs():
+    """Subtitles carry dialogue too; the rule is gated on target_lang, not source."""
+    from borgesica.domain.context import ContextManager
+    from borgesica.domain.models import SourceType
+
+    text = ContextManager().build_system_prompt(
+        make_config(target_lang="es-neutral", source_type=SourceType.SRT),
+        Glossary(),
+        RollingSummary(),
+    ).text
+
+    assert "raya" in text.lower()

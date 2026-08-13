@@ -94,7 +94,16 @@ an error.
 5. Consistent number/unit style: Use the same format for spelled-out numbers, \
    ordinals, and units of measure throughout the job, consistent with the \
    register. Do not mix "5 kilómetros" and "cinco kilómetros" in the same \
-   document without a stylistic reason."""
+   document without a stylistic reason.
+
+6. Dialogue punctuation: Mark every spoken turn with the RAYA (—), the RAE \
+   convention for Spanish narrative. Do NOT open a character's turn with \
+   angular quotes («») or double quotes (""). Reserve «» for quoted text and \
+   reported thought inside narration. The raya takes no space after it and \
+   also introduces the narrator's tag, closing it when the speech resumes: \
+   —No deberías —dijo ella—. Es tarde.
+   This convention is fixed for the WHOLE job. It is not a per-chunk \
+   stylistic choice, and switching conventions between chunks is an error."""
 
 
 # ---------------------------------------------------------------------------
