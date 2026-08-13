@@ -96,12 +96,16 @@ an error.
    register. Do not mix "5 kilómetros" and "cinco kilómetros" in the same \
    document without a stylistic reason.
 
-6. Dialogue punctuation: Mark every spoken turn with the RAYA (—), the RAE \
-   convention for Spanish narrative. Do NOT open a character's turn with \
-   angular quotes («») or double quotes (""). Reserve «» for quoted text and \
-   reported thought inside narration. The raya takes no space after it and \
-   also introduces the narrator's tag, closing it when the speech resumes: \
-   —No deberías —dijo ella—. Es tarde.
+6. Dialogue punctuation: The English source marks every spoken turn with \
+   double quotes ("..."). REPLACE them: each turn opens with the RAYA (—), \
+   the RAE convention for Spanish narrative. This is a conversion, not a \
+   copy — do not carry the source's quotes over, and do not substitute \
+   angular quotes («») for them either.
+     Source:  "You shouldn't," she said. "It's late."
+     Correct: —No deberías —dijo ella—. Es tarde.
+   The raya takes no space after it. It also opens the narrator's tag and \
+   closes it when speech resumes. Keep «» only for quoted text and reported \
+   thought INSIDE narration — never to open a spoken turn.
    This convention is fixed for the WHOLE job. It is not a per-chunk \
    stylistic choice, and switching conventions between chunks is an error."""
 

@@ -710,3 +710,27 @@ def test_dialogue_rule_survives_for_srt_jobs():
     ).text
 
     assert "raya" in text.lower()
+
+
+def test_dialogue_rule_states_the_conversion_not_just_the_ban():
+    """The first version listed what not to use and the model routed around it.
+
+    Measured: told only to avoid «», it moved to double quotes — still mirroring
+    the English source, which marks every spoken turn with "…" in all 8 sampled
+    chunks. A prohibition leaves the actual operation unstated, so the rule now
+    names the source's mark and the substitution to perform on it.
+    """
+    from borgesica.domain.context import ContextManager
+
+    text = ContextManager().build_system_prompt(
+        make_config(target_lang="es-neutral"), Glossary(), RollingSummary()
+    ).text
+    # Scoped to rule 6 itself: "source", "double" and "replace" all occur in
+    # unrelated rules, so asserting against the whole prompt passes before the
+    # rule is written at all.
+    start = text.index("6. Dialogue punctuation")
+    rule = text[start:].lower()
+
+    assert "source" in rule, "rule must name what the source uses"
+    assert "double" in rule, "rule must name the source's double quotes"
+    assert "replace" in rule or "convert" in rule, "rule must state the operation"
