@@ -251,6 +251,26 @@ def _resolve_key(var: str, provider: str, *, key_stdin: bool) -> str:
     return _require_env(var, provider)
 
 
+def _build_provider_with_reasoning(
+    provider: str, reasoning: str | None, *, key_stdin: bool = False
+) -> Any:
+    """Build a provider, applying the requested reasoning effort if any.
+
+    Separate from ``_build_provider`` because only some providers carry the
+    knob — Anthropic's adapter has no ``reasoning_effort`` — and because a
+    missing ``--reasoning`` must leave the class default exactly as it is
+    rather than writing "none" over it.
+
+    The output cap is NOT adjusted here. The provider raises its own default
+    when a reasoning effort is set, so every caller is protected rather than
+    just this one; see ``_REASONING_OUTPUT_TOKENS``.
+    """
+    built = _build_provider(provider, key_stdin=key_stdin)
+    if reasoning is not None and hasattr(built, "reasoning_effort"):
+        built.reasoning_effort = reasoning
+    return built
+
+
 def _build_provider(provider: str, *, key_stdin: bool = False) -> Any:
     """Instantiate a TranslationProvider by name.
 
@@ -297,7 +317,8 @@ def _build_provider(provider: str, *, key_stdin: bool = False) -> Any:
 
 
 def _build_engine(
-    *, provider: str = "anthropic", model: str = "", db_path: str = "", key_stdin: bool = False
+    *, provider: str = "anthropic", model: str = "", db_path: str = "",
+    key_stdin: bool = False, reasoning: str | None = None
 ) -> TranslatorEngine:
     """Construct a TranslatorEngine wired with real adapters for all formats.
 
@@ -313,7 +334,9 @@ def _build_engine(
     Raises:
         SystemExit: if the selected provider's API key env var is not set.
     """
-    translation_provider = _build_provider(provider, key_stdin=key_stdin)
+    translation_provider = _build_provider_with_reasoning(
+        provider, reasoning, key_stdin=key_stdin
+    )
 
     # Lazy imports — keep CLI startup fast and avoid dependency errors
     # for people who only use the test helpers.
@@ -663,6 +686,18 @@ def _build_parser() -> argparse.ArgumentParser:
                 "the key out of argv and env vars."
             ),
         )
+        p.add_argument(
+            "--reasoning",
+            choices=["none", "low", "medium", "high"],
+            default=None,
+            help=(
+                "Reasoning effort for providers that support it (DeepSeek). "
+                "Omitted leaves the provider default ('none'). Measured on "
+                "deepseek-v4-flash: 'medium' costs ~11.6x and takes ~10.6x as "
+                "long per chunk, and reads context the default pass misses. "
+                "The output cap is raised automatically to fit the trace."
+            ),
+        )
 
     # create
     p_create = sub.add_parser(
@@ -840,6 +875,7 @@ def main(argv: list[str] | None = None) -> int:
         provider=provider,
         model=getattr(args, "model", ""),
         key_stdin=getattr(args, "key_stdin", False),
+        reasoning=getattr(args, "reasoning", None),
     )
 
     dispatch: dict[str, Any] = {

@@ -79,6 +79,25 @@ MAX_TIER3_RETRIES = 2  # Tier-3 is retried at most 2 times (2 HTTP calls)
 # inherits the constant/fix without overriding it.
 _MAX_OUTPUT_TOKENS = 8192
 
+# Output cap used when a reasoning effort is requested. Reasoning tokens are
+# billed as output and drawn from the SAME budget as the answer, so the ordinary
+# cap has to grow with them or the answer never fits.
+#
+# MEASURED 2026-08-12, deepseek-v4-flash at effort='medium' over 16 book chunks:
+# traces ran 4 139-28 367 tokens and the largest call spent 29 558 completion
+# tokens in total. 40960 clears that peak with room for a longer chunk rather
+# than sitting on it — at 8192 every tier returns finish_reason='length' with no
+# tool_call and no content, which is the documented August failure.
+#
+# This lives in the provider, not in a CLI flag, so every caller — CLI, serve,
+# desktop — is protected. Enabling reasoning must not require a second, separate
+# decision to stay working.
+_REASONING_OUTPUT_TOKENS = 40960
+
+# reasoning_effort values that actually request a trace. 'none' asks the
+# endpoint for no reasoning; None means the parameter is not sent at all.
+_NO_REASONING = frozenset({None, "none"})
+
 # Tool / function definition sent for Tier-1 structured output.
 _TOOL_NAME = "submit_translation"
 
@@ -340,9 +359,11 @@ class OpenAICompatibleProvider:
         understands it. Built once here so a tier can never silently drop one
         of the two — dropping the reasoning knob is what made every tier fail.
         """
+        reasoning = self.reasoning_effort not in _NO_REASONING
+        default_cap = _REASONING_OUTPUT_TOKENS if reasoning else _MAX_OUTPUT_TOKENS
         kwargs: dict[str, Any] = {
             self._completion_tokens_param_name: (
-                max_output_tokens if max_output_tokens is not None else _MAX_OUTPUT_TOKENS
+                max_output_tokens if max_output_tokens is not None else default_cap
             )
         }
         if self.reasoning_effort is not None:

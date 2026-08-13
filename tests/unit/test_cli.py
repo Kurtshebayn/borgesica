@@ -945,3 +945,44 @@ def test_cmd_glossary_show_stays_quiet_for_a_clean_glossary(
     _, err = capsys.readouterr()
     assert code == 0
     assert err == ""
+
+
+# ---------------------------------------------------------------------------
+# --reasoning: the quality knob had no CLI surface at all
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_flag_reaches_the_provider(monkeypatch):
+    """Without this flag the setting was unreachable: reasoning_effort is a
+    provider class attribute pinned to 'none', so `borgesica run` could only
+    ever translate without reasoning. Measured, reasoning changes the output
+    materially — it read "flight" as a pursuit from in-chunk context where the
+    default arm read it as flying.
+    """
+    from borgesica import __main__ as m
+
+    built = {}
+
+    def fake_build(provider, *, key_stdin=False):
+        built["provider"] = provider
+        return _StubProvider()
+
+    monkeypatch.setattr(m, "_build_provider", fake_build)
+    provider = m._build_provider_with_reasoning("deepseek", "medium")
+
+    assert provider.reasoning_effort == "medium"
+
+
+def test_reasoning_none_leaves_the_provider_untouched(monkeypatch):
+    """The default path must not start setting attributes on providers that
+    have no reasoning knob (Anthropic does not take one)."""
+    from borgesica import __main__ as m
+
+    monkeypatch.setattr(m, "_build_provider", lambda p, *, key_stdin=False: _StubProvider())
+    provider = m._build_provider_with_reasoning("deepseek", None)
+
+    assert provider.reasoning_effort == "none", "class default untouched"
+
+
+class _StubProvider:
+    reasoning_effort = "none"
