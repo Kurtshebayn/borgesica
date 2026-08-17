@@ -90,6 +90,16 @@ class GlossaryEntry(BaseModel):
     translation: str
     locked: bool = False
     note: str | None = None
+    # The rendering this entry was COMMITTED with, kept so the confirmation
+    # mechanism can be measured. A term's votes are erased when it settles (see
+    # GlossaryVotes), so without this the first draw is unrecoverable and
+    # nothing can say whether quorum changed the rendering or confirmed it —
+    # exactly what happened to the 32 terms job 9be143da settled.
+    #
+    # None means "no recorded draw": entries stored before this field existed,
+    # and entries a human edited by hand. Both are settled but neither was
+    # settled by quorum, so both stay out of the correction rate.
+    first_draw: str | None = None
 
 
 class Glossary(BaseModel):
@@ -230,6 +240,29 @@ class GlossaryVotes(BaseModel):
     """
 
     by_term: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+
+
+class GlossarySettlements(BaseModel):
+    """What the confirmation mechanism actually did to a job's glossary.
+
+    Counts only terms quorum decided: an entry with a recorded
+    ``first_draw`` and no votes left. ``changed`` is the number whose rendering
+    quorum replaced, ``confirmed`` the number it left alone.
+
+    The split is the whole measurement. Job 9be143da settled 32 of its 549 terms
+    and that number, on its own, only says the mechanism ran — how many of the 32
+    it CHANGED is what says whether it was worth paying for, and that is what
+    could not be recovered. Entries with no recorded draw are in neither count —
+    see ``GlossaryEntry.first_draw``.
+    """
+
+    changed: int = 0
+    confirmed: int = 0
+
+    @property
+    def settled(self) -> int:
+        """Terms quorum decided, changed or not — the denominator."""
+        return self.changed + self.confirmed
 
 
 class RollingSummary(BaseModel):

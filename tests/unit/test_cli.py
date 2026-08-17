@@ -901,7 +901,7 @@ def test_cmd_glossary_show_notes_repaired_entries_on_stderr(
     from unittest.mock import MagicMock
 
     from borgesica.__main__ import main
-    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.models import Glossary, GlossaryEntry, GlossarySettlements
 
     with patch("borgesica.__main__._build_engine") as mock_build:
         engine = MagicMock()
@@ -911,6 +911,7 @@ def test_cmd_glossary_show_notes_repaired_entries_on_stderr(
         engine.glossary_repairs.return_value = [
             GlossaryEntry(term="alupi", translation="alupi")
         ]
+        engine.glossary_settlements.return_value = GlossarySettlements()
         mock_build.return_value = engine
 
         code = main(["glossary", "show", "job-1"])
@@ -918,7 +919,13 @@ def test_cmd_glossary_show_notes_repaired_entries_on_stderr(
     out, err = capsys.readouterr()
     assert code == 0
     assert json.loads(out) == [
-        {"term": "Alupi", "translation": "Alupi", "locked": False, "note": None}
+        {
+            "term": "Alupi",
+            "translation": "Alupi",
+            "locked": False,
+            "note": None,
+            "first_draw": None,
+        }
     ]
     assert "1" in err
 
@@ -930,7 +937,7 @@ def test_cmd_glossary_show_stays_quiet_for_a_clean_glossary(
     from unittest.mock import MagicMock
 
     from borgesica.__main__ import main
-    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.models import Glossary, GlossaryEntry, GlossarySettlements
 
     with patch("borgesica.__main__._build_engine") as mock_build:
         engine = MagicMock()
@@ -938,6 +945,7 @@ def test_cmd_glossary_show_stays_quiet_for_a_clean_glossary(
             entries=[GlossaryEntry(term="Gleaner", translation="Segador")]
         )
         engine.glossary_repairs.return_value = []
+        engine.glossary_settlements.return_value = GlossarySettlements()
         mock_build.return_value = engine
 
         code = main(["glossary", "show", "job-1"])
@@ -945,6 +953,44 @@ def test_cmd_glossary_show_stays_quiet_for_a_clean_glossary(
     _, err = capsys.readouterr()
     assert code == 0
     assert err == ""
+
+
+def test_cmd_glossary_show_reports_the_correction_rate_on_stderr(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The 2026-08-14 run settled 32 of 549 terms with no way to see the effect.
+    The note goes to stderr so it cannot corrupt the JSON on stdout.
+    """
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import Glossary, GlossaryEntry, GlossarySettlements
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.get_glossary.return_value = Glossary(
+            entries=[
+                GlossaryEntry(
+                    term="Birthright",
+                    translation="Derecho de Nacimiento",
+                    first_draw="Primogenitura",
+                )
+            ]
+        )
+        engine.glossary_repairs.return_value = []
+        engine.glossary_settlements.return_value = GlossarySettlements(
+            changed=9, confirmed=23
+        )
+        mock_build.return_value = engine
+
+        code = main(["glossary", "show", "job-1"])
+
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert json.loads(out)[0]["first_draw"] == "Primogenitura"
+    assert "32" in err
+    assert "9" in err
+    assert "23" in err
 
 
 # ---------------------------------------------------------------------------

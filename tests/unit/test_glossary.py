@@ -793,3 +793,136 @@ def test_a_reversed_proposal_is_still_dropped():
     )
 
     assert [e.term for e in glossary.entries] == ["Will"]
+
+
+# ---------------------------------------------------------------------------
+# The first draw survives settlement, so the correction rate is reportable
+# ---------------------------------------------------------------------------
+
+
+def test_a_committed_term_records_the_rendering_it_was_committed_with():
+    """The vote tally is erased when a term settles, so the first draw has to be
+    kept on the entry or it is unrecoverable.
+    """
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary, _votes = apply_additions(
+        Glossary(),
+        GlossaryVotes(),
+        [GlossaryEntry(term="Birthright", translation="Primogenitura")],
+    )
+
+    assert glossary.entries[0].first_draw == "Primogenitura"
+
+
+def test_a_settled_term_still_remembers_the_draw_quorum_replaced():
+    """The whole point: after quorum the entry carries both renderings, so a
+    reader can say the mechanism CHANGED this term rather than confirmed it.
+    """
+    from borgesica.domain.glossary import GlossaryVotes, apply_additions
+
+    glossary, votes = apply_additions(
+        Glossary(),
+        GlossaryVotes(),
+        [GlossaryEntry(term="Birthright", translation="Primogenitura")],
+    )
+    for _ in range(2):
+        glossary, votes = apply_additions(
+            glossary,
+            votes,
+            [GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento")],
+        )
+
+    assert votes.by_term == {}
+    entry = glossary.entries[0]
+    assert (entry.translation, entry.first_draw) == (
+        "Derecho de Nacimiento",
+        "Primogenitura",
+    )
+
+
+def test_settlement_counts_separate_corrections_from_confirmations():
+    """The 2026-08-14 run of job 9be143da settled 32 of 549 terms and nothing
+    could say how many of those 32 the mechanism actually corrected.
+    """
+    from borgesica.domain.glossary import (
+        GlossaryVotes,
+        apply_additions,
+        settlement_counts,
+    )
+
+    glossary, votes = apply_additions(
+        Glossary(),
+        GlossaryVotes(),
+        [GlossaryEntry(term="Birthright", translation="Primogenitura")],
+    )
+    for _ in range(2):
+        glossary, votes = apply_additions(
+            glossary,
+            votes,
+            [GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento")],
+        )
+    for _ in range(3):
+        glossary, votes = apply_additions(
+            glossary, votes, [GlossaryEntry(term="Aaru", translation="Aaru")]
+        )
+
+    counts = settlement_counts(glossary, votes)
+
+    assert (counts.changed, counts.confirmed, counts.settled) == (1, 1, 2)
+
+
+def test_a_term_still_collecting_votes_is_not_settled_either_way():
+    """A first draw that has not reached quorum yet decided nothing. Counting it
+    as confirmed would report the old single-draw behaviour as a confirmation.
+    """
+    from borgesica.domain.glossary import (
+        GlossaryVotes,
+        apply_additions,
+        settlement_counts,
+    )
+
+    glossary, votes = apply_additions(
+        Glossary(),
+        GlossaryVotes(),
+        [GlossaryEntry(term="Will shells", translation="proyectiles de Voluntad")],
+    )
+
+    counts = settlement_counts(glossary, votes)
+
+    assert (counts.changed, counts.confirmed, counts.settled) == (0, 0, 0)
+
+
+def test_an_entry_stored_before_the_first_draw_was_recorded_is_not_counted():
+    """Job 9be143da's own glossary predates the column. Its terms are settled but
+    their first draw is genuinely unknown, and the report must not invent one.
+    """
+    from borgesica.domain.glossary import GlossaryVotes, settlement_counts
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Aaru", translation="Aaru")])
+
+    counts = settlement_counts(glossary, GlossaryVotes())
+
+    assert (counts.changed, counts.confirmed, counts.settled) == (0, 0, 0)
+
+
+def test_a_case_only_difference_from_the_first_draw_is_a_confirmation():
+    """``_plurality`` groups renderings by casefold, so two capitalisations are
+    one rendering. The report has to agree, or it would count a correction the
+    mechanism never made.
+    """
+    from borgesica.domain.glossary import GlossaryVotes, settlement_counts
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(
+                term="Will cage",
+                translation="Jaula de Voluntad",
+                first_draw="jaula de voluntad",
+            )
+        ]
+    )
+
+    counts = settlement_counts(glossary, GlossaryVotes())
+
+    assert (counts.changed, counts.confirmed) == (0, 1)

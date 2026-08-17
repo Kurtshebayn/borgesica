@@ -560,6 +560,17 @@ def _cmd_glossary_show(args: argparse.Namespace, engine: TranslatorEngine) -> in
                 f"reversed entries: {terms}",
                 file=sys.stderr,
             )
+        # What the confirmation vote actually did. Reported only when it decided
+        # something: a glossary written before first draws were recorded has
+        # nothing to say here, and "0 settled" would read as a claim that the
+        # mechanism did nothing. Also stderr, for the same reason as above.
+        settlements = engine.glossary_settlements(args.job_id)
+        if settlements.settled:
+            print(
+                f"NOTE: quorum settled {settlements.settled} term(s): "
+                f"{settlements.changed} changed, {settlements.confirmed} confirmed.",
+                file=sys.stderr,
+            )
         return 0
     except JobNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
