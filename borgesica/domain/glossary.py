@@ -23,6 +23,7 @@ from __future__ import annotations
 from borgesica.domain.models import (
     Glossary,
     GlossaryEntry,
+    GlossarySettlements,
     GlossaryVotes,
     JobConfig,
     normalize_term,
@@ -31,6 +32,7 @@ from borgesica.domain.ports import TranslationProvider
 
 __all__ = [
     "QUORUM",
+    "GlossarySettlements",
     "GlossaryVotes",
     "LlmGlossaryExtractor",
     "NullGlossaryExtractor",
@@ -41,6 +43,7 @@ __all__ = [
     "merge_additions",
     "normalize_term",
     "sanitize_glossary",
+    "settlement_counts",
 ]
 
 # ---------------------------------------------------------------------------
@@ -376,6 +379,17 @@ mechanism exists to replace.
 """
 
 
+def _rendering_key(rendering: str) -> str:
+    """Return the identity of a RENDERING, the way ``_plurality`` groups votes.
+
+    Same operation as ``_dedupe_key`` but on the target-language side, kept
+    separate because the two answer different questions: one decides whether two
+    entries are the same term, this one whether two spellings are the same
+    rendering.
+    """
+    return normalize_term(rendering).casefold()
+
+
 def _plurality(proposals: tuple[str, ...]) -> str:
     """Return the most-proposed rendering, earliest proposal breaking ties.
 
@@ -387,7 +401,7 @@ def _plurality(proposals: tuple[str, ...]) -> str:
     spelling: dict[str, str] = {}
     for proposal in proposals:
         rendering = normalize_term(proposal)
-        key = rendering.casefold()
+        key = _rendering_key(rendering)
         counts[key] = counts.get(key, 0) + 1
         spelling.setdefault(key, rendering)
     # dict preserves insertion order and max() keeps the first maximum, so ties
@@ -421,6 +435,10 @@ def apply_additions(
     decision. The result passes through ``sanitize_glossary`` like every other
     glossary boundary.
 
+    Every entry committed here records its rendering in ``first_draw``, because
+    the tally is erased when a term settles: without it the draw quorum replaced
+    is gone and the mechanism cannot be measured. ``settlement_counts`` reads it.
+
     Returns the updated glossary and the remaining provisional votes.
     """
     deduped, _duplicates = dedupe_glossary(glossary)
@@ -440,7 +458,8 @@ def apply_additions(
         if key in index and key not in tally:
             # Settled: either it reached quorum or it predates this mechanism.
             continue
-        tally.setdefault(key, []).append(normalize_term(addition.translation))
+        rendering = normalize_term(addition.translation)
+        tally.setdefault(key, []).append(rendering)
         if key not in index:
             entries.append(
                 GlossaryEntry(
@@ -448,6 +467,10 @@ def apply_additions(
                     translation=addition.translation,
                     locked=False,
                     note=addition.note,
+                    # Normalised, so a later comparison against the plurality —
+                    # which is also normalised — never reports spacing as a
+                    # correction.
+                    first_draw=rendering,
                 )
             )
             index[key] = len(entries) - 1
@@ -467,3 +490,39 @@ def apply_additions(
     return cleaned, GlossaryVotes(
         by_term={key: tuple(proposals) for key, proposals in tally.items()}
     )
+
+
+def settlement_counts(
+    glossary: Glossary, votes: GlossaryVotes
+) -> GlossarySettlements:
+    """Count the terms quorum decided, split by whether it changed them.
+
+    Answers the question the mechanism could not answer for the 2026-08-14 run
+    of job 9be143da: 32 of 549 terms settled, and nothing recorded how many of
+    those 32 got a DIFFERENT rendering than the one first committed. A
+    confirmation rate near 100% would mean the vote is buying nothing but
+    tokens; a correction rate near the measured 21% minority-draw figure means
+    it is doing the job it was built for.
+
+    A term counts only when it is both:
+      - decided — it has no votes left, so no later proposal can move it;
+      - attributable — it carries a ``first_draw``, so there is something to
+        compare against. Entries stored before that field existed, and entries
+        a human edited, have none and are excluded rather than guessed at.
+
+    Renderings are compared normalised and casefolded, matching how
+    ``_plurality`` groups votes: two capitalisations of one rendering are the
+    same rendering there, so they must not read as a correction here.
+    """
+    changed = 0
+    confirmed = 0
+    for entry in glossary.entries:
+        if entry.first_draw is None:
+            continue
+        if _dedupe_key(entry.term) in votes.by_term:
+            continue
+        if _rendering_key(entry.translation) == _rendering_key(entry.first_draw):
+            confirmed += 1
+        else:
+            changed += 1
+    return GlossarySettlements(changed=changed, confirmed=confirmed)

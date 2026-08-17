@@ -200,6 +200,78 @@ class TestSQLiteCheckpointStore:
         assert locked[0].term == "Tranca"
         assert locked[0].note == "wooden beam"
 
+    # --- first_draw round-trip: the vote tally is erased, this is not ---
+    def test_save_and_load_glossary_first_draw(self):
+        """The rendering a term was committed with must survive save/load, or a
+        resumed job loses the only record of what quorum replaced.
+        """
+        job = make_job()
+        self.store.save_job(job)
+        glossary = Glossary(entries=[
+            GlossaryEntry(
+                term="Birthright",
+                translation="Derecho de Nacimiento",
+                first_draw="Primogenitura",
+            ),
+            GlossaryEntry(term="Aaru", translation="Aaru"),
+        ])
+        self.store.save_glossary(job.id, glossary)
+        loaded = {e.term: e for e in self.store.load_glossary(job.id).entries}
+        assert loaded["Birthright"].first_draw == "Primogenitura"
+        # No recorded draw stays absent rather than becoming the translation.
+        assert loaded["Aaru"].first_draw is None
+
+    def test_migrates_existing_db_without_first_draw_column(self):
+        """Job 9be143da's jobs.db predates the column. Opening it must add the
+        column in place, load old rows with no recorded draw, and persist new
+        ones (same PRAGMA table_info + ALTER TABLE path as chunks/jobs).
+        """
+        import os
+        import sqlite3
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        old_glossary_ddl = """
+        CREATE TABLE glossary (
+            job_id          TEXT NOT NULL,
+            term            TEXT NOT NULL,
+            translation     TEXT NOT NULL,
+            locked          INTEGER NOT NULL DEFAULT 0,
+            note            TEXT,
+            PRIMARY KEY (job_id, term)
+        )
+        """
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(old_glossary_ddl)
+            conn.execute(
+                "INSERT INTO glossary VALUES (?,?,?,?,?)",
+                ("job-old", "Aaru", "Aaru", 0, None),
+            )
+            conn.commit()
+            conn.close()
+
+            store = SQLiteCheckpointStore(db_path)
+            loaded = store.load_glossary("job-old")
+            assert len(loaded.entries) == 1
+            assert loaded.entries[0].first_draw is None
+
+            store.save_glossary(
+                "job-old",
+                Glossary(entries=[
+                    GlossaryEntry(
+                        term="Birthright",
+                        translation="Derecho de Nacimiento",
+                        first_draw="Primogenitura",
+                    )
+                ]),
+            )
+            reloaded = SQLiteCheckpointStore(db_path).load_glossary("job-old")
+            assert reloaded.entries[0].first_draw == "Primogenitura"
+        finally:
+            os.unlink(db_path)
+
     # --- save_votes + load_votes round-trip, proposal order preserved ---
     def test_save_and_load_votes(self):
         from borgesica.domain.models import GlossaryVotes

@@ -8,7 +8,7 @@ Schema from design section 5:
          prose_chunk_tokens, prose_segmentation, continue_on_error)
   - chunks(job_id, chunk_index, source_text, translated_text, status, meta_json,
            PRIMARY KEY(job_id, chunk_index))
-  - glossary(job_id, term, translation, locked, note,
+  - glossary(job_id, term, translation, locked, note, first_draw,
              PRIMARY KEY(job_id, term))
   - summaries(job_id, chunk_index, text, PRIMARY KEY(job_id, chunk_index))
 
@@ -115,9 +115,21 @@ CREATE TABLE IF NOT EXISTS glossary (
     translation     TEXT NOT NULL,
     locked          INTEGER NOT NULL DEFAULT 0,
     note            TEXT,
+    first_draw      TEXT,
     PRIMARY KEY (job_id, term)
 )
 """
+
+# Columns added after the initial release; existing glossary tables are migrated
+# in-place via ALTER TABLE guarded by PRAGMA table_info (same pattern as
+# _JOBS_MIGRATIONS and _CHUNKS_MIGRATIONS).
+_GLOSSARY_MIGRATIONS = {
+    # Nullable on purpose, and with no default: NULL means "no recorded first
+    # draw", which is the honest state for every row written before the
+    # confirmation mechanism could report on itself. Defaulting it to the
+    # translation would fabricate a 100% confirmation rate for those rows.
+    "first_draw": "TEXT",
+}
 
 _CREATE_GLOSSARY_VOTES = """
 CREATE TABLE IF NOT EXISTS glossary_votes (
@@ -212,6 +224,12 @@ class SQLiteCheckpointStore:
             for column, ddl in _CHUNKS_MIGRATIONS.items():
                 if column not in existing_chunk_cols:
                     conn.execute(f"ALTER TABLE chunks ADD COLUMN {column} {ddl}")
+            existing_glossary_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(glossary)")
+            }
+            for column, ddl in _GLOSSARY_MIGRATIONS.items():
+                if column not in existing_glossary_cols:
+                    conn.execute(f"ALTER TABLE glossary ADD COLUMN {column} {ddl}")
 
     def __del__(self) -> None:
         if self._mem_conn is not None:
@@ -388,12 +406,13 @@ class SQLiteCheckpointStore:
         """Replace all glossary entries for this job (full overwrite)."""
         delete_sql = "DELETE FROM glossary WHERE job_id = ?"
         insert_sql = """
-        INSERT INTO glossary (job_id, term, translation, locked, note)
-        VALUES (:job_id, :term, :translation, :locked, :note)
+        INSERT INTO glossary (job_id, term, translation, locked, note, first_draw)
+        VALUES (:job_id, :term, :translation, :locked, :note, :first_draw)
         ON CONFLICT(job_id, term) DO UPDATE SET
             translation=excluded.translation,
             locked=excluded.locked,
-            note=excluded.note
+            note=excluded.note,
+            first_draw=excluded.first_draw
         """
         with self._connect() as conn:
             conn.execute(delete_sql, (job_id,))
@@ -404,6 +423,7 @@ class SQLiteCheckpointStore:
                     "translation": entry.translation,
                     "locked": 1 if entry.locked else 0,
                     "note": entry.note,
+                    "first_draw": entry.first_draw,
                 })
 
     def save_votes(self, job_id: str, votes: GlossaryVotes) -> None:
@@ -452,6 +472,7 @@ class SQLiteCheckpointStore:
                 translation=row["translation"],
                 locked=bool(row["locked"]),
                 note=row["note"],
+                first_draw=row["first_draw"],
             )
             for row in rows
         ]

@@ -1111,3 +1111,79 @@ def test_update_glossary_settles_the_term_so_quorum_cannot_overwrite_a_hand_edit
     assert [(e.term, e.translation) for e in glossary.entries] == [
         ("Birthright", "Derecho de Cuna")
     ]
+
+
+def test_glossary_settlements_reports_corrections_against_confirmations(
+    tmp_path: Path,
+) -> None:
+    """Job 9be143da settled 32 terms and no surface could say how many of them
+    the mechanism corrected. This is that surface.
+    """
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(
+                term="Birthright",
+                translation="Derecho de Nacimiento",
+                first_draw="Primogenitura",
+            ),
+            GlossaryEntry(term="Aaru", translation="Aaru", first_draw="Aaru"),
+            # Predates the column: settled, but its first draw is unknown.
+            GlossaryEntry(term="Gleaner", translation="Segador"),
+        ],
+    )
+
+    counts = engine.glossary_settlements(job.id)
+
+    assert (counts.changed, counts.confirmed, counts.settled) == (1, 1, 2)
+
+
+def test_glossary_settlements_excludes_a_term_still_collecting_votes(
+    tmp_path: Path,
+) -> None:
+    """A provisional term decided nothing yet, so it belongs to neither count."""
+    from borgesica.domain.models import GlossaryVotes
+
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(
+                term="Birthright",
+                translation="Primogenitura",
+                first_draw="Primogenitura",
+            )
+        ],
+    )
+    engine._checkpoint.save_votes(
+        job.id, GlossaryVotes(by_term={"birthright": ("Primogenitura", "Herencia")})
+    )
+
+    counts = engine.glossary_settlements(job.id)
+
+    assert (counts.changed, counts.confirmed, counts.settled) == (0, 0, 0)
+
+
+def test_update_glossary_drops_the_first_draw_it_overrides(tmp_path: Path) -> None:
+    """A hand edit settles the term by human decision, not by quorum. Keeping the
+    first draw would report the person's change as a correction the mechanism
+    made, which is exactly the measurement this feature exists to get right.
+    """
+    engine, job = _engine_with_glossary(
+        tmp_path,
+        [
+            GlossaryEntry(
+                term="Birthright",
+                translation="Primogenitura",
+                first_draw="Primogenitura",
+            )
+        ],
+    )
+
+    engine.update_glossary(
+        job.id, [GlossaryEntry(term="Birthright", translation="Derecho de Cuna")]
+    )
+
+    stored = engine._checkpoint.load_glossary(job.id).entries[0]
+    assert (stored.translation, stored.first_draw) == ("Derecho de Cuna", None)
+    counts = engine.glossary_settlements(job.id)
+    assert (counts.changed, counts.confirmed) == (0, 0)

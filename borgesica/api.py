@@ -26,12 +26,14 @@ from borgesica.domain.glossary import (
     NullGlossaryExtractor,
     normalize_term,
     sanitize_glossary,
+    settlement_counts,
 )
 from borgesica.domain.models import (
     ChunkStatus,
     CostEstimate,
     Glossary,
     GlossaryEntry,
+    GlossarySettlements,
     GlossaryVotes,
     Job,
     JobConfig,
@@ -417,6 +419,30 @@ class TranslatorEngine:
         _cleaned, dropped = sanitize_glossary(self._checkpoint.load_glossary(job_id))
         return dropped
 
+    def glossary_settlements(self, job_id: str) -> GlossarySettlements:
+        """Return what the confirmation mechanism did to this job's glossary.
+
+        The counterpart to ``glossary_repairs``: that one explains what the
+        hygiene rules removed, this one what the vote decided. The 2026-08-14 run
+        of job 9be143da settled 32 of 549 terms and no surface could say how many
+        of them it actually corrected, so the mechanism's value was unmeasurable.
+
+        Args:
+            job_id: ID of the job.
+
+        Returns:
+            The changed/confirmed split over the terms quorum decided. Zero on
+            both counts for a glossary stored before first draws were recorded —
+            see ``GlossaryEntry.first_draw``.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        return settlement_counts(
+            self._clean_glossary(job_id), self._checkpoint.load_votes(job_id)
+        )
+
     def update_glossary(self, job_id: str, entries: list[GlossaryEntry]) -> Glossary:
         """Replace the current glossary entries with the provided list.
 
@@ -461,9 +487,17 @@ class TranslatorEngine:
             normalize_term(e.term).casefold(): e for e in existing.entries
         }
 
-        # Upsert provided entries (caller's version wins)
+        # Upsert provided entries (caller's version wins).
+        #
+        # first_draw is cleared, not carried over: it records what the VOTE
+        # committed, and a hand edit takes the term out of the vote entirely
+        # (see the settling comment below). Keeping it would make
+        # ``glossary_settlements`` report a person's edit as a correction the
+        # mechanism made, corrupting the only measurement of it.
         for entry in entries:
-            entry_map[normalize_term(entry.term).casefold()] = entry
+            entry_map[normalize_term(entry.term).casefold()] = entry.model_copy(
+                update={"first_draw": None}
+            )
 
         updated, _dropped = sanitize_glossary(
             Glossary(entries=list(entry_map.values()))
