@@ -734,3 +734,81 @@ def test_dialogue_rule_states_the_conversion_not_just_the_ban():
     assert "source" in rule, "rule must name what the source uses"
     assert "double" in rule, "rule must name the source's double quotes"
     assert "replace" in rule or "convert" in rule, "rule must state the operation"
+
+
+# ---------------------------------------------------------------------------
+# Referent naming — the summary must not use gender to tell characters apart
+# ---------------------------------------------------------------------------
+
+
+def _summary_rules(text: str) -> str:
+    """Return just the summary_update rule block, lowercased.
+
+    Scoped like the dialogue-rule tests: "name", "character" and "gender" all
+    occur in the glossary and neutral-Spanish rules, so asserting against the
+    whole prompt would pass before the rule is written at all.
+    """
+    start = text.index("Rules for summary_update:")
+    end = text.index("Rules for glossary_additions:", start)
+    return text[start:end].lower()
+
+
+def test_summary_rules_require_naming_the_referent():
+    """Measured on job 9be143da (569 chunks, full book): the rolling summary
+    invents a FEMININE gender for the male first-person narrator. 156 summaries
+    carry a feminine marker and 42 of them name only male characters — the
+    unambiguous floor, 7.4%, with no possible female referent.
+
+    The mechanism is disambiguation pressure: the narrator is "I" in English
+    (genderless) while the other character on stage is "he", so a third-person
+    Spanish summary needs two contrasting pronouns and has evidence for only
+    one. Naming the referent removes the INCENTIVE — Spanish verbs do not mark
+    subject gender, so "Vis recuerda" carries none to corrupt.
+    """
+    from borgesica.domain.context import ContextManager
+
+    rules = _summary_rules(
+        ContextManager().build_system_prompt(
+            make_config(source_type=SourceType.EPUB), Glossary(), RollingSummary()
+        ).text
+    )
+
+    assert "name" in rules, "rule must require naming the character"
+    assert "more than one" in rules, "rule must state when naming is required"
+    assert "pronoun" in rules, "rule must constrain pronoun use"
+    assert "antecedent" in rules, "rule must state when a pronoun is allowed"
+
+
+def test_summary_rules_forbid_inferring_gender():
+    """The naming rule alone still leaves the model free to guess when it does
+    choose a pronoun. The English source contains ZERO she/her for the narrator
+    in the poisoned chunks — the feminine is fabricated, not misread — so the
+    rule must ban the inference itself, not only the ambiguity that invites it.
+    """
+    from borgesica.domain.context import ContextManager
+
+    rules = _summary_rules(
+        ContextManager().build_system_prompt(
+            make_config(source_type=SourceType.EPUB), Glossary(), RollingSummary()
+        ).text
+    )
+
+    assert "gender" in rules, "rule must name gender as the thing not to invent"
+    assert "never" in rules, "rule must be absolute, not a preference"
+    assert "first-person" in rules, "rule must name the narrator case that triggers it"
+
+
+def test_referent_naming_rule_survives_for_srt_jobs():
+    """SRT carries its own task-description literal. The two have drifted
+    before, and the rolling summary is shared by both source types.
+    """
+    from borgesica.domain.context import ContextManager
+
+    rules = _summary_rules(
+        ContextManager().build_system_prompt(
+            make_config(source_type=SourceType.SRT), Glossary(), RollingSummary()
+        ).text
+    )
+
+    assert "more than one" in rules
+    assert "gender" in rules
