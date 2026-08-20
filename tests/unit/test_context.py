@@ -812,3 +812,111 @@ def test_referent_naming_rule_survives_for_srt_jobs():
 
     assert "more than one" in rules
     assert "gender" in rules
+
+
+# ---------------------------------------------------------------------------
+# Character gender — the anchored fact, rendered where the model will read it
+# ---------------------------------------------------------------------------
+
+
+def _gender_line(rendered: str) -> str:
+    """Return the compact character-gender line, or "" if absent."""
+    for line in rendered.splitlines():
+        if "CHARACTER GENDER" in line:
+            return line
+    return ""
+
+
+def test_render_names_character_gender_for_agreement():
+    """The naming rule removes the pressure to invent a gender but supplies no
+    fact. Chunk 19's own English has he/his=2 (both referring to the OTHER
+    character) and she/her=0, so a gender-free summary leaves the narrator's
+    agreement a coin flip — which is how "Easy, Vis." became "—Tranquila, Vis".
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Caeror", translation="Caeror", gender="masculine"),
+            GlossaryEntry(term="Lanistia", translation="Lanistia", gender="feminine"),
+        ]
+    )
+
+    line = _gender_line(glossary.render())
+
+    assert line, "expected a character-gender line"
+    masculine, feminine = line.split("feminine")
+    for name in ("Vis", "Caeror"):
+        assert name in masculine
+    assert "Lanistia" in feminine
+    assert "Lanistia" not in masculine
+
+
+def test_render_gives_identity_entries_a_gender_slot():
+    """This is why the anchor is a typed field and not GlossaryEntry.note.
+
+    "Vis → Vis" is an IDENTITY entry: render() collapses those into the single
+    DO-NOT-TRANSLATE line, which has no per-entry slot to hang a note on. The
+    narrator is exactly such an entry, so a per-entry channel that only
+    survives on MAPPINGS would miss the one character that matters most.
+    """
+    glossary = Glossary(
+        entries=[GlossaryEntry(term="Vis", translation="Vis", gender="masculine")]
+    )
+
+    rendered = glossary.render()
+
+    assert "Vis" in _identity_terms_line(rendered), "still a do-not-translate term"
+    assert "Vis" in _gender_line(rendered), "and still carries its gender"
+
+
+def test_render_omits_unclassified_characters_from_the_gender_line():
+    """A name that did not clear the seeding margin stays out rather than
+    being guessed at — the same rule first_draw follows for an unknown draw.
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Emissa", translation="Emissa"),
+        ]
+    )
+
+    line = _gender_line(glossary.render())
+
+    assert "Vis" in line
+    assert "Emissa" not in line, "unclassified must not be silently assigned"
+
+
+def test_render_omits_the_gender_line_when_nothing_is_classified():
+    """A glossary with no classified character pays nothing for the feature."""
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Aaru", translation="Aaru"),
+            GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento"),
+        ]
+    )
+
+    rendered = glossary.render()
+
+    assert _gender_line(rendered) == ""
+    assert "CHARACTER GENDER" not in rendered
+
+
+def test_gender_line_survives_a_budget_too_small_to_hold_it():
+    """Character gender is always named, like a locked entry.
+
+    The classified set is bounded by the seeding margin (a handful of names per
+    book), and dropping the one character the summary is about would reinstate
+    the exact coin flip the anchor exists to remove. Truncating it to save a
+    dozen words would be trading the fix for nothing.
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term=f"Term{i:02d}", translation=f"Traduccion{i:02d}")
+            for i in range(50)
+        ]
+        + [GlossaryEntry(term="Vis", translation="Vis", gender="masculine")]
+    )
+
+    line = _gender_line(glossary.render(budget_tokens=10))
+
+    assert "Vis" in line

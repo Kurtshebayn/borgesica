@@ -581,3 +581,58 @@ def test_max_output_tokens_rejects_non_positive():
 
     with pytest.raises(ValidationError):
         JobConfig(source_type=SourceType.SRT, model="x", max_output_tokens=0)
+
+
+# --- Character gender: the anchored fact the naming rule cannot supply ---
+
+def test_glossary_entry_gender_defaults_to_unclassified() -> None:
+    """None means "no classification", not "neutral" and not a guess.
+
+    The seeder only classifies a name that clears a margin (>=20 mentions,
+    >=70/30 split); everything else stays None on purpose. Same discipline as
+    GlossaryEntry.first_draw — an unknown that is left unknown.
+    """
+    from borgesica.domain.models import GlossaryEntry
+
+    assert GlossaryEntry(term="Aaru", translation="Aaru").gender is None
+
+
+def test_glossary_entry_accepts_the_two_classified_genders() -> None:
+    from borgesica.domain.models import GlossaryEntry
+
+    assert GlossaryEntry(term="Vis", translation="Vis", gender="masculine").gender == "masculine"
+    assert (
+        GlossaryEntry(term="Lanistia", translation="Lanistia", gender="feminine").gender
+        == "feminine"
+    )
+
+
+def test_glossary_entry_downgrades_an_unrecognized_gender_to_unclassified() -> None:
+    """A value nobody recognises must degrade to "unclassified", never raise.
+
+    GlossaryEntry is reachable from the provider tool schema through
+    TranslationUnit.glossary_additions. Gender is a DETERMINISTIC channel — it
+    is seeded from the English source, never proposed by the model — so a model
+    that emits one anyway must lose the value, not fail the whole chunk on a
+    ValidationError.
+    """
+    from borgesica.domain.models import GlossaryEntry
+
+    assert GlossaryEntry(term="Vis", translation="Vis", gender="male").gender is None
+    assert GlossaryEntry(term="Vis", translation="Vis", gender="").gender is None
+
+
+def test_tool_schema_does_not_offer_gender_to_the_model() -> None:
+    """The model must not be invited to fill in a gender.
+
+    Inviting the guess is the whole defect: the summary fabricated a feminine
+    gender for a male first-person narrator in 156 of 569 chunks because it had
+    to choose one. The anchor exists to remove the choice, so the field stays
+    out of the schema the model is shown.
+    """
+    from borgesica.domain.models import translation_tool_schema
+
+    for schema in (translation_tool_schema(None), translation_tool_schema(3)):
+        entry_schema = schema["$defs"]["GlossaryEntry"]["properties"]
+        assert "gender" not in entry_schema, "gender must not be model-writable"
+        assert "translation" in entry_schema, "the real fields must survive the removal"

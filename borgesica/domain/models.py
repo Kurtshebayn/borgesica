@@ -9,9 +9,9 @@ import re
 import unicodedata
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 _WHITESPACE_RUN = re.compile(r"\s+")
 
@@ -85,11 +85,50 @@ class SourceType(StrEnum):
 DEFAULT_GLOSSARY_BUDGET_TOKENS = 2500
 
 
+# The grammatical gender a character's name takes for Spanish agreement. Only
+# the two values Spanish actually marks; anything else is "not classified",
+# which is a distinct and honest third state (see GlossaryEntry.gender).
+CharacterGender = Literal["masculine", "feminine"]
+
+
 class GlossaryEntry(BaseModel):
     term: str
     translation: str
     locked: bool = False
     note: str | None = None
+    # Grammatical gender for agreement, seeded from the ENGLISH source — the
+    # anchored fact the summary's naming rule cannot supply on its own.
+    #
+    # Job 9be143da fabricated a feminine gender for the male first-person
+    # narrator in 156 of 569 summaries. The naming rule (context.py) removes
+    # the model's INCENTIVE to invent one, but chunk 19's own English carries
+    # he/his=2 (both the other character) and she/her=0, so with no gender in
+    # the summary at all the agreement in "Easy, Vis." is a coin flip — which
+    # is how it landed on "—Tranquila, Vis".
+    #
+    # None means UNCLASSIFIED, never "neutral" and never a guess: the seeder
+    # only classifies a name that clears a margin, and leaves the rest alone.
+    # Same discipline as ``first_draw`` — an unknown that stays unknown.
+    gender: CharacterGender | None = None
+
+    @field_validator("gender", mode="before")
+    @classmethod
+    def _unrecognized_gender_is_unclassified(cls, value: Any) -> Any:
+        """Degrade an unknown value to unclassified instead of raising.
+
+        This model is reachable from the provider tool schema through
+        ``TranslationUnit.glossary_additions``. Gender is a DETERMINISTIC
+        channel — seeded from the source, never proposed by the model, and
+        deliberately withheld from the schema by ``translation_tool_schema`` —
+        so a model that emits one regardless must simply lose the value. A
+        ValidationError here would fail an otherwise good chunk over a field
+        nothing was supposed to send.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str) and value in get_args(CharacterGender):
+            return value
+        return None
     # The rendering this entry was COMMITTED with, kept so the confirmation
     # mechanism can be measured. A term's votes are erased when it settles (see
     # GlossaryVotes), so without this the first draw is unrecoverable and
@@ -182,7 +221,41 @@ class Glossary(BaseModel):
         if identity_line:
             lines.append(identity_line)
 
+        gender_line = self._render_gender_line()
+        if gender_line:
+            lines.append(gender_line)
+
         return "\n".join(lines)
+
+    def _render_gender_line(self) -> str:
+        """Return the compact character-gender line, or "" if none is classified.
+
+        Drawn from ALL entries, mappings and identities alike. That is the
+        reason gender is a typed field rather than a ``note``: a character's
+        name is almost always an IDENTITY entry ("Vis → Vis"), and those
+        collapse into the single DO-NOT-TRANSLATE line, which has no per-entry
+        slot to hang anything on. The narrator — the one referent the summary
+        got wrong — is exactly such an entry.
+
+        Charged against nothing: unlike a mapping, this line is ALWAYS emitted
+        in full, on the same reasoning that always emits locked entries. The
+        classified set is bounded by the seeding margin (a handful of names on
+        a real book), and dropping the character the summary happens to be
+        about would reinstate the very coin flip the anchor exists to remove.
+        It is still MEASURED for cost like every other part of the block —
+        ``cost.py`` counts the rendered output rather than restating its shape.
+        """
+        groups = [
+            (label, [normalize_term(e.term) for e in self.entries if e.gender == label])
+            for label in ("masculine", "feminine")
+        ]
+        named = [f"{label}: {', '.join(terms)}" for label, terms in groups if terms]
+        if not named:
+            return ""
+        return (
+            "  CHARACTER GENDER (use for adjective and participle agreement) — "
+            + "; ".join(named)
+        )
 
     @staticmethod
     def _render_identity_line(
@@ -343,6 +416,15 @@ def translation_tool_schema(segment_count: int | None = None) -> dict[str, Any]:
     schema = TranslationUnit.model_json_schema()
     props = schema["properties"]
     props.pop("translations", None)
+
+    # `gender` is withheld from the model on purpose. It is a DETERMINISTIC
+    # channel seeded from the English source; offering it in the schema would
+    # invite exactly the guess the anchor exists to eliminate — the summary
+    # fabricated a feminine narrator in 156 of 569 chunks precisely because it
+    # had to choose. GlossaryEntry drops any value that arrives anyway.
+    entry_props = schema.get("$defs", {}).get("GlossaryEntry", {}).get("properties")
+    if entry_props is not None:
+        entry_props.pop("gender", None)
 
     if segment_count is None:
         props["translation"].pop("default", None)

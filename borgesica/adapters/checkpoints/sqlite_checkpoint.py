@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS glossary (
     locked          INTEGER NOT NULL DEFAULT 0,
     note            TEXT,
     first_draw      TEXT,
+    gender          TEXT,
     PRIMARY KEY (job_id, term)
 )
 """
@@ -129,6 +130,13 @@ _GLOSSARY_MIGRATIONS = {
     # confirmation mechanism could report on itself. Defaulting it to the
     # translation would fabricate a 100% confirmation rate for those rows.
     "first_draw": "TEXT",
+    # Nullable with no default, for the same reason: NULL means "not
+    # classified", which is the honest state for every row written before the
+    # character-gender anchor existed. Defaulting it either way would
+    # fabricate the very fact the anchor was added to stop fabricating. Read
+    # at RUN time by build_system_prompt, so it must survive resume or a
+    # continued job silently reverts to guessing mid-book.
+    "gender": "TEXT",
 }
 
 _CREATE_GLOSSARY_VOTES = """
@@ -406,13 +414,16 @@ class SQLiteCheckpointStore:
         """Replace all glossary entries for this job (full overwrite)."""
         delete_sql = "DELETE FROM glossary WHERE job_id = ?"
         insert_sql = """
-        INSERT INTO glossary (job_id, term, translation, locked, note, first_draw)
-        VALUES (:job_id, :term, :translation, :locked, :note, :first_draw)
+        INSERT INTO glossary (
+            job_id, term, translation, locked, note, first_draw, gender
+        )
+        VALUES (:job_id, :term, :translation, :locked, :note, :first_draw, :gender)
         ON CONFLICT(job_id, term) DO UPDATE SET
             translation=excluded.translation,
             locked=excluded.locked,
             note=excluded.note,
-            first_draw=excluded.first_draw
+            first_draw=excluded.first_draw,
+            gender=excluded.gender
         """
         with self._connect() as conn:
             conn.execute(delete_sql, (job_id,))
@@ -424,6 +435,7 @@ class SQLiteCheckpointStore:
                     "locked": 1 if entry.locked else 0,
                     "note": entry.note,
                     "first_draw": entry.first_draw,
+                    "gender": entry.gender,
                 })
 
     def save_votes(self, job_id: str, votes: GlossaryVotes) -> None:
@@ -473,6 +485,7 @@ class SQLiteCheckpointStore:
                 locked=bool(row["locked"]),
                 note=row["note"],
                 first_draw=row["first_draw"],
+                gender=row["gender"],
             )
             for row in rows
         ]

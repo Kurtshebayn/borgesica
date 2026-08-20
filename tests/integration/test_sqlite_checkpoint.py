@@ -272,6 +272,72 @@ class TestSQLiteCheckpointStore:
         finally:
             os.unlink(db_path)
 
+    # --- character gender: the anchor is only useful if it survives resume ---
+    def test_save_and_load_glossary_gender(self):
+        """The anchor is read at RUN time by build_system_prompt, so a resumed
+        job that lost it would silently revert to the coin flip mid-book.
+        """
+        job = make_job()
+        self.store.save_job(job)
+        glossary = Glossary(entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Lanistia", translation="Lanistia", gender="feminine"),
+            GlossaryEntry(term="Emissa", translation="Emissa"),
+        ])
+        self.store.save_glossary(job.id, glossary)
+        loaded = {e.term: e for e in self.store.load_glossary(job.id).entries}
+        assert loaded["Vis"].gender == "masculine"
+        assert loaded["Lanistia"].gender == "feminine"
+        # Unclassified stays unclassified rather than defaulting to a gender.
+        assert loaded["Emissa"].gender is None
+
+    def test_migrates_existing_db_without_gender_column(self):
+        """Every jobs.db in existence predates the column (same PRAGMA
+        table_info + ALTER TABLE path as first_draw/chunks/jobs).
+        """
+        import os
+        import sqlite3
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        old_glossary_ddl = """
+        CREATE TABLE glossary (
+            job_id          TEXT NOT NULL,
+            term            TEXT NOT NULL,
+            translation     TEXT NOT NULL,
+            locked          INTEGER NOT NULL DEFAULT 0,
+            note            TEXT,
+            first_draw      TEXT,
+            PRIMARY KEY (job_id, term)
+        )
+        """
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(old_glossary_ddl)
+            conn.execute(
+                "INSERT INTO glossary VALUES (?,?,?,?,?,?)",
+                ("job-old", "Vis", "Vis", 0, None, None),
+            )
+            conn.commit()
+            conn.close()
+
+            store = SQLiteCheckpointStore(db_path)
+            loaded = store.load_glossary("job-old")
+            assert len(loaded.entries) == 1
+            assert loaded.entries[0].gender is None
+
+            store.save_glossary(
+                "job-old",
+                Glossary(entries=[
+                    GlossaryEntry(term="Vis", translation="Vis", gender="masculine")
+                ]),
+            )
+            reloaded = SQLiteCheckpointStore(db_path).load_glossary("job-old")
+            assert reloaded.entries[0].gender == "masculine"
+        finally:
+            os.unlink(db_path)
+
     # --- save_votes + load_votes round-trip, proposal order preserved ---
     def test_save_and_load_votes(self):
         from borgesica.domain.models import GlossaryVotes

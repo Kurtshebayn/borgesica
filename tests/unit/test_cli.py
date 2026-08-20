@@ -924,6 +924,7 @@ def test_cmd_glossary_show_notes_repaired_entries_on_stderr(
             "translation": "Alupi",
             "locked": False,
             "note": None,
+            "gender": None,
             "first_draw": None,
         }
     ]
