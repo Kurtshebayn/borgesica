@@ -20,7 +20,11 @@ Mid-run addition staging logic:
 """
 from __future__ import annotations
 
+import re
+from bisect import bisect_left, bisect_right
+
 from borgesica.domain.models import (
+    CharacterGender,
     Glossary,
     GlossaryEntry,
     GlossarySettlements,
@@ -37,12 +41,14 @@ __all__ = [
     "LlmGlossaryExtractor",
     "NullGlossaryExtractor",
     "apply_additions",
+    "character_gender_evidence",
     "dedupe_glossary",
     "drop_reversed_entries",
     "get_extractor",
     "merge_additions",
     "normalize_term",
     "sanitize_glossary",
+    "seed_character_gender",
     "settlement_counts",
 ]
 
@@ -526,3 +532,163 @@ def settlement_counts(
         else:
             changed += 1
     return GlossarySettlements(changed=changed, confirmed=confirmed)
+
+
+# ---------------------------------------------------------------------------
+# Character-gender seeding
+# ---------------------------------------------------------------------------
+
+# Characters searched on each side of a name for a gendered pronoun. Wide
+# enough to reach the pronoun in the clause around the name, narrow enough
+# that most hits belong to it — but it still catches whoever else is standing
+# nearby, which is exactly why a bare majority is not enough to classify.
+_GENDER_WINDOW_CHARS = 60
+
+# A name must draw at least this many gendered pronouns before it is
+# classified at all. Job 9be143da's book put every real character far above
+# it (Caeror 112, Netiqret 105, Vis 68) while noise sits in single digits.
+MIN_GENDER_MENTIONS = 20
+
+# ...and at least this share of them must agree. The threshold is what keeps
+# the seeder honest rather than merely accurate: Aequa (51/115) and Emissa
+# (16/32) land at 66-69% feminine — obvious to a reader, under the margin, and
+# therefore left unset. Guessing them right would not have been knowledge, and
+# a wrong anchor is worse than no anchor because the model trusts it.
+MIN_GENDER_RATIO = 0.7
+
+_MASCULINE_PRONOUNS = frozenset({"he", "him", "his", "himself"})
+_FEMININE_PRONOUNS = frozenset({"she", "her", "hers", "herself"})
+
+_WORD = re.compile(r"[A-Za-z][A-Za-z'\u2019]*")
+
+
+def _count_near(positions: list[int], anchor: int) -> int:
+    """Number of ``positions`` within the window around ``anchor``."""
+    low = bisect_left(positions, anchor - _GENDER_WINDOW_CHARS)
+    high = bisect_right(positions, anchor + _GENDER_WINDOW_CHARS)
+    return high - low
+
+
+def character_gender_evidence(source_text: str) -> dict[str, tuple[int, int]]:
+    """Return {casefolded name: (masculine_count, feminine_count)}.
+
+    Separate from ``seed_character_gender`` because it is the expensive half
+    and the source text never changes during a run: scanning it once and
+    reusing the result costs 0.09s on a real 1.5M-character book, while
+    rescanning per chunk costs 53s of the same answer 569 times over.
+
+    One pass over the source collects the position of every gendered pronoun
+    and of every capitalised word (the name candidates); each name occurrence
+    is then credited with the pronouns inside its window. Built ONCE per run
+    rather than per entry: the alternative rescans the whole book for every
+    term, and a real book carries ~549 of them.
+
+    A word ever seen LOWERCASE is dropped as a common noun, however strong its
+    evidence. Pronoun proximity says what gender a PERSON is; a capitalised
+    common noun standing near "he" is just a noun standing near a pronoun. On
+    the real book this is what separated the characters from "Religion",
+    "Governance", "Military" and "Concurrence" — nouns whose Spanish gender is
+    grammatical, and which an anchor would have mis-declared ("la religión" is
+    feminine). Capitalisation that merely opens a sentence does not disqualify
+    a name: only a genuine lowercase use does.
+    """
+    masculine_at: list[int] = []
+    feminine_at: list[int] = []
+    names_at: dict[str, list[int]] = {}
+    seen_lowercase: set[str] = set()
+
+    for match in _WORD.finditer(source_text):
+        word = match.group()
+        lowered = word.casefold()
+        if lowered in _MASCULINE_PRONOUNS:
+            masculine_at.append(match.start())
+        elif lowered in _FEMININE_PRONOUNS:
+            feminine_at.append(match.start())
+        elif word[0].isupper():
+            names_at.setdefault(lowered, []).append(match.start())
+        else:
+            seen_lowercase.add(lowered)
+
+    for common in seen_lowercase:
+        names_at.pop(common, None)
+
+    evidence: dict[str, tuple[int, int]] = {}
+    for name, positions in names_at.items():
+        masculine = sum(_count_near(masculine_at, at) for at in positions)
+        feminine = sum(_count_near(feminine_at, at) for at in positions)
+        if masculine or feminine:
+            evidence[name] = (masculine, feminine)
+    return evidence
+
+
+def _classify_gender(
+    masculine: int, feminine: int, min_mentions: int, min_ratio: float
+) -> CharacterGender | None:
+    """Return the gender the evidence supports, or None when it supports none."""
+    total = masculine + feminine
+    if total < min_mentions:
+        return None
+    if masculine >= feminine:
+        return "masculine" if masculine / total >= min_ratio else None
+    return "feminine" if feminine / total >= min_ratio else None
+
+
+def seed_character_gender(
+    glossary: Glossary,
+    evidence: dict[str, tuple[int, int]],
+    *,
+    min_mentions: int = MIN_GENDER_MENTIONS,
+    min_ratio: float = MIN_GENDER_RATIO,
+) -> Glossary:
+    """Classify unclassified glossary terms by gender, from the ENGLISH source.
+
+    This is the anchored fact the summary's naming rule cannot supply. The
+    rule stops the model needing to invent a gender to tell two referents
+    apart; this says which gender is actually true, so a chunk whose own text
+    gives no evidence about a character (chunk 19: he/his=2, both the other
+    character, she/her=0) is no longer a coin flip.
+
+    The source is the ENGLISH original, never a translation: a Spanish
+    rendering already carries the fabricated agreement this exists to correct,
+    so seeding from it would launder the defect into a fact.
+
+    Only entries with no gender are touched. One already set was either seeded
+    from a fuller text or chosen by a human, and re-counting pronouns must not
+    overrule either.
+
+    Only IDENTITY entries are eligible — a term whose Spanish rendering is the
+    term itself. A translated noun's gender is grammatical and belongs to the
+    Spanish word, so declaring "Concurrencia" masculine because the English
+    "Concurrence" stood near "he" would replace a correct agreement with a
+    wrong one. Characters are almost always identity entries, which is the
+    same property that made a per-entry ``note`` unworkable as the channel.
+
+    A term below the margin keeps ``gender=None`` — unclassified, never
+    guessed. That is the same discipline ``first_draw`` follows for an unknown
+    draw, and it costs nothing: an unanchored character is still covered by
+    the naming rule, which is the part that removes the incentive to invent.
+    """
+    if all(entry.gender is not None for entry in glossary.entries):
+        return glossary
+
+    entries: list[GlossaryEntry] = []
+    for entry in glossary.entries:
+        term = normalize_term(entry.term)
+        eligible = (
+            entry.gender is None
+            # Only a name carried into Spanish UNCHANGED. Once a term is
+            # translated its Spanish gender is grammatical and belongs to the
+            # Spanish noun, whatever the English referent was.
+            and bool(term)
+            and term == normalize_term(entry.translation)
+        )
+        counts = evidence.get(term.casefold()) if eligible else None
+        gender = (
+            _classify_gender(counts[0], counts[1], min_mentions, min_ratio)
+            if counts is not None
+            else None
+        )
+        entries.append(
+            entry.model_copy(update={"gender": gender}) if gender else entry
+        )
+    return Glossary(entries=entries)

@@ -238,12 +238,16 @@ class Glossary(BaseModel):
         got wrong — is exactly such an entry.
 
         Charged against nothing: unlike a mapping, this line is ALWAYS emitted
-        in full, on the same reasoning that always emits locked entries. The
-        classified set is bounded by the seeding margin (a handful of names on
-        a real book), and dropping the character the summary happens to be
-        about would reinstate the very coin flip the anchor exists to remove.
-        It is still MEASURED for cost like every other part of the block —
-        ``cost.py`` counts the rendered output rather than restating its shape.
+        in full, on the same reasoning that always emits locked entries.
+        Dropping the character the summary happens to be about would reinstate
+        the very coin flip the anchor exists to remove, and the seeding margin
+        keeps the set small enough that it never needs to be dropped —
+        measured on the real 549-entry book glossary, 33 entries classify and
+        the line costs 44 words against a 1738-word render (+2.5%).
+
+        It is still MEASURED for cost like every other part of the block:
+        ``cost.py`` counts the rendered output rather than restating its
+        shape, which is the mistake that once under-counted the block 6.6x.
         """
         groups = [
             (label, [normalize_term(e.term) for e in self.entries if e.gender == label])
