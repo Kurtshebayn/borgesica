@@ -384,3 +384,165 @@ def test_malformed_missing_field_raises_domain_error() -> None:
             glossary=Glossary(),
             model="test-model",
         )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic character-gender detector — free, post-hoc, no provider calls
+# ---------------------------------------------------------------------------
+
+
+def _cast() -> "Glossary":
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    return Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Lanistia", translation="Lanistia", gender="feminine"),
+            # Below the seeding margin on the real book — no anchor, nothing to
+            # check against.
+            GlossaryEntry(term="Emissa", translation="Emissa"),
+        ]
+    )
+
+
+def test_detects_the_defect_that_actually_shipped():
+    """Chunk 19 of job 9be143da: source "Easy, Vis." became "—Tranquila, Vis".
+
+    The one defect that surfaced in the whole book. Feminine agreement sitting
+    directly against a masculine name is the shape the detector exists for.
+    """
+    from borgesica.domain.quality import detect_gender_defects
+
+    defects = detect_gender_defects("—Tranquila, Vis. El pasillo estaba vacío.", _cast())
+
+    assert len(defects) == 1
+    assert defects[0].name == "Vis"
+    assert defects[0].expected == "masculine"
+    assert defects[0].marker.casefold() == "tranquila"
+
+
+def test_accepts_correct_agreement():
+    from borgesica.domain.quality import detect_gender_defects
+
+    assert detect_gender_defects("—Tranquilo, Vis. Ya pasó.", _cast()) == []
+
+
+def test_detects_agreement_following_the_name():
+    from borgesica.domain.quality import detect_gender_defects
+
+    defects = detect_gender_defects("Vis, cansada, bajó la escalera.", _cast())
+
+    assert [d.marker.casefold() for d in defects] == ["cansada"]
+
+
+def test_checks_feminine_characters_too():
+    """The anchor is symmetric — the defect happens to run one way in this
+    book, but a detector that only knows one direction is not a detector.
+    """
+    from borgesica.domain.quality import detect_gender_defects
+
+    defects = detect_gender_defects("—Cansado, Lanistia.", _cast())
+
+    assert [d.expected for d in defects] == ["feminine"]
+
+
+def test_ignores_a_character_with_no_anchor():
+    """Unclassified means unknown, and an unknown expectation cannot be
+    violated. Flagging it would invent the fact the seeder refused to guess.
+    """
+    from borgesica.domain.quality import detect_gender_defects
+
+    assert detect_gender_defects("—Tranquilo, Emissa.", _cast()) == []
+
+
+def test_ignores_gendered_words_that_are_not_adjacent():
+    """Recall is limited BY DESIGN. Here "ella" refers to Lanistia, not to
+    Vis; only adjacency makes attribution safe, and a detector that guesses
+    at distance would drown its real findings in false ones.
+    """
+    from borgesica.domain.quality import detect_gender_defects
+
+    text = "Vis miró a Lanistia durante un rato y ella sonrió, agotada."
+
+    assert detect_gender_defects(text, _cast()) == []
+
+
+def test_does_not_read_across_a_sentence_boundary():
+    """A word in the NEXT sentence is not agreement with this name."""
+    from borgesica.domain.quality import detect_gender_defects
+
+    assert detect_gender_defects("Todo terminó para Vis. Cansada, se fue.", _cast()) == []
+
+
+def test_reports_an_excerpt_for_review():
+    """A flag nobody can act on is not a finding. Retrying is not an option —
+    the same poisoned summary produces the same output — so the excerpt is
+    what a human uses to judge it.
+    """
+    from borgesica.domain.quality import detect_gender_defects
+
+    defects = detect_gender_defects(
+        "El pasillo estaba en silencio. —Tranquila, Vis. Nadie respondió.", _cast()
+    )
+
+    assert "Tranquila, Vis" in defects[0].excerpt
+
+
+def test_ignores_agreement_that_belongs_to_a_preceding_noun():
+    """Measured on the real book, this was the single largest false-positive
+    class: "la voz de Caeror, apagada" agrees with "voz", not with Caeror.
+
+    A name introduced by "de" is a genitive complement — the head noun before
+    it owns any agreement that follows, so the name is not a candidate.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_gender_defects
+
+    cast = Glossary(
+        entries=[GlossaryEntry(term="Caeror", translation="Caeror", gender="masculine")]
+    )
+    text = "Escucho la voz de Caeror, apagada y distorsionada."
+
+    assert detect_gender_defects(text, cast) == []
+
+
+def test_ignores_a_marker_that_does_not_open_its_clause():
+    """The other large false-positive class. In "alguien llamado Netiqret",
+    "En un momento dado, Kiya" and "de nuevo, Netiqret", the gendered word
+    belongs to the phrase it sits in and merely happens to end up beside a
+    name. Real vocative agreement opens its clause — "—Tranquila, Vis".
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_gender_defects
+
+    cast = Glossary(
+        entries=[
+            GlossaryEntry(term="Netiqret", translation="Netiqret", gender="feminine"),
+            GlossaryEntry(term="Kiya", translation="Kiya", gender="feminine"),
+        ]
+    )
+
+    assert detect_gender_defects("Alguien llamado Netiqret me lo dio.", cast) == []
+    assert detect_gender_defects("En un momento dado, Kiya desaparece.", cast) == []
+    assert detect_gender_defects("Podemos intentarlo de nuevo, Netiqret.", cast) == []
+
+
+def test_does_not_read_the_adverb_solo_as_agreement():
+    """"solo" is overwhelmingly the adverb "only" and carries no agreement;
+    "sola" has no adverbial sense and does. The asymmetry is the language's,
+    not an oversight — measured, "solo" produced the last surviving false
+    positive in the summaries of a full book.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_gender_defects
+
+    cast = Glossary(
+        entries=[
+            GlossaryEntry(term="Siamun", translation="Siamun", gender="feminine"),
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+        ]
+    )
+
+    assert detect_gender_defects("Siamun solo le había dicho eso.", cast) == []
+    # The feminine form still marks agreement.
+    assert len(detect_gender_defects("—Sola, Vis. Nadie más queda.", cast)) == 1
