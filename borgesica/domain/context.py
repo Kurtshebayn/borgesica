@@ -155,6 +155,15 @@ Rules for summary_update:
 - Write 3–5 sentences maximum.
 - Capture narrative arc, tone, setting, and any new characters.
 - This summary REPLACES the previous one — do NOT include prior context verbatim.
+- NAME the character you are referring to whenever more than one character is \
+in play: write "Ada recuerda" (name + verb), never "ella recuerda". Use a \
+pronoun ONLY when \
+exactly one candidate antecedent exists in the summary you are writing.
+- NEVER infer or invent a character's gender. A first-person narrator ("I") is \
+genderless in the English source, so refer to that narrator BY NAME. Do not \
+reach for a gendered pronoun in order to tell two characters apart — naming \
+them is always available, and a Spanish verb does not mark the subject's \
+gender, so a named referent commits you to nothing you were not told.
 - Keep it under 200 tokens.
 
 Rules for glossary_additions:
@@ -222,6 +231,15 @@ Rules for summary_update:
 - Write 3–5 sentences maximum.
 - Capture narrative arc, tone, setting, and any new characters.
 - This summary REPLACES the previous one — do NOT include prior context verbatim.
+- NAME the character you are referring to whenever more than one character is \
+in play: write "Ada recuerda" (name + verb), never "ella recuerda". Use a \
+pronoun ONLY when \
+exactly one candidate antecedent exists in the summary you are writing.
+- NEVER infer or invent a character's gender. A first-person narrator ("I") is \
+genderless in the English source, so refer to that narrator BY NAME. Do not \
+reach for a gendered pronoun in order to tell two characters apart — naming \
+them is always available, and a Spanish verb does not mark the subject's \
+gender, so a named referent commits you to nothing you were not told.
 - Keep it under 200 tokens.
 
 Rules for glossary_additions:

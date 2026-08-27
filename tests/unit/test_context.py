@@ -734,3 +734,189 @@ def test_dialogue_rule_states_the_conversion_not_just_the_ban():
     assert "source" in rule, "rule must name what the source uses"
     assert "double" in rule, "rule must name the source's double quotes"
     assert "replace" in rule or "convert" in rule, "rule must state the operation"
+
+
+# ---------------------------------------------------------------------------
+# Referent naming — the summary must not use gender to tell characters apart
+# ---------------------------------------------------------------------------
+
+
+def _summary_rules(text: str) -> str:
+    """Return just the summary_update rule block, lowercased.
+
+    Scoped like the dialogue-rule tests: "name", "character" and "gender" all
+    occur in the glossary and neutral-Spanish rules, so asserting against the
+    whole prompt would pass before the rule is written at all.
+    """
+    start = text.index("Rules for summary_update:")
+    end = text.index("Rules for glossary_additions:", start)
+    return text[start:end].lower()
+
+
+def test_summary_rules_require_naming_the_referent():
+    """Measured on job 9be143da (569 chunks, full book): the rolling summary
+    invents a FEMININE gender for the male first-person narrator. 156 summaries
+    carry a feminine marker and 42 of them name only male characters — the
+    unambiguous floor, 7.4%, with no possible female referent.
+
+    The mechanism is disambiguation pressure: the narrator is "I" in English
+    (genderless) while the other character on stage is "he", so a third-person
+    Spanish summary needs two contrasting pronouns and has evidence for only
+    one. Naming the referent removes the INCENTIVE — Spanish verbs do not mark
+    subject gender, so "Vis recuerda" carries none to corrupt.
+    """
+    from borgesica.domain.context import ContextManager
+
+    rules = _summary_rules(
+        ContextManager().build_system_prompt(
+            make_config(source_type=SourceType.EPUB), Glossary(), RollingSummary()
+        ).text
+    )
+
+    assert "name" in rules, "rule must require naming the character"
+    assert "more than one" in rules, "rule must state when naming is required"
+    assert "pronoun" in rules, "rule must constrain pronoun use"
+    assert "antecedent" in rules, "rule must state when a pronoun is allowed"
+
+
+def test_summary_rules_forbid_inferring_gender():
+    """The naming rule alone still leaves the model free to guess when it does
+    choose a pronoun. The English source contains ZERO she/her for the narrator
+    in the poisoned chunks — the feminine is fabricated, not misread — so the
+    rule must ban the inference itself, not only the ambiguity that invites it.
+    """
+    from borgesica.domain.context import ContextManager
+
+    rules = _summary_rules(
+        ContextManager().build_system_prompt(
+            make_config(source_type=SourceType.EPUB), Glossary(), RollingSummary()
+        ).text
+    )
+
+    assert "gender" in rules, "rule must name gender as the thing not to invent"
+    assert "never" in rules, "rule must be absolute, not a preference"
+    assert "first-person" in rules, "rule must name the narrator case that triggers it"
+
+
+def test_referent_naming_rule_survives_for_srt_jobs():
+    """SRT carries its own task-description literal. The two have drifted
+    before, and the rolling summary is shared by both source types.
+    """
+    from borgesica.domain.context import ContextManager
+
+    rules = _summary_rules(
+        ContextManager().build_system_prompt(
+            make_config(source_type=SourceType.SRT), Glossary(), RollingSummary()
+        ).text
+    )
+
+    assert "more than one" in rules
+    assert "gender" in rules
+
+
+# ---------------------------------------------------------------------------
+# Character gender — the anchored fact, rendered where the model will read it
+# ---------------------------------------------------------------------------
+
+
+def _gender_line(rendered: str) -> str:
+    """Return the compact character-gender line, or "" if absent."""
+    for line in rendered.splitlines():
+        if "CHARACTER GENDER" in line:
+            return line
+    return ""
+
+
+def test_render_names_character_gender_for_agreement():
+    """The naming rule removes the pressure to invent a gender but supplies no
+    fact. Chunk 19's own English has he/his=2 (both referring to the OTHER
+    character) and she/her=0, so a gender-free summary leaves the narrator's
+    agreement a coin flip — which is how "Easy, Vis." became "—Tranquila, Vis".
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Caeror", translation="Caeror", gender="masculine"),
+            GlossaryEntry(term="Lanistia", translation="Lanistia", gender="feminine"),
+        ]
+    )
+
+    line = _gender_line(glossary.render())
+
+    assert line, "expected a character-gender line"
+    masculine, feminine = line.split("feminine")
+    for name in ("Vis", "Caeror"):
+        assert name in masculine
+    assert "Lanistia" in feminine
+    assert "Lanistia" not in masculine
+
+
+def test_render_gives_identity_entries_a_gender_slot():
+    """This is why the anchor is a typed field and not GlossaryEntry.note.
+
+    "Vis → Vis" is an IDENTITY entry: render() collapses those into the single
+    DO-NOT-TRANSLATE line, which has no per-entry slot to hang a note on. The
+    narrator is exactly such an entry, so a per-entry channel that only
+    survives on MAPPINGS would miss the one character that matters most.
+    """
+    glossary = Glossary(
+        entries=[GlossaryEntry(term="Vis", translation="Vis", gender="masculine")]
+    )
+
+    rendered = glossary.render()
+
+    assert "Vis" in _identity_terms_line(rendered), "still a do-not-translate term"
+    assert "Vis" in _gender_line(rendered), "and still carries its gender"
+
+
+def test_render_omits_unclassified_characters_from_the_gender_line():
+    """A name that did not clear the seeding margin stays out rather than
+    being guessed at — the same rule first_draw follows for an unknown draw.
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Emissa", translation="Emissa"),
+        ]
+    )
+
+    line = _gender_line(glossary.render())
+
+    assert "Vis" in line
+    assert "Emissa" not in line, "unclassified must not be silently assigned"
+
+
+def test_render_omits_the_gender_line_when_nothing_is_classified():
+    """A glossary with no classified character pays nothing for the feature."""
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Aaru", translation="Aaru"),
+            GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento"),
+        ]
+    )
+
+    rendered = glossary.render()
+
+    assert _gender_line(rendered) == ""
+    assert "CHARACTER GENDER" not in rendered
+
+
+def test_gender_line_survives_a_budget_too_small_to_hold_it():
+    """Character gender is always named, like a locked entry.
+
+    The classified set is bounded by the seeding margin (a handful of names per
+    book), and dropping the one character the summary is about would reinstate
+    the exact coin flip the anchor exists to remove. Truncating it to save a
+    dozen words would be trading the fix for nothing.
+    """
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term=f"Term{i:02d}", translation=f"Traduccion{i:02d}")
+            for i in range(50)
+        ]
+        + [GlossaryEntry(term="Vis", translation="Vis", gender="masculine")]
+    )
+
+    line = _gender_line(glossary.render(budget_tokens=10))
+
+    assert "Vis" in line

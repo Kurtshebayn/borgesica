@@ -68,7 +68,11 @@ from borgesica.domain.errors import (
     MalformedOutput,
     ProviderError,
 )
-from borgesica.domain.glossary import apply_additions
+from borgesica.domain.glossary import (
+    apply_additions,
+    character_gender_evidence,
+    seed_character_gender,
+)
 from borgesica.domain.markup import (
     reinsert,
     strip,
@@ -282,8 +286,22 @@ class TranslationOrchestrator:
         # Track running cost (may already be non-zero from previous runs).
         running_cost = job.cost_usd
 
+        # Character-gender evidence, counted ONCE over the whole English
+        # source. Scanning it per chunk would spend 53s re-deriving the same
+        # answer on a real book; the source does not change during a run.
+        #
+        # The ENGLISH original, never the translation: a Spanish rendering
+        # already carries the fabricated agreement the anchor exists to
+        # correct, so seeding from it would launder the defect into a fact.
+        gender_evidence = character_gender_evidence(
+            "\n\n".join(c.source_text for c in ordered_chunks)
+        )
+
         # Mutable glossary reference — may grow via mid-run additions.
-        live_glossary = glossary
+        # Seeded up front for terms an extractor already put there; mid-run
+        # additions are seeded as they arrive, which on a CLI run (empty
+        # glossary, NullGlossaryExtractor) is where every character enters.
+        live_glossary = seed_character_gender(glossary, gender_evidence)
         # Provisional-rendering tally, loaded so a resumed job keeps counting
         # instead of restarting every term's vote from scratch.
         live_votes = self._checkpoint.load_votes(job.id)
@@ -454,6 +472,9 @@ class TranslationOrchestrator:
                 live_glossary, live_votes = apply_additions(
                     live_glossary, live_votes, final_unit.glossary_additions
                 )
+                # Anchor whatever just arrived. Cheap: a dict lookup per
+                # unclassified entry against evidence counted once above.
+                live_glossary = seed_character_gender(live_glossary, gender_evidence)
                 self._checkpoint.save_glossary(job.id, live_glossary)
                 self._checkpoint.save_votes(job.id, live_votes)
 

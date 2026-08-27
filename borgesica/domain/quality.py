@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from dataclasses import dataclass, field
 
 from pydantic import ValidationError
@@ -46,6 +47,7 @@ from borgesica.domain.models import (
     DEFAULT_GLOSSARY_BUDGET_TOKENS,
     Glossary,
     QualityScore,
+    normalize_term,
 )
 from borgesica.domain.ports import TranslationProvider
 
@@ -301,3 +303,181 @@ class QualityHarness:
             original.strip().lower(),
             back_translated.strip().lower(),
         ).ratio()
+
+
+# ---------------------------------------------------------------------------
+# Deterministic character-gender detector
+# ---------------------------------------------------------------------------
+#
+# Post-hoc, free, and makes ZERO provider calls. Everything it needs is
+# already persisted — chunks.source_text, chunks.translated_text and the
+# summaries table — so a finished job can be audited without paying to run it
+# again.
+#
+# It FLAGS; it never retries. A retry would feed the model the same poisoned
+# summary and reproduce the same output. The order that fixes anything is
+# anchor -> re-pass -> re-run this detector to confirm it reaches zero.
+
+# Agreement is checked only against a word standing DIRECTLY beside the name.
+# That is the shape of the defect that shipped ("—Tranquila, Vis") and it is
+# the only position where attribution is safe: at any distance the gendered
+# word usually belongs to another character on stage, and a detector whose
+# findings are mostly wrong is one nobody reads. Recall is deliberately traded
+# for precision — distant first-person narration is out of reach, because
+# narrator and dialogue cannot be separated reliably.
+_AGREEMENT_WINDOW_TOKENS = 1
+
+# Participle endings, which mark agreement reliably.
+_FEMININE_SUFFIXES = ("ada", "adas", "ida", "idas")
+_MASCULINE_SUFFIXES = ("ado", "ados", "ido", "idos")
+
+# Plus the handful of plain adjectives common enough in vocative dialogue to
+# be worth naming outright. "tranquilo/a" is here because it is the exact word
+# the book got wrong.
+_GENDERED_ADJECTIVES = {
+    "tranquilo": "masculine", "tranquila": "feminine",
+    "quieto": "masculine", "quieta": "feminine",
+    "listo": "masculine", "lista": "feminine",
+    "seguro": "masculine", "segura": "feminine",
+    # "solo" is absent on purpose: it is overwhelmingly the adverb "only" and
+    # marks no agreement, which is what produced the last surviving false
+    # positive across a full book's summaries. "sola" has no adverbial sense.
+    "sola": "feminine",
+    "muerto": "masculine", "muerta": "feminine",
+    "vivo": "masculine", "viva": "feminine",
+    "loco": "masculine", "loca": "feminine",
+    "viejo": "masculine", "vieja": "feminine",
+    "nuevo": "masculine", "nueva": "feminine",
+}
+
+# Nouns and verb forms carrying a participle ending without being agreement.
+# "—Nada, Vis" is not a feminine Vis. The list is deliberately short: every
+# entry is a word measured or expected to sit next to a name in dialogue, and
+# it is meant to grow from observed false positives rather than from guesses.
+_NOT_AGREEMENT = frozenset({
+    "nada", "cada", "vida", "comida", "salida", "entrada", "mirada",
+    "llamada", "espada", "jornada", "manada", "partida", "medida",
+    "ruido", "sonido", "sentido", "olvido", "vestido", "pedido",
+})
+
+_SENTENCE_BREAK = re.compile(r"[.!?;:\n\u2026]")
+_SPANISH_WORD = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+")
+
+# Prepositions that make the name a complement rather than the thing being
+# described, so a following adjective agrees with whatever came before it.
+_COMPLEMENT_MARKERS = frozenset({"de", "del", "en"})
+
+
+def _opens_clause(text: str, tokens: list[re.Match[str]], index: int) -> bool:
+    """True when the token at ``index`` is the first word of its clause.
+
+    Anything in front of it must be punctuation — the raya opening a spoken
+    turn, a quote, an opening question mark — never another word.
+    """
+    if index == 0:
+        return True
+    gap = text[tokens[index - 1].end():tokens[index].start()]
+    return bool(_SENTENCE_BREAK.search(gap))
+
+
+@dataclass(frozen=True)
+class GenderDefect:
+    """One place a translation disagrees with a character's anchored gender."""
+
+    name: str
+    expected: str
+    found: str
+    marker: str
+    excerpt: str
+
+
+def _agreement_gender(word: str) -> str | None:
+    """Return the gender a word marks, or None when it marks none."""
+    lowered = word.casefold()
+    if lowered in _NOT_AGREEMENT:
+        return None
+    if lowered in _GENDERED_ADJECTIVES:
+        return _GENDERED_ADJECTIVES[lowered]
+    if lowered.endswith(_FEMININE_SUFFIXES):
+        return "feminine"
+    if lowered.endswith(_MASCULINE_SUFFIXES):
+        return "masculine"
+    return None
+
+
+def detect_gender_defects(text: str, glossary: Glossary) -> list[GenderDefect]:
+    """Return every disagreement between ``text`` and the glossary's anchors.
+
+    Deterministic and free: no provider call, no persisted verdict. A verdict
+    is worth storing only when recomputing it costs money (the LLM judge,
+    back-translation); this one is cheaper to redo than to look up.
+
+    Characters with no anchored gender are skipped. Unclassified means
+    unknown, and an unknown expectation cannot be violated — flagging one
+    would invent exactly the fact the seeder declined to guess.
+
+    A ZERO RESULT IS NOT A CLEAN BILL OF HEALTH. Run over the finished book
+    this returns 4 findings in 569 chunks and 0 across all 569 summaries —
+    yet 156 of those summaries carry a fabricated feminine marker. The
+    fabrication is mostly a bare "ella" standing nowhere near a name, and
+    adjacency is exactly what this refuses to guess past. It measures the
+    defect that reaches the READER, never the contamination in the context;
+    the latter is counted by looking for feminine markers in summaries that
+    name no female character, which is a different question.
+    """
+    expected_by_name = {
+        normalize_term(e.term).casefold(): e.gender
+        for e in glossary.entries
+        if e.gender is not None
+    }
+    if not expected_by_name:
+        return []
+
+    tokens = list(_SPANISH_WORD.finditer(text))
+    defects: list[GenderDefect] = []
+
+    for position, token in enumerate(tokens):
+        expected = expected_by_name.get(token.group().casefold())
+        if expected is None:
+            continue
+
+        before = tokens[position - 1] if position else None
+        # A name introduced by a preposition is a complement, and any
+        # agreement that follows belongs to the head noun in front of it:
+        # "la voz de Caeror, apagada" describes the voz. Measured on the real
+        # book, this was the single largest false-positive class.
+        takes_trailing = before is None or before.group().casefold() not in _COMPLEMENT_MARKERS
+
+        candidates = []
+        if position and _opens_clause(text, tokens, position - 1):
+            # Vocative agreement opens its clause ("—Tranquila, Vis"). A
+            # marker with words in front of it inside the same clause belongs
+            # to that phrase and merely lands beside the name: "alguien
+            # llamado Netiqret", "En un momento dado, Kiya", "de nuevo, Vis".
+            candidates.append(tokens[position - 1])
+        if takes_trailing and position + 1 < len(tokens):
+            candidates.append(tokens[position + 1])
+
+        for neighbour in candidates:
+            between = (
+                text[neighbour.end():token.start()]
+                if neighbour.start() < token.start()
+                else text[token.end():neighbour.start()]
+            )
+            if _SENTENCE_BREAK.search(between):
+                continue
+            found = _agreement_gender(neighbour.group())
+            if found is None or found == expected:
+                continue
+            start = max(0, min(token.start(), neighbour.start()) - 40)
+            end = max(token.end(), neighbour.end()) + 40
+            defects.append(
+                GenderDefect(
+                    name=token.group(),
+                    expected=expected,
+                    found=found,
+                    marker=neighbour.group(),
+                    excerpt=" ".join(text[start:end].split()),
+                )
+            )
+    return defects

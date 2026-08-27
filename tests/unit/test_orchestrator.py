@@ -3409,3 +3409,101 @@ def test_votes_survive_between_runs_so_a_resumed_job_keeps_counting():
 
     votes = store.load_votes(job.id)
     assert votes.by_term == {"birthright": ("Primogenitura", "Herencia")}
+
+
+# ===========================================================================
+# Character-gender anchor: seeded from the source, reaching the next prompt
+# ===========================================================================
+
+
+def test_character_gender_is_seeded_from_the_source_and_reaches_later_prompts():
+    """The anchor is useless unless it is filled and delivered.
+
+    On a real CLI run the glossary starts EMPTY (NullGlossaryExtractor), so a
+    character only enters it mid-run as a model addition. Seeding must happen
+    where terms actually arrive, and the classification must then ride into
+    every later system prompt — the summary for chunk N+1 is written against
+    that prompt, and it is the summary that invented the gender.
+    """
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(
+        canned_unit=TranslationUnit(
+            translation="Texto traducido.",
+            summary_update="Caeror espera.",
+            glossary_additions=[GlossaryEntry(term="Caeror", translation="Caeror")],
+        )
+    )
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    gap = " " + ("filler " * 40)
+    chunks = [
+        Chunk(
+            index=i,
+            source_text=gap.join(
+                "Caeror paused and he nodded." for _ in range(7)
+            ),
+            status=ChunkStatus.PENDING,
+        )
+        for i in range(4)
+    ]
+    config = make_config()
+    job = make_job(config, total=len(chunks))
+
+    store.save_job(job)
+    for chunk in chunks:
+        store.save_chunk(job.id, chunk)
+    store.save_glossary(job.id, Glossary())
+
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    persisted = {e.term: e for e in store.load_glossary(job.id).entries}
+    assert persisted["Caeror"].gender == "masculine"
+    assert "CHARACTER GENDER" in provider.call_log[-1][0]
+    assert "masculine: Caeror" in provider.call_log[-1][0]
+
+
+def test_character_gender_is_not_invented_for_a_thinly_evidenced_name():
+    """A run must not manufacture an anchor just because it can. Below the
+    margin the entry stays unclassified and no gender line is emitted at all.
+    """
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(
+        canned_unit=TranslationUnit(
+            translation="Texto traducido.",
+            summary_update="Tara espera.",
+            glossary_additions=[GlossaryEntry(term="Tara", translation="Tara")],
+        )
+    )
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    chunks = [
+        Chunk(index=i, source_text="Tara paused and she nodded.", status=ChunkStatus.PENDING)
+        for i in range(3)
+    ]
+    config = make_config()
+    job = make_job(config, total=len(chunks))
+
+    store.save_job(job)
+    for chunk in chunks:
+        store.save_chunk(job.id, chunk)
+    store.save_glossary(job.id, Glossary())
+
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    persisted = {e.term: e for e in store.load_glossary(job.id).entries}
+    assert persisted["Tara"].gender is None
+    assert "CHARACTER GENDER" not in provider.call_log[-1][0]

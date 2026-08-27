@@ -926,3 +926,190 @@ def test_a_case_only_difference_from_the_first_draw_is_a_confirmation():
     counts = settlement_counts(glossary, GlossaryVotes())
 
     assert (counts.changed, counts.confirmed) == (0, 1)
+
+
+# ---------------------------------------------------------------------------
+# Character gender seeding — derived from the English source, with a margin
+# ---------------------------------------------------------------------------
+
+# Wide enough that no mention's window reaches the next one, so each name
+# occurrence is credited with exactly its own pronoun and the counts under
+# test are the ones the passage literally states.
+_GAP = " " + ("filler " * 40)
+
+
+def _passage(name: str, pronoun: str, count: int) -> str:
+    return _GAP.join(f"{name} paused and {pronoun} nodded." for _ in range(count))
+
+
+def _mixed(name: str, masculine: int, feminine: int) -> str:
+    return _passage(name, "he", masculine) + _GAP + _passage(name, "she", feminine)
+
+
+def _seed(glossary: Glossary, source_text: str) -> Glossary:
+    """Scan the source for gender evidence and apply it, as a run does."""
+    from borgesica.domain.glossary import (
+        character_gender_evidence,
+        seed_character_gender,
+    )
+
+    return seed_character_gender(glossary, character_gender_evidence(source_text))
+
+
+def test_seeds_masculine_gender_from_overwhelming_source_evidence():
+    """Caeror ran 108 masculine to 4 feminine across the real book."""
+    glossary = Glossary(entries=[GlossaryEntry(term="Caeror", translation="Caeror")])
+
+    seeded = _seed(glossary, _passage("Caeror", "he", 25))
+
+    assert seeded.entries[0].gender == "masculine"
+
+
+def test_seeds_feminine_gender_from_overwhelming_source_evidence():
+    """Lanistia ran 11 masculine to 60 feminine across the real book."""
+    glossary = Glossary(entries=[GlossaryEntry(term="Lanistia", translation="Lanistia")])
+
+    seeded = _seed(glossary, _passage("Lanistia", "she", 25))
+
+    assert seeded.entries[0].gender == "feminine"
+
+
+def test_leaves_a_thinly_mentioned_name_unclassified():
+    """A unanimous handful of mentions is not evidence.
+
+    A 60-character window catches whoever else is standing nearby, so a small
+    sample is mostly noise. Unclassified is the honest answer and costs
+    nothing: the summary's naming rule still applies to that character.
+    """
+    glossary = Glossary(entries=[GlossaryEntry(term="Tara", translation="Tara")])
+
+    seeded = _seed(glossary, _passage("Tara", "she", 5))
+
+    assert seeded.entries[0].gender is None
+
+
+def test_leaves_a_split_name_unclassified():
+    """The real reason the margin exists: Aequa ran 51/115 and Emissa 16/32 —
+    66-69% feminine, plainly female to a reader and still under the threshold.
+    Guessing them right would not have been knowledge, so they stay unset.
+    """
+    glossary = Glossary(entries=[GlossaryEntry(term="Aequa", translation="Aequa")])
+
+    seeded = _seed(glossary, _mixed("Aequa", masculine=13, feminine=7))
+
+    assert seeded.entries[0].gender is None
+
+
+def test_classifies_exactly_at_the_margin():
+    """The threshold is inclusive — 70/30 on 20 mentions classifies."""
+    glossary = Glossary(entries=[GlossaryEntry(term="Vis", translation="Vis")])
+
+    seeded = _seed(glossary, _mixed("Vis", masculine=14, feminine=6))
+
+    assert seeded.entries[0].gender == "masculine"
+
+
+def test_never_overwrites_an_existing_classification():
+    """A gender already set was either seeded from a fuller text or chosen by
+    a human. Counting pronouns again must not silently overrule either.
+    """
+    glossary = Glossary(
+        entries=[GlossaryEntry(term="Vis", translation="Vis", gender="masculine")]
+    )
+
+    seeded = _seed(glossary, _passage("Vis", "she", 40))
+
+    assert seeded.entries[0].gender == "masculine"
+
+
+def test_leaves_non_character_terms_alone():
+    """Most of a glossary is places and invented nouns, not people."""
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento"),
+            GlossaryEntry(term="Aaru", translation="Aaru"),
+        ]
+    )
+
+    seeded = _seed(glossary, _passage("Caeror", "he", 25))
+
+    assert [e.gender for e in seeded.entries] == [None, None]
+
+
+def test_seeding_preserves_every_other_field():
+    """Seeding sets one field; it is not a glossary rewrite."""
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(
+                term="Caeror",
+                translation="Caeror",
+                locked=True,
+                note="the other one on stage",
+                first_draw="Caeror",
+            )
+        ]
+    )
+
+    entry = _seed(glossary, _passage("Caeror", "he", 25)).entries[0]
+
+    assert entry.gender == "masculine"
+    assert (entry.term, entry.translation) == ("Caeror", "Caeror")
+    assert entry.locked is True
+    assert entry.note == "the other one on stage"
+    assert entry.first_draw == "Caeror"
+
+
+def test_leaves_a_common_noun_unclassified_however_strong_the_evidence():
+    """Pronoun evidence tells you a PERSON's gender, never a noun's.
+
+    Measured on the real book: the seeder classified "Religion", "Governance",
+    "Military" and "Concurrence" masculine, because capitalised common nouns
+    sit near pronouns like anyone else. Those are not characters, and Spanish
+    grammatical gender governs them instead — "la religión" is feminine, so
+    the anchor would have overridden a correct agreement with a wrong one.
+    The fix is the word's own casing: a proper name essentially never appears
+    lowercase, and a common noun does.
+    """
+    glossary = Glossary(
+        entries=[GlossaryEntry(term="Religion", translation="Religion")]
+    )
+    source = _passage("Religion", "he", 25) + _GAP + "a matter of religion at last"
+
+    seeded = _seed(glossary, source)
+
+    assert seeded.entries[0].gender is None
+
+
+def test_a_sentence_initial_name_is_still_a_proper_name():
+    """The lowercase test must read real lowercase use, not capitalisation that
+    merely happens to start a sentence — otherwise every name that ever opens
+    a sentence would be disqualified.
+    """
+    glossary = Glossary(entries=[GlossaryEntry(term="Caeror", translation="Caeror")])
+    source = _passage("Caeror", "he", 25) + _GAP + "Caeror waited alone."
+
+    seeded = _seed(glossary, source)
+
+    assert seeded.entries[0].gender == "masculine"
+
+
+def test_leaves_a_translated_term_unclassified():
+    """The anchor only governs a name carried into Spanish UNCHANGED.
+
+    Once a term is translated, its Spanish gender is GRAMMATICAL and belongs
+    to the Spanish noun, not to whatever the English referent was. Measured on
+    the real book: "Concurrence", "Governance" and "Religion" are capitalised
+    institutions that never appear lowercase, so casing alone did not catch
+    them — and declaring "Concurrencia" masculine because the English noun sat
+    near "he" would override a correct agreement with a wrong one.
+
+    A character whose name IS translated loses its anchor to this rule. That
+    is the safe direction: unclassified, and still covered by the naming rule.
+    """
+    glossary = Glossary(
+        entries=[GlossaryEntry(term="Concurrence", translation="Concurrencia")]
+    )
+
+    seeded = _seed(glossary, _passage("Concurrence", "he", 25))
+
+    assert seeded.entries[0].gender is None
