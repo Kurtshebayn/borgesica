@@ -494,9 +494,25 @@ class TranslatorEngine:
         # (see the settling comment below). Keeping it would make
         # ``glossary_settlements`` report a person's edit as a correction the
         # mechanism made, corrupting the only measurement of it.
+        #
+        # ``gender`` goes the OTHER way and is carried over when the caller
+        # supplies none. It is a fact about the character, derived from the
+        # source, and an edit to a term's translation says nothing about it —
+        # nor can the CLI express one, so every hand edit would arrive with
+        # the default None and silently wipe the anchor, returning the run to
+        # the guessing this exists to stop. A caller that DOES supply a gender
+        # still wins: that is a human stating the fact, which is the only way
+        # a term below the seeding margin can ever get one.
         for entry in entries:
-            entry_map[normalize_term(entry.term).casefold()] = entry.model_copy(
-                update={"first_draw": None}
+            key = normalize_term(entry.term).casefold()
+            previous = entry_map.get(key)
+            carried = (
+                previous.gender
+                if entry.gender is None and previous is not None
+                else entry.gender
+            )
+            entry_map[key] = entry.model_copy(
+                update={"first_draw": None, "gender": carried}
             )
 
         updated, _dropped = sanitize_glossary(

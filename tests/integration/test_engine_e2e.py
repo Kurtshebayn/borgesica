@@ -444,3 +444,37 @@ def test_engine_e2e_fragment_cues_stay_aligned_per_cue(tmp_path):
         assert content_norm == f"[es] {source_text}", (
             f"cue {sub.index}: expected positional translation, got {content_norm!r}"
         )
+
+
+def test_engine_e2e_hand_edit_preserves_character_gender(tmp_path):
+    """A hand edit must not silently destroy a seeded gender.
+
+    The anchor is a FACT about the character, derived from the source. Editing
+    a term's translation says nothing about its gender, and the CLI cannot
+    supply one — so a caller's entry carrying the default None would wipe the
+    anchor and quietly return the run to guessing.
+
+    This is deliberately unlike first_draw, which IS cleared on a hand edit:
+    that field records what the VOTE committed, and an edit takes the term out
+    of the vote. Nothing about an edit takes the character out of its gender.
+    """
+    src = tmp_path / "source.srt"
+    _write_srt(src, num_cues=3)
+
+    engine, _, _ = _make_engine()
+    config = JobConfig(source_type=SourceType.SRT, model="fake", chunk_size=3)
+    job = engine.create_job(str(src), config)
+
+    engine.update_glossary(
+        job.id,
+        [GlossaryEntry(term="Caeror", translation="Caeror", gender="masculine")],
+    )
+    # A later edit that says nothing about gender — e.g. locking the term.
+    engine.update_glossary(
+        job.id,
+        [GlossaryEntry(term="Caeror", translation="Caeror", locked=True)],
+    )
+
+    entry = next(e for e in engine.get_glossary(job.id).entries if e.term == "Caeror")
+    assert entry.locked is True
+    assert entry.gender == "masculine", "hand edit wiped the seeded anchor"
