@@ -920,3 +920,82 @@ def test_gender_line_survives_a_budget_too_small_to_hold_it():
     line = _gender_line(glossary.render(budget_tokens=10))
 
     assert "Vis" in line
+
+
+# ---------------------------------------------------------------------------
+# Invented language — the glossary must not gloss a word out of the book
+#
+# Measured on job 9be143da (569 chunks, full book): "leathfhear", an insult in
+# the book's in-world language, appears 11 times in the English source. Chunk
+# 173 rendered it correctly AND proposed the glossary entry
+# "leathfhear -> medio hombre". From chunk 196 on, 9 of the remaining 10
+# occurrences were REPLACED by that gloss.
+#
+# The glossary is the vector, not the accident: once the entry exists it is
+# rendered into every later prompt as an arrow pair, which is an instruction to
+# substitute. The model obeys its own gloss. The prompt asked for it — "Add
+# ONLY proper nouns, invented terms..." followed by '"translation" MUST be its
+# Spanish rendering' — with nothing saying that for an invented word that
+# rendering is the word itself.
+# ---------------------------------------------------------------------------
+
+
+def _glossary_addition_rules(text: str) -> str:
+    """Return just the glossary_additions rule block, lowercased.
+
+    Scoped like the dialogue- and summary-rule tests: "invented", "term" and
+    "translation" all occur elsewhere in the prompt — "invented" appears in
+    this very block's first bullet — so asserting against the whole prompt
+    would pass before the rule is written at all.
+    """
+    start = text.index("Rules for glossary_additions:")
+    end = text.index("Rules for locked glossary terms", start)
+    return text[start:end].lower()
+
+
+def _addition_rules_for(source_type: SourceType) -> str:
+    from borgesica.domain.context import ContextManager
+
+    return _glossary_addition_rules(
+        ContextManager().build_system_prompt(
+            make_config(source_type=source_type), Glossary(), RollingSummary()
+        ).text
+    )
+
+
+def test_glossary_rules_keep_invented_language_verbatim():
+    """An in-world word's Spanish rendering is the word itself.
+
+    Without this the "DIRECTION IS FIXED" bullet reads as an unconditional
+    demand for a Spanish rendering of every invented term, and the only
+    rendering a model can produce for a word it cannot translate is a gloss.
+    """
+    rules = _addition_rules_for(SourceType.EPUB)
+
+    assert "verbatim" in rules, "rule must state the word is carried over unchanged"
+    assert "term itself" in rules, "rule must name what goes in translation"
+    assert "language" in rules, "rule must name the case that triggers it"
+
+
+def test_glossary_rules_route_the_literal_meaning_to_the_note():
+    """The meaning is not wrong, it is in the wrong FIELD.
+
+    The real entry carried a correct note ("Insulto en la lengua local;
+    literalmente 'medio hombre'") AND the same gloss in `translation`. Only the
+    second one reaches the model: `render` deliberately drops notes. So the
+    rule has to name `note` as the destination, not merely forbid the gloss.
+    """
+    rules = _addition_rules_for(SourceType.EPUB)
+
+    assert "meaning" in rules, "rule must name what is being redirected"
+    assert "note" in rules, "rule must name the field the meaning belongs in"
+
+
+def test_invented_language_rule_survives_for_srt_jobs():
+    """SRT carries its own task-description literal, and the two have drifted
+    before. Subtitles for invented-language fiction have the same defect."""
+    rules = _addition_rules_for(SourceType.SRT)
+
+    assert "verbatim" in rules
+    assert "term itself" in rules
+    assert "note" in rules
