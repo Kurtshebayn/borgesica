@@ -30,7 +30,6 @@ from borgesica.domain.quality import (
 )
 from tests.fakes import FakeTranslationProvider
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -546,3 +545,166 @@ def test_does_not_read_the_adverb_solo_as_agreement():
     assert detect_gender_defects("Siamun solo le había dicho eso.", cast) == []
     # The feminine form still marks agreement.
     assert len(detect_gender_defects("—Sola, Vis. Nadie más queda.", cast)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Deterministic do-not-translate detector — free, post-hoc, no provider calls
+#
+# The KEEP INVENTED LANGUAGE VERBATIM prompt rule asks the model not to
+# hispanicise an in-world word. Asking is not verifying: "Catenicus → Catenicus"
+# was present as an identity entry in EVERY job, and two older runs still
+# emitted "Catenico" (13b43ac6 ch401, afe326df ch405). This checks the promise
+# the identity entry makes.
+#
+# Measured on job 9be143da (569 chunks, 549 glossary entries, 278 of them
+# identity): 2 findings.
+#   - ch32  "Quintus" -> "Quinto"   — real, the defect this exists for
+#   - ch224 "iunctus" -> "iunctii"  — a Latin plural, the known FP class
+# ---------------------------------------------------------------------------
+
+
+def _in_world() -> "Glossary":
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    return Glossary(
+        entries=[
+            # Identity — must survive untouched.
+            GlossaryEntry(term="Quintus", translation="Quintus"),
+            GlossaryEntry(term="Catenicus", translation="Catenicus"),
+            # A real mapping — the glossary asks for exactly this change.
+            GlossaryEntry(term="Gleaner", translation="Segador"),
+        ]
+    )
+
+
+def test_flags_an_identity_term_hispanicised_away():
+    """Job 9be143da ch32: a rank name became "Quinto" in the translation."""
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    defects = detect_untranslated_defects(
+        "But there is a Quintus position to be had.",
+        "Pero hay un puesto de Quinto disponible.",
+        _in_world(),
+    )
+
+    assert [d.term for d in defects] == ["Quintus"]
+    assert defects[0].occurrences == 1
+
+
+def test_accepts_a_term_carried_over_unchanged():
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    assert detect_untranslated_defects(
+        "But there is a Quintus position to be had.",
+        "Pero hay un puesto de Quintus disponible.",
+        _in_world(),
+    ) == []
+
+
+def test_a_capitalisation_change_is_not_an_erasure():
+    """Job 9be143da ch222: Spanish moved the adjective after the noun, so the
+    in-world word opened the sentence and got a capital. The word is THERE.
+
+    Case-sensitive matching reported this as a defect, taking the detector's
+    precision on the real book from 1-in-2 down to 1-in-4. Matching is
+    case-insensitive for exactly this reason.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="kataht", translation="kataht")])
+
+    assert detect_untranslated_defects(
+        "Condescending kataht.", "Kataht condescendiente.", glossary
+    ) == []
+
+
+def test_ignores_a_mapping_entry():
+    """Only IDENTITY entries promise the word survives. A mapping asks for a
+    change, so the source term being gone is the rule working, not breaking.
+    """
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    assert detect_untranslated_defects(
+        "The Gleaner waited.", "El Segador esperaba.", _in_world()
+    ) == []
+
+
+def test_ignores_a_term_absent_from_this_chunk():
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    assert detect_untranslated_defects(
+        "Nothing notable here.", "Nada notable aqui.", _in_world()
+    ) == []
+
+
+def test_does_not_match_a_term_inside_a_longer_word():
+    """"Caten" is a substring of "Catenicus". Without word boundaries a chunk
+    naming only the longer term would report the shorter one as surviving —
+    and, worse, a translation dropping the longer one would look clean.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Caten", translation="Caten")])
+
+    defects = detect_untranslated_defects(
+        "He returned to Caten.", "Regreso a Catenicus.", glossary
+    )
+
+    assert [d.term for d in defects] == ["Caten"]
+
+
+def test_skips_a_term_that_is_ordinary_vocabulary():
+    """"Thrum" reached the glossary as an identity entry, but the source uses
+    "thrum" lowercase as a common noun — a low vibrating sound, correctly
+    translated. Unfiltered it produced 10 of 12 findings on the real book,
+    every one of them wrong.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Thrum", translation="Thrum")])
+
+    assert detect_untranslated_defects(
+        "There is a growling thrum of energy.",
+        "Hay un zumbido creciente de energia.",
+        glossary,
+        vocabulary=frozenset({"thrum"}),
+    ) == []
+
+
+def test_an_all_caps_heading_does_not_disqualify_a_name():
+    """The book sets chapter headings in capitals, so "CAEROR" appears all
+    through the source. Treating any case variant as evidence of a common noun
+    dropped Caeror, Caten, Catenicus and Livia — the very terms worth guarding.
+    Only a GENUINE lowercase use disqualifies, matching
+    ``character_gender_evidence``.
+    """
+    from borgesica.domain.quality import lowercase_vocabulary
+
+    vocabulary = lowercase_vocabulary("CAEROR SPOKE. Caeror waited. the thrum grew.")
+
+    assert "caeror" not in vocabulary
+    assert "thrum" in vocabulary
+    assert "the" in vocabulary
+
+
+def test_reports_every_occurrence_count_for_triage():
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    defects = detect_untranslated_defects(
+        "Quintus, then Quintus again.", "Quinto, y luego Quinto otra vez.", _in_world()
+    )
+
+    assert defects[0].occurrences == 2
+    assert "Quintus" in defects[0].excerpt
+
+
+def test_returns_nothing_without_identity_entries():
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Gleaner", translation="Segador")])
+
+    assert detect_untranslated_defects("Gleaner.", "Segador.", glossary) == []
