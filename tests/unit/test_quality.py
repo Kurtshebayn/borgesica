@@ -708,3 +708,96 @@ def test_returns_nothing_without_identity_entries():
     glossary = Glossary(entries=[GlossaryEntry(term="Gleaner", translation="Segador")])
 
     assert detect_untranslated_defects("Gleaner.", "Segador.", glossary) == []
+
+
+# ---------------------------------------------------------------------------
+# audit_chunks — both free detectors over a finished job
+#
+# Exists so the whole-book vocabulary is built ONCE and no caller can forget
+# to pass it. Forgetting is not a small mistake: on job 9be143da the filter is
+# the difference between 2 findings and 12.
+# ---------------------------------------------------------------------------
+
+
+def _audit_glossary() -> "Glossary":
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    return Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Quintus", translation="Quintus"),
+        ]
+    )
+
+
+def test_audit_reports_both_kinds_of_defect_with_their_chunk():
+    from borgesica.domain.quality import audit_chunks
+
+    findings = audit_chunks(
+        [
+            (7, "There is a Quintus position.", "Hay un puesto de Quinto."),
+            (9, "Easy, Vis.", "—Tranquila, Vis."),
+        ],
+        _audit_glossary(),
+    )
+
+    assert [(f.chunk_index, f.kind, f.term) for f in findings] == [
+        (7, "untranslated", "Quintus"),
+        (9, "gender", "Vis"),
+    ]
+
+
+def test_audit_builds_the_vocabulary_across_the_whole_book():
+    """The common-noun filter needs the WHOLE source, not one chunk.
+
+    Here the glossary carries "Thrum" as an identity entry, chunk 0 translates
+    it, and chunk 1 shows the source using "thrum" lowercase — ordinary
+    vocabulary. Auditing chunk 0 on its own would flag it. The book knows
+    better, and that is the whole reason this function exists rather than
+    leaving each caller to loop over the detectors itself.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import audit_chunks, detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Thrum", translation="Thrum")])
+    chunks = [
+        (0, "The Thrum answered.", "El zumbido respondio."),
+        (1, "a low thrum of energy", "un zumbido grave de energia"),
+    ]
+
+    # Without the book-wide vocabulary the same chunk is a finding.
+    assert len(detect_untranslated_defects(chunks[0][1], chunks[0][2], glossary)) == 1
+    assert audit_chunks(chunks, glossary) == []
+
+
+def test_audit_is_clean_on_a_faithful_translation():
+    from borgesica.domain.quality import audit_chunks
+
+    source = "There is a Quintus position. Easy, Vis."
+    translation = "Hay un puesto de Quintus. —Tranquilo, Vis."
+
+    assert audit_chunks([(0, source, translation)], _audit_glossary()) == []
+
+
+def test_audit_names_what_went_wrong_in_the_detail():
+    """A bare count is not actionable — triage needs the expected/found pair."""
+    from borgesica.domain.quality import audit_chunks
+
+    findings = audit_chunks([(3, "Easy, Vis.", "—Tranquila, Vis.")], _audit_glossary())
+
+    assert "masculine" in findings[0].detail
+    assert "feminine" in findings[0].detail
+    assert "tranquila" in findings[0].detail.casefold()
+
+
+def test_audit_needs_no_provider():
+    """The whole premise: a finished job is audited for free, as often as you
+    like. Guaranteed by the SIGNATURE rather than by convention — the same
+    argument ContextManager makes about prompt assembly taking no collaborator.
+    A provider parameter appearing here would make a 569-chunk audit billable.
+    """
+    import inspect
+
+    from borgesica.domain.quality import audit_chunks
+
+    assert list(inspect.signature(audit_chunks).parameters) == ["chunks", "glossary"]

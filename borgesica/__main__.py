@@ -30,6 +30,12 @@ Subcommands:
     status  <job_id>
              Lists FAILED chunk indices (if any) after the JSON job dump.
     cancel  <job_id>
+    audit   <job_id>
+             Runs the deterministic quality detectors over a job's stored
+             output and prints the findings as JSON. Makes NO provider calls,
+             so it is free and safe to repeat. Advisory: exits 0 even with
+             findings, and a zero result is not a clean bill of health —
+             the checks are structural, not semantic.
     glossary show   <job_id>
     glossary update <job_id> <term> <translation> [--lock]
 
@@ -62,6 +68,8 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -544,6 +552,38 @@ def _cmd_cancel(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         return 1
 
 
+def _cmd_audit(args: argparse.Namespace, engine: TranslatorEngine) -> int:
+    """Print the free detectors' findings for a job as JSON.
+
+    ADVISORY, and exits 0 even with findings — matching ``advisory_gate``,
+    which is documented as never raising. Both detectors buy precision with
+    recall and one carries a known false-positive class (a Latin plural read as
+    a vanished term), so failing the shell on a finding would get the command
+    switched off rather than the defect fixed.
+    """
+    try:
+        findings = engine.audit_job(args.job_id)
+        print(json.dumps([asdict(f) for f in findings], indent=2, ensure_ascii=False))
+        # Counts to stderr so they cannot corrupt the JSON on stdout — same
+        # split as `glossary show`.
+        if findings:
+            kinds = Counter(f.kind for f in findings)
+            detail = ", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items()))
+            print(f"NOTE: {len(findings)} finding(s): {detail}.", file=sys.stderr)
+        else:
+            print("NOTE: 0 findings.", file=sys.stderr)
+        # A zero result is not a clean bill of health, and a reader who is not
+        # told that will read it as one.
+        print(
+            "NOTE: deterministic checks only — no meaning was evaluated.",
+            file=sys.stderr,
+        )
+        return 0
+    except JobNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 def _cmd_glossary_show(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         glossary = engine.get_glossary(args.job_id)
@@ -800,6 +840,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cancel.add_argument("job_id", help="Job ID")
     _add_provider(p_cancel)
 
+    # audit — free, deterministic quality detectors over a finished job.
+    # Makes no provider calls, so it is safe to run repeatedly.
+    p_audit = sub.add_parser(
+        "audit", help="Report deterministic quality defects for a job (no API calls)"
+    )
+    p_audit.add_argument("job_id", help="Job ID")
+    _add_provider(p_audit)
+
     # glossary (sub-sub-commands)
     p_glossary = sub.add_parser("glossary", help="Inspect or edit the job glossary")
     gsub = p_glossary.add_subparsers(dest="glossary_command", metavar="<action>")
@@ -896,6 +944,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "status": _cmd_status,
         "cancel": _cmd_cancel,
+        "audit": _cmd_audit,
         "serve": _cmd_serve,
     }
 

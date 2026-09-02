@@ -38,6 +38,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from pydantic import ValidationError
@@ -600,3 +601,86 @@ def detect_untranslated_defects(
             )
         )
     return defects
+
+
+# ---------------------------------------------------------------------------
+# Whole-job audit — both free detectors, one pass
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AuditedDefect:
+    """One finding, tagged with the chunk and the detector that produced it.
+
+    The two detectors report different shapes (a gender disagreement names an
+    expectation and a marker; a vanished term names a count). They are
+    flattened into one record because the consumer is a reader triaging a
+    finished book, and a single ordered list is what that reader wants. `kind`
+    keeps the distinction that matters.
+    """
+
+    chunk_index: int
+    kind: str  # "untranslated" | "gender"
+    term: str
+    detail: str
+    excerpt: str
+
+
+def audit_chunks(
+    chunks: Sequence[tuple[int, str, str]],
+    glossary: Glossary,
+) -> list[AuditedDefect]:
+    """Run every FREE detector over a finished job's chunks.
+
+    Takes ``(chunk_index, source_text, translated_text)`` triples and returns
+    the findings in chunk order, untranslated terms before gender defects
+    within a chunk.
+
+    This exists to own the one thing a caller cannot get right by looping:
+    ``lowercase_vocabulary`` must be built from the WHOLE source, once. A
+    per-chunk vocabulary sees far too little text to recognise a common noun,
+    and skipping it entirely takes job 9be143da from 2 findings to 12 — ten of
+    them the word "thrum". Building it here makes the correct usage the only
+    usage, and costs one pass over the source rather than 569.
+
+    Makes ZERO provider calls, which is the premise: a finished 569-chunk book
+    can be audited as often as you like, including after a hand edit. The LLM
+    judge is the opposite trade and is not called here.
+
+    A ZERO RESULT IS NOT A CLEAN BILL OF HEALTH — both detectors buy precision
+    with recall, and neither reads meaning. See their own docstrings for what
+    each one cannot see.
+    """
+    vocabulary = lowercase_vocabulary("\n".join(source for _, source, _ in chunks))
+    findings: list[AuditedDefect] = []
+
+    for index, source, translation in chunks:
+        for term_defect in detect_untranslated_defects(
+            source, translation, glossary, vocabulary=vocabulary
+        ):
+            findings.append(
+                AuditedDefect(
+                    chunk_index=index,
+                    kind="untranslated",
+                    term=term_defect.term,
+                    detail=(
+                        f"{term_defect.occurrences} occurrence(s) in the source, "
+                        f"none in the translation"
+                    ),
+                    excerpt=term_defect.excerpt,
+                )
+            )
+        for gender_defect in detect_gender_defects(translation, glossary):
+            findings.append(
+                AuditedDefect(
+                    chunk_index=index,
+                    kind="gender",
+                    term=gender_defect.name,
+                    detail=(
+                        f"expected {gender_defect.expected}, found "
+                        f"{gender_defect.found} ({gender_defect.marker})"
+                    ),
+                    excerpt=gender_defect.excerpt,
+                )
+            )
+    return findings

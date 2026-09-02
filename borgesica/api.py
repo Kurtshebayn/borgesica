@@ -24,8 +24,10 @@ from borgesica.domain.errors import (
 )
 from borgesica.domain.glossary import (
     NullGlossaryExtractor,
+    character_gender_evidence,
     normalize_term,
     sanitize_glossary,
+    seed_character_gender,
     settlement_counts,
 )
 from borgesica.domain.models import (
@@ -50,6 +52,7 @@ from borgesica.domain.ports import (
     ProgressCallback,
     TranslationProvider,
 )
+from borgesica.domain.quality import AuditedDefect, audit_chunks
 
 
 class TranslatorEngine:
@@ -359,6 +362,65 @@ class TranslatorEngine:
             for c in chunks
             if c.status == ChunkStatus.DONE and not c.passed_validation
         )
+
+    # ------------------------------------------------------------------
+    # audit_job
+    # ------------------------------------------------------------------
+
+    def audit_job(self, job_id: str) -> list[AuditedDefect]:
+        """Run every FREE quality detector over a job's persisted output.
+
+        Makes ZERO provider calls and reads only what is already stored, so a
+        finished 569-chunk book can be audited as often as you like — after a
+        hand edit to the glossary, or years after the run. The LLM judge is the
+        opposite trade and is deliberately not called here.
+
+        Chunks with no translation are skipped. Auditing a PENDING chunk as
+        empty text would report every do-not-translate term in its source as
+        having vanished, so a half-finished job would drown in findings that
+        only mean "not translated yet". One consequence: on a partial job the
+        common-noun vocabulary is built from the translated prefix alone, which
+        is weaker than the whole book but still tens of thousands of words.
+
+        The character-gender anchor is DERIVED here and thrown away. A job that
+        predates the anchor stores no gender at all — 0 of 549 entries on job
+        9be143da — and ``detect_gender_defects`` skips every unclassified
+        character, so without this the audit reported zero gender defects on a
+        book that has four. Deriving costs 0.10s and no provider call on that
+        book's 1.5M characters, against 569 billable chunks to get the same
+        answer by re-running.
+
+        Nothing is persisted: a getter does not rewrite the database (see
+        ``_clean_glossary``), and a stored anchor can age out of agreement with
+        the source once a human edits an entry, while a derived one cannot.
+        ``seed_character_gender`` only fills entries with no gender, so a
+        stored or hand-chosen anchor always wins over the derived one.
+
+        Args:
+            job_id: ID of the job.
+
+        Returns:
+            Findings in chunk order. Empty means no detector fired, which is
+            NOT the same as a faithful translation — see ``audit_chunks``.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        chunks = sorted(self._checkpoint.load_chunks(job_id), key=lambda c: c.index)
+        translated = [
+            (c.index, c.source_text, c.translated_text)
+            for c in chunks
+            if c.translated_text is not None
+        ]
+        # The ENGLISH source, never the translation: a Spanish rendering
+        # already carries the fabricated agreement the anchor exists to
+        # correct, so reading it back would launder the defect into a fact.
+        evidence = character_gender_evidence(
+            "\n\n".join(source for _, source, _ in translated)
+        )
+        anchored = seed_character_gender(self._clean_glossary(job_id), evidence)
+        return audit_chunks(translated, anchored)
 
     # ------------------------------------------------------------------
     # get_glossary / update_glossary

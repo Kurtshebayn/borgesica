@@ -1033,3 +1033,117 @@ def test_reasoning_none_leaves_the_provider_untouched(monkeypatch):
 
 class _StubProvider:
     reasoning_effort = "none"
+
+
+# ---------------------------------------------------------------------------
+# audit — the two free detectors, exposed as a command
+#
+# Before this, detect_gender_defects and detect_untranslated_defects had no
+# caller anywhere in the shipped code. A defect could be detected for free and
+# there was no way to ask for it.
+# ---------------------------------------------------------------------------
+
+
+def _audit_engine():
+    """A fake engine holding one finished job with one defect of each kind."""
+    from datetime import UTC, datetime
+
+    from borgesica.adapters.readers.srt_reader import SrtReader
+    from borgesica.adapters.writers.srt_writer import SrtWriter
+    from borgesica.api import TranslatorEngine
+    from borgesica.domain.glossary import NullGlossaryExtractor
+    from borgesica.domain.models import (
+        Chunk,
+        ChunkStatus,
+        Glossary,
+        GlossaryEntry,
+        Job,
+        JobConfig,
+        SourceType,
+    )
+    from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
+
+    checkpoint = InMemoryCheckpointStore()
+    now = datetime.now(UTC)
+    checkpoint.save_job(Job(
+        id="job-1",
+        config=JobConfig(source_type=SourceType.SRT, model="fake"),
+        source_path="x.srt",
+        created_at=now,
+        updated_at=now,
+    ))
+    checkpoint.save_glossary("job-1", Glossary(entries=[
+        GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+        GlossaryEntry(term="Quintus", translation="Quintus"),
+    ]))
+    checkpoint.save_chunk("job-1", Chunk(
+        index=0, source_text="There is a Quintus position.",
+        translated_text="Hay un puesto de Quinto.", status=ChunkStatus.DONE,
+    ))
+    checkpoint.save_chunk("job-1", Chunk(
+        index=1, source_text="Easy, Vis.",
+        translated_text="—Tranquila, Vis.", status=ChunkStatus.DONE,
+    ))
+    return TranslatorEngine(
+        provider=FakeTranslationProvider(),
+        checkpoint=checkpoint,
+        readers={SourceType.SRT: SrtReader()},
+        writers={SourceType.SRT: SrtWriter()},
+        extractor=NullGlossaryExtractor(),
+    )
+
+
+def test_cli_audit_prints_findings_as_json(capsys: pytest.CaptureFixture) -> None:
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = _audit_engine()
+        exit_code = main(["audit", "job-1"])
+
+    findings = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert [(f["chunk_index"], f["kind"], f["term"]) for f in findings] == [
+        (0, "untranslated", "Quintus"),
+        (1, "gender", "Vis"),
+    ]
+    # The excerpt is what makes a finding actionable without reopening the book.
+    assert findings[0]["excerpt"]
+    assert "masculine" in findings[1]["detail"]
+
+
+def test_cli_audit_is_advisory_and_exits_zero_with_findings() -> None:
+    """Quality checks in this codebase are ADVISORY — ``advisory_gate`` is
+    documented as never raising. A command that failed the shell on a known
+    false-positive class (a Latin plural) would be turned off, not fixed.
+    """
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = _audit_engine()
+
+        assert main(["audit", "job-1"]) == 0
+
+
+def test_cli_audit_summarises_to_stderr(capsys: pytest.CaptureFixture) -> None:
+    """The count goes to stderr so it cannot corrupt the JSON on stdout —
+    same split as ``glossary show``."""
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = _audit_engine()
+        main(["audit", "job-1"])
+
+    captured = capsys.readouterr()
+
+    assert "2" in captured.err
+    json.loads(captured.out)  # stdout stays parseable
+
+
+def test_cli_audit_unknown_job_exits_non_zero(capsys: pytest.CaptureFixture) -> None:
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = _audit_engine()
+
+        assert main(["audit", "no-such-job"]) != 0
