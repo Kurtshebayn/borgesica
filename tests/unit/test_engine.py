@@ -1187,3 +1187,187 @@ def test_update_glossary_drops_the_first_draw_it_overrides(tmp_path: Path) -> No
     assert (stored.translation, stored.first_draw) == ("Derecho de Cuna", None)
     counts = engine.glossary_settlements(job.id)
     assert (counts.changed, counts.confirmed) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# audit_job — the two free detectors over a finished job
+#
+# Both detectors were library functions with no caller: nothing in the engine,
+# the CLI or serve ever ran them, so a finished book carried its defects with
+# no way to see them short of a hand-written script. This is the caller.
+# ---------------------------------------------------------------------------
+
+
+def _audited_job(tmp_path: Path):
+    """A job whose persisted chunks carry one defect of each kind."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, _, checkpoint = _make_engine()
+    job = engine.create_job(srt_path, _make_config())
+    checkpoint.save_glossary(
+        job.id,
+        Glossary(
+            entries=[
+                GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+                GlossaryEntry(term="Quintus", translation="Quintus"),
+            ]
+        ),
+    )
+    checkpoint.save_chunk(job.id, Chunk(
+        index=0, source_text="There is a Quintus position.",
+        translated_text="Hay un puesto de Quinto.", status=ChunkStatus.DONE,
+    ))
+    checkpoint.save_chunk(job.id, Chunk(
+        index=1, source_text="Easy, Vis.",
+        translated_text="—Tranquila, Vis.", status=ChunkStatus.DONE,
+    ))
+    return engine, job
+
+
+def test_audit_job_reports_both_detectors_over_persisted_chunks(tmp_path: Path) -> None:
+    engine, job = _audited_job(tmp_path)
+
+    findings = engine.audit_job(job.id)
+
+    assert [(f.chunk_index, f.kind, f.term) for f in findings] == [
+        (0, "untranslated", "Quintus"),
+        (1, "gender", "Vis"),
+    ]
+
+
+def test_audit_job_skips_chunks_with_no_translation(tmp_path: Path) -> None:
+    """A PENDING chunk has translated_text=None. Auditing it as "" would
+    report every do-not-translate term in its source as vanished — a partial
+    run would drown in findings that only mean "not translated yet".
+    """
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, _, checkpoint = _make_engine()
+    job = engine.create_job(srt_path, _make_config())
+    checkpoint.save_glossary(
+        job.id, Glossary(entries=[GlossaryEntry(term="Quintus", translation="Quintus")])
+    )
+    checkpoint.save_chunk(job.id, Chunk(
+        index=0, source_text="A Quintus position.", status=ChunkStatus.PENDING,
+    ))
+
+    assert engine.audit_job(job.id) == []
+
+
+def test_audit_job_raises_for_an_unknown_job() -> None:
+    engine, _, _ = _make_engine()
+
+    with pytest.raises(JobNotFoundError):
+        engine.audit_job("no-such-job")
+
+
+def test_audit_job_makes_no_provider_calls(tmp_path: Path) -> None:
+    """The premise: auditing a 569-chunk book is free and repeatable."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, provider, checkpoint = _make_engine()
+    job = engine.create_job(srt_path, _make_config())
+    checkpoint.save_chunk(job.id, Chunk(
+        index=0, source_text="A Quintus position.",
+        translated_text="Un puesto de Quinto.", status=ChunkStatus.DONE,
+    ))
+    before = len(provider.call_log)
+
+    engine.audit_job(job.id)
+
+    assert len(provider.call_log) == before
+
+
+# ---------------------------------------------------------------------------
+# audit_job derives the gender anchor itself
+#
+# Job 9be143da stores 0 of 549 entries with a gender: the anchor postdates that
+# run. detect_gender_defects correctly skips every unclassified character, so
+# the audit reported ZERO gender defects on a book that has four — and a zero
+# in that column reads as "clean" rather than "nothing to compare against".
+#
+# Deriving it costs 0.10s and no provider call on the real 1.5M-character book,
+# against 569 billable chunks to get it by re-running. The audit already holds
+# the English source and the glossary, so it derives the anchor per call and
+# throws it away: nothing is persisted, and a stored gender always wins.
+# ---------------------------------------------------------------------------
+
+_GENDERED_SENTENCES = 25
+
+
+def _gendered_source(name: str, pronoun: str) -> str:
+    """Source text carrying enough pronoun evidence to clear the seeding margin."""
+    return "\n\n".join(
+        f"{name} paused and {pronoun} nodded." for _ in range(_GENDERED_SENTENCES)
+    )
+
+
+def _job_with_unanchored_glossary(tmp_path: Path, *, stored_gender=None):
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, _, checkpoint = _make_engine()
+    job = engine.create_job(srt_path, _make_config())
+    checkpoint.save_glossary(job.id, Glossary(entries=[
+        GlossaryEntry(term="Vis", translation="Vis", gender=stored_gender),
+    ]))
+    checkpoint.save_chunk(job.id, Chunk(
+        index=0,
+        source_text=_gendered_source("Vis", "he"),
+        translated_text="—Tranquila, Vis.",
+        status=ChunkStatus.DONE,
+    ))
+    return engine, job, checkpoint
+
+
+def test_audit_job_anchors_gender_from_the_source(tmp_path: Path) -> None:
+    """The stored glossary has no gender; the English source says masculine."""
+    engine, job, _ = _job_with_unanchored_glossary(tmp_path)
+
+    findings = engine.audit_job(job.id)
+
+    assert [(f.kind, f.term) for f in findings] == [("gender", "Vis")]
+    assert "masculine" in findings[0].detail
+
+
+def test_audit_job_does_not_persist_the_anchor(tmp_path: Path) -> None:
+    """Derived per call and thrown away. Persisting would introduce state that
+    can age: a hand-edited entry could end up contradicting the source, and a
+    getter has no business rewriting the database (see _clean_glossary).
+    """
+    engine, job, checkpoint = _job_with_unanchored_glossary(tmp_path)
+
+    engine.audit_job(job.id)
+
+    assert all(e.gender is None for e in checkpoint.load_glossary(job.id).entries)
+    assert all(e.gender is None for e in engine.get_glossary(job.id).entries)
+
+
+def test_audit_job_keeps_a_stored_gender_over_the_derived_one(tmp_path: Path) -> None:
+    """A stored gender was seeded from a fuller text or chosen by a human, and
+    re-counting pronouns must not overrule either. Here the source says
+    masculine and the stored entry says feminine, so the feminine translation
+    agrees and there is nothing to report.
+    """
+    engine, job, _ = _job_with_unanchored_glossary(tmp_path, stored_gender="feminine")
+
+    assert engine.audit_job(job.id) == []
+
+
+def test_audit_job_reads_evidence_from_english_not_the_translation(
+    tmp_path: Path,
+) -> None:
+    """Seeding from a Spanish rendering would launder the fabricated agreement
+    into a fact — the exact defect the anchor exists to correct. Here the
+    English carries no pronouns at all, so no anchor is derived however
+    gendered the translation looks.
+    """
+    srt_path = _make_srt_fixture(tmp_path, num_cues=3)
+    engine, _, checkpoint = _make_engine()
+    job = engine.create_job(srt_path, _make_config())
+    checkpoint.save_glossary(
+        job.id, Glossary(entries=[GlossaryEntry(term="Vis", translation="Vis")])
+    )
+    checkpoint.save_chunk(job.id, Chunk(
+        index=0,
+        source_text="Vis waited. " * _GENDERED_SENTENCES,
+        translated_text="—Tranquila, Vis. " * _GENDERED_SENTENCES,
+        status=ChunkStatus.DONE,
+    ))
+
+    assert engine.audit_job(job.id) == []

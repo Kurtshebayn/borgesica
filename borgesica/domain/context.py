@@ -172,6 +172,12 @@ encountered in this chunk.
 - DIRECTION IS FIXED: "term" MUST be the ENGLISH string exactly as it appears \
 in the source, and "translation" MUST be its Spanish rendering. NEVER reverse \
 them.
+- KEEP INVENTED LANGUAGE VERBATIM: when a term belongs to a fictional or \
+in-world language, its Spanish rendering IS the term itself — copy it into \
+"translation" character for character. Its literal meaning is EXPLANATION for \
+a human reader: put that in "note", NEVER in "translation". An entry that \
+glosses the word instructs every later chunk to REPLACE it, and the invented \
+term then disappears from the book.
 - Do NOT add an entry whose "term" is Spanish text you just produced. Your own \
 output is never a source term.
 - Do NOT add common English or Spanish vocabulary.
@@ -248,6 +254,12 @@ encountered in this chunk.
 - DIRECTION IS FIXED: "term" MUST be the ENGLISH string exactly as it appears \
 in the source, and "translation" MUST be its Spanish rendering. NEVER reverse \
 them.
+- KEEP INVENTED LANGUAGE VERBATIM: when a term belongs to a fictional or \
+in-world language, its Spanish rendering IS the term itself — copy it into \
+"translation" character for character. Its literal meaning is EXPLANATION for \
+a human reader: put that in "note", NEVER in "translation". An entry that \
+glosses the word instructs every later chunk to REPLACE it, and the invented \
+term then disappears from the book.
 - Do NOT add an entry whose "term" is Spanish text you just produced. Your own \
 output is never a source term.
 - Do NOT add common English or Spanish vocabulary.

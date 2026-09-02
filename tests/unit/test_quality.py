@@ -30,7 +30,6 @@ from borgesica.domain.quality import (
 )
 from tests.fakes import FakeTranslationProvider
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -546,3 +545,259 @@ def test_does_not_read_the_adverb_solo_as_agreement():
     assert detect_gender_defects("Siamun solo le había dicho eso.", cast) == []
     # The feminine form still marks agreement.
     assert len(detect_gender_defects("—Sola, Vis. Nadie más queda.", cast)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Deterministic do-not-translate detector — free, post-hoc, no provider calls
+#
+# The KEEP INVENTED LANGUAGE VERBATIM prompt rule asks the model not to
+# hispanicise an in-world word. Asking is not verifying: "Catenicus → Catenicus"
+# was present as an identity entry in EVERY job, and two older runs still
+# emitted "Catenico" (13b43ac6 ch401, afe326df ch405). This checks the promise
+# the identity entry makes.
+#
+# Measured on job 9be143da (569 chunks, 549 glossary entries, 278 of them
+# identity): 2 findings.
+#   - ch32  "Quintus" -> "Quinto"   — real, the defect this exists for
+#   - ch224 "iunctus" -> "iunctii"  — a Latin plural, the known FP class
+# ---------------------------------------------------------------------------
+
+
+def _in_world() -> "Glossary":
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    return Glossary(
+        entries=[
+            # Identity — must survive untouched.
+            GlossaryEntry(term="Quintus", translation="Quintus"),
+            GlossaryEntry(term="Catenicus", translation="Catenicus"),
+            # A real mapping — the glossary asks for exactly this change.
+            GlossaryEntry(term="Gleaner", translation="Segador"),
+        ]
+    )
+
+
+def test_flags_an_identity_term_hispanicised_away():
+    """Job 9be143da ch32: a rank name became "Quinto" in the translation."""
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    defects = detect_untranslated_defects(
+        "But there is a Quintus position to be had.",
+        "Pero hay un puesto de Quinto disponible.",
+        _in_world(),
+    )
+
+    assert [d.term for d in defects] == ["Quintus"]
+    assert defects[0].occurrences == 1
+
+
+def test_accepts_a_term_carried_over_unchanged():
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    assert detect_untranslated_defects(
+        "But there is a Quintus position to be had.",
+        "Pero hay un puesto de Quintus disponible.",
+        _in_world(),
+    ) == []
+
+
+def test_a_capitalisation_change_is_not_an_erasure():
+    """Job 9be143da ch222: Spanish moved the adjective after the noun, so the
+    in-world word opened the sentence and got a capital. The word is THERE.
+
+    Case-sensitive matching reported this as a defect, taking the detector's
+    precision on the real book from 1-in-2 down to 1-in-4. Matching is
+    case-insensitive for exactly this reason.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="kataht", translation="kataht")])
+
+    assert detect_untranslated_defects(
+        "Condescending kataht.", "Kataht condescendiente.", glossary
+    ) == []
+
+
+def test_ignores_a_mapping_entry():
+    """Only IDENTITY entries promise the word survives. A mapping asks for a
+    change, so the source term being gone is the rule working, not breaking.
+    """
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    assert detect_untranslated_defects(
+        "The Gleaner waited.", "El Segador esperaba.", _in_world()
+    ) == []
+
+
+def test_ignores_a_term_absent_from_this_chunk():
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    assert detect_untranslated_defects(
+        "Nothing notable here.", "Nada notable aqui.", _in_world()
+    ) == []
+
+
+def test_does_not_match_a_term_inside_a_longer_word():
+    """"Caten" is a substring of "Catenicus". Without word boundaries a chunk
+    naming only the longer term would report the shorter one as surviving —
+    and, worse, a translation dropping the longer one would look clean.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Caten", translation="Caten")])
+
+    defects = detect_untranslated_defects(
+        "He returned to Caten.", "Regreso a Catenicus.", glossary
+    )
+
+    assert [d.term for d in defects] == ["Caten"]
+
+
+def test_skips_a_term_that_is_ordinary_vocabulary():
+    """"Thrum" reached the glossary as an identity entry, but the source uses
+    "thrum" lowercase as a common noun — a low vibrating sound, correctly
+    translated. Unfiltered it produced 10 of 12 findings on the real book,
+    every one of them wrong.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Thrum", translation="Thrum")])
+
+    assert detect_untranslated_defects(
+        "There is a growling thrum of energy.",
+        "Hay un zumbido creciente de energia.",
+        glossary,
+        vocabulary=frozenset({"thrum"}),
+    ) == []
+
+
+def test_an_all_caps_heading_does_not_disqualify_a_name():
+    """The book sets chapter headings in capitals, so "CAEROR" appears all
+    through the source. Treating any case variant as evidence of a common noun
+    dropped Caeror, Caten, Catenicus and Livia — the very terms worth guarding.
+    Only a GENUINE lowercase use disqualifies, matching
+    ``character_gender_evidence``.
+    """
+    from borgesica.domain.quality import lowercase_vocabulary
+
+    vocabulary = lowercase_vocabulary("CAEROR SPOKE. Caeror waited. the thrum grew.")
+
+    assert "caeror" not in vocabulary
+    assert "thrum" in vocabulary
+    assert "the" in vocabulary
+
+
+def test_reports_every_occurrence_count_for_triage():
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    defects = detect_untranslated_defects(
+        "Quintus, then Quintus again.", "Quinto, y luego Quinto otra vez.", _in_world()
+    )
+
+    assert defects[0].occurrences == 2
+    assert "Quintus" in defects[0].excerpt
+
+
+def test_returns_nothing_without_identity_entries():
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Gleaner", translation="Segador")])
+
+    assert detect_untranslated_defects("Gleaner.", "Segador.", glossary) == []
+
+
+# ---------------------------------------------------------------------------
+# audit_chunks — both free detectors over a finished job
+#
+# Exists so the whole-book vocabulary is built ONCE and no caller can forget
+# to pass it. Forgetting is not a small mistake: on job 9be143da the filter is
+# the difference between 2 findings and 12.
+# ---------------------------------------------------------------------------
+
+
+def _audit_glossary() -> "Glossary":
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    return Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Quintus", translation="Quintus"),
+        ]
+    )
+
+
+def test_audit_reports_both_kinds_of_defect_with_their_chunk():
+    from borgesica.domain.quality import audit_chunks
+
+    findings = audit_chunks(
+        [
+            (7, "There is a Quintus position.", "Hay un puesto de Quinto."),
+            (9, "Easy, Vis.", "—Tranquila, Vis."),
+        ],
+        _audit_glossary(),
+    )
+
+    assert [(f.chunk_index, f.kind, f.term) for f in findings] == [
+        (7, "untranslated", "Quintus"),
+        (9, "gender", "Vis"),
+    ]
+
+
+def test_audit_builds_the_vocabulary_across_the_whole_book():
+    """The common-noun filter needs the WHOLE source, not one chunk.
+
+    Here the glossary carries "Thrum" as an identity entry, chunk 0 translates
+    it, and chunk 1 shows the source using "thrum" lowercase — ordinary
+    vocabulary. Auditing chunk 0 on its own would flag it. The book knows
+    better, and that is the whole reason this function exists rather than
+    leaving each caller to loop over the detectors itself.
+    """
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import audit_chunks, detect_untranslated_defects
+
+    glossary = Glossary(entries=[GlossaryEntry(term="Thrum", translation="Thrum")])
+    chunks = [
+        (0, "The Thrum answered.", "El zumbido respondio."),
+        (1, "a low thrum of energy", "un zumbido grave de energia"),
+    ]
+
+    # Without the book-wide vocabulary the same chunk is a finding.
+    assert len(detect_untranslated_defects(chunks[0][1], chunks[0][2], glossary)) == 1
+    assert audit_chunks(chunks, glossary) == []
+
+
+def test_audit_is_clean_on_a_faithful_translation():
+    from borgesica.domain.quality import audit_chunks
+
+    source = "There is a Quintus position. Easy, Vis."
+    translation = "Hay un puesto de Quintus. —Tranquilo, Vis."
+
+    assert audit_chunks([(0, source, translation)], _audit_glossary()) == []
+
+
+def test_audit_names_what_went_wrong_in_the_detail():
+    """A bare count is not actionable — triage needs the expected/found pair."""
+    from borgesica.domain.quality import audit_chunks
+
+    findings = audit_chunks([(3, "Easy, Vis.", "—Tranquila, Vis.")], _audit_glossary())
+
+    assert "masculine" in findings[0].detail
+    assert "feminine" in findings[0].detail
+    assert "tranquila" in findings[0].detail.casefold()
+
+
+def test_audit_needs_no_provider():
+    """The whole premise: a finished job is audited for free, as often as you
+    like. Guaranteed by the SIGNATURE rather than by convention — the same
+    argument ContextManager makes about prompt assembly taking no collaborator.
+    A provider parameter appearing here would make a 569-chunk audit billable.
+    """
+    import inspect
+
+    from borgesica.domain.quality import audit_chunks
+
+    assert list(inspect.signature(audit_chunks).parameters) == ["chunks", "glossary"]

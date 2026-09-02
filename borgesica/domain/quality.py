@@ -38,6 +38,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from pydantic import ValidationError
@@ -481,3 +482,205 @@ def detect_gender_defects(text: str, glossary: Glossary) -> list[GenderDefect]:
                 )
             )
     return defects
+
+
+# ---------------------------------------------------------------------------
+# Deterministic do-not-translate detector
+# ---------------------------------------------------------------------------
+#
+# Same shape as the gender detector above: post-hoc, free, ZERO provider calls,
+# reading only what is already persisted (chunks.source_text and
+# chunks.translated_text).
+#
+# It exists because the KEEP INVENTED LANGUAGE VERBATIM prompt rule is an
+# INSTRUCTION, not a guarantee. "Catenicus → Catenicus" sat in the glossary of
+# every job as an identity entry — which renders as a DO NOT TRANSLATE line —
+# and two runs still emitted "Catenico" anyway. An identity entry makes a
+# checkable promise; this is the check.
+
+# Word characters on either side of a term, so "Caten" does not match inside
+# "Catenicus". Matching is CASE-INSENSITIVE: Spanish word order routinely moves
+# a term to the front of its sentence and capitalises it, and a capital is not
+# an erasure. Case-sensitive matching cut precision on the real book from one
+# finding in two to one in four.
+_TERM_BOUNDARY = (r"(?<!\w)", r"(?!\w)")
+
+_SOURCE_WORD = re.compile(r"[A-Za-z][A-Za-z'\u2019]*")
+
+
+def lowercase_vocabulary(source_text: str) -> frozenset[str]:
+    """Return every word the source ever uses in genuine lowercase.
+
+    Separate from the detector for the reason ``character_gender_evidence`` is
+    separate from ``seed_character_gender``: it is the expensive half, the
+    source never changes during a run, and the answer is the same for all 569
+    chunks.
+
+    Only a GENUINE lowercase spelling counts. Treating any case variant as
+    evidence looked equivalent and was not: the book sets chapter headings in
+    capitals, so "CAEROR" appears throughout, and an upper-case test dropped
+    Caeror, Caten, Catenicus and Livia from the guarded set — the exact terms
+    worth guarding. This is the same rule, and the same reasoning, as the
+    common-noun filter in ``character_gender_evidence``.
+    """
+    return frozenset(
+        match.group()
+        for match in _SOURCE_WORD.finditer(source_text)
+        if match.group().islower()
+    )
+
+
+@dataclass(frozen=True)
+class UntranslatedDefect:
+    """One place a do-not-translate term failed to survive into the output."""
+
+    term: str
+    occurrences: int
+    excerpt: str
+
+
+def detect_untranslated_defects(
+    source: str,
+    translation: str,
+    glossary: Glossary,
+    *,
+    vocabulary: frozenset[str] = frozenset(),
+) -> list[UntranslatedDefect]:
+    """Return every identity glossary term that vanished from the translation.
+
+    Only IDENTITY entries (term == translation once normalised) are checked.
+    Those are the entries that promise the word is carried over unchanged; a
+    MAPPING asks for a change, so the source term being absent is that rule
+    working rather than breaking.
+
+    ``vocabulary`` is the whole book's lowercase words, from
+    ``lowercase_vocabulary``. A capitalised term whose lowercase spelling the
+    source also uses is ordinary vocabulary that reached the glossary by
+    mistake, and translating it is correct. Passing nothing skips the filter
+    and is much noisier: on the real book "Thrum" alone — a low vibrating
+    sound, used lowercase throughout — produced 10 of 12 findings, every one
+    of them wrong.
+
+    Measured on job 9be143da (569 chunks, 278 identity entries of 549): TWO
+    findings.
+      - ch32  "Quintus" rendered "Quinto" — the defect this exists for, the
+        same hispanicisation that produced "Catenico" in two earlier runs.
+      - ch224 "iunctus" rendered "iunctii" — a Latin plural, and the known
+        false-positive class. INFLECTION is not erasure, but separating the
+        two needs a stemmer this domain module has no business carrying, and
+        one false positive in a whole book is cheap to dismiss by eye.
+
+    Like the gender detector, this FLAGS and never retries: a retry would feed
+    the model the same glossary and reproduce the same output. It also shares
+    that detector's limit — a zero result means no identity term disappeared,
+    not that the translation is faithful.
+    """
+    before, after = _TERM_BOUNDARY
+    defects: list[UntranslatedDefect] = []
+
+    for entry in glossary.entries:
+        term = normalize_term(entry.term)
+        if not term or term != normalize_term(entry.translation):
+            continue
+        if term.lower() != term and term.lower() in vocabulary:
+            continue
+
+        pattern = re.compile(before + re.escape(term) + after, re.IGNORECASE)
+        matches = pattern.findall(source)
+        if not matches or pattern.search(translation):
+            continue
+
+        first = pattern.search(source)
+        assert first is not None  # `matches` is non-empty
+        start = max(0, first.start() - 40)
+        defects.append(
+            UntranslatedDefect(
+                term=term,
+                occurrences=len(matches),
+                excerpt=" ".join(source[start:first.end() + 40].split()),
+            )
+        )
+    return defects
+
+
+# ---------------------------------------------------------------------------
+# Whole-job audit — both free detectors, one pass
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AuditedDefect:
+    """One finding, tagged with the chunk and the detector that produced it.
+
+    The two detectors report different shapes (a gender disagreement names an
+    expectation and a marker; a vanished term names a count). They are
+    flattened into one record because the consumer is a reader triaging a
+    finished book, and a single ordered list is what that reader wants. `kind`
+    keeps the distinction that matters.
+    """
+
+    chunk_index: int
+    kind: str  # "untranslated" | "gender"
+    term: str
+    detail: str
+    excerpt: str
+
+
+def audit_chunks(
+    chunks: Sequence[tuple[int, str, str]],
+    glossary: Glossary,
+) -> list[AuditedDefect]:
+    """Run every FREE detector over a finished job's chunks.
+
+    Takes ``(chunk_index, source_text, translated_text)`` triples and returns
+    the findings in chunk order, untranslated terms before gender defects
+    within a chunk.
+
+    This exists to own the one thing a caller cannot get right by looping:
+    ``lowercase_vocabulary`` must be built from the WHOLE source, once. A
+    per-chunk vocabulary sees far too little text to recognise a common noun,
+    and skipping it entirely takes job 9be143da from 2 findings to 12 — ten of
+    them the word "thrum". Building it here makes the correct usage the only
+    usage, and costs one pass over the source rather than 569.
+
+    Makes ZERO provider calls, which is the premise: a finished 569-chunk book
+    can be audited as often as you like, including after a hand edit. The LLM
+    judge is the opposite trade and is not called here.
+
+    A ZERO RESULT IS NOT A CLEAN BILL OF HEALTH — both detectors buy precision
+    with recall, and neither reads meaning. See their own docstrings for what
+    each one cannot see.
+    """
+    vocabulary = lowercase_vocabulary("\n".join(source for _, source, _ in chunks))
+    findings: list[AuditedDefect] = []
+
+    for index, source, translation in chunks:
+        for term_defect in detect_untranslated_defects(
+            source, translation, glossary, vocabulary=vocabulary
+        ):
+            findings.append(
+                AuditedDefect(
+                    chunk_index=index,
+                    kind="untranslated",
+                    term=term_defect.term,
+                    detail=(
+                        f"{term_defect.occurrences} occurrence(s) in the source, "
+                        f"none in the translation"
+                    ),
+                    excerpt=term_defect.excerpt,
+                )
+            )
+        for gender_defect in detect_gender_defects(translation, glossary):
+            findings.append(
+                AuditedDefect(
+                    chunk_index=index,
+                    kind="gender",
+                    term=gender_defect.name,
+                    detail=(
+                        f"expected {gender_defect.expected}, found "
+                        f"{gender_defect.found} ({gender_defect.marker})"
+                    ),
+                    excerpt=gender_defect.excerpt,
+                )
+            )
+    return findings

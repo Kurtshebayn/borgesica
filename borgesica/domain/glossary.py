@@ -67,13 +67,20 @@ Return your response as a JSON object with EXACTLY the following fields:
     "translation": "",
     "summary_update": "Terminology extraction complete.",
     "glossary_additions": [
-      {"term": "<source term>", "translation": "<suggested Spanish rendering>", \
-"locked": false, "note": "<brief context or etymology>"}
+      {"term": "<source term>", "translation": "<Spanish rendering, or the \
+term itself when it must not be translated>", "locked": false, \
+"note": "<brief context; the literal meaning when the term is left as is>"}
     ]
   }
 
 Rules:
 - Include ONLY terms a translator needs to handle consistently.
+- KEEP INVENTED LANGUAGE VERBATIM: when a term belongs to a fictional or \
+in-world language, or is a proper noun with no established Spanish form, its \
+rendering IS the term itself — copy it into "translation" character for \
+character. Its literal meaning is EXPLANATION: put that in "note", NEVER in \
+"translation". A glossed entry instructs the translator to REPLACE the word \
+everywhere it appears.
 - Do NOT include common English or Spanish vocabulary.
 - If no notable terms are found, return an empty glossary_additions list.
 - The "translation" field must be an empty string for this extraction task."""

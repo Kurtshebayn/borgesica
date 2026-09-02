@@ -1113,3 +1113,31 @@ def test_leaves_a_translated_term_unclassified():
     seeded = _seed(glossary, _passage("Concurrence", "he", 25))
 
     assert seeded.entries[0].gender is None
+
+
+# ---------------------------------------------------------------------------
+# Invented language — the seeding prompt must not ask for a gloss
+#
+# The mid-run rule in the task description covers terms the TRANSLATOR
+# proposes. The seeded glossary comes from a different prompt entirely, and it
+# asks for a "suggested Spanish rendering" plus a note of "context or
+# etymology" — which is exactly the shape that produced
+# "leathfhear -> medio hombre" with the etymology alongside it. A rule fixed in
+# only one of the two prompts leaves the other free to reintroduce the entry.
+# ---------------------------------------------------------------------------
+
+
+def test_extraction_prompt_keeps_invented_language_verbatim():
+    """The seeder must record an in-world word as itself, not as its meaning.
+
+    Both prompts have to carry this rule: seeding happens BEFORE any
+    translation spend, so an entry created here is injected into every chunk of
+    the run from the very first call.
+    """
+    from borgesica.domain.glossary import _EXTRACTION_SYSTEM_PROMPT
+
+    prompt = _EXTRACTION_SYSTEM_PROMPT.lower()
+
+    assert "verbatim" in prompt, "prompt must state the word is carried over unchanged"
+    assert "term itself" in prompt, "prompt must name what goes in translation"
+    assert "meaning" in prompt, "prompt must redirect the literal meaning"
