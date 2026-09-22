@@ -3607,3 +3607,58 @@ def test_character_gender_is_not_invented_for_a_thinly_evidenced_name():
     persisted = {e.term: e for e in store.load_glossary(job.id).entries}
     assert persisted["Tara"].gender is None
     assert "CHARACTER GENDER" not in provider.call_log[-1][0]
+
+
+# ===========================================================================
+# 22. Reflective critique/revise system prompts must state the placeholder
+#     preservation rule (they operate on placeholder-bearing text — see
+#     TranslationOrchestrator module docstring step 6 — but never mentioned
+#     markup before this fix).
+# ===========================================================================
+
+
+def test_critique_system_states_placeholder_rule():
+    """The critique step's system prompt must instruct the reviewer that
+    placeholder markers are not itself a defect to flag."""
+    from borgesica.domain.orchestrator import _CRITIQUE_SYSTEM
+
+    assert "⟦" in _CRITIQUE_SYSTEM, (
+        "critique system prompt must show the placeholder marker syntax"
+    )
+    assert "verbatim" in _CRITIQUE_SYSTEM.lower(), (
+        "critique system prompt must state placeholders must survive verbatim"
+    )
+    assert "defect" in _CRITIQUE_SYSTEM.lower(), (
+        "critique system prompt must tell the reviewer not to flag placeholders "
+        "as a translation defect"
+    )
+
+
+def test_revise_system_states_placeholder_rule():
+    """The revise step's system prompt must instruct the model that
+    placeholders must come back unchanged."""
+    from borgesica.domain.orchestrator import _REVISE_SYSTEM
+
+    assert "⟦" in _REVISE_SYSTEM, (
+        "revise system prompt must show the placeholder marker syntax"
+    )
+    assert "verbatim" in _REVISE_SYSTEM.lower(), (
+        "revise system prompt must state placeholders must survive verbatim"
+    )
+
+
+def test_reflective_prompts_share_one_placeholder_rule_source():
+    """Both reflective system prompts must reuse the SAME wording as
+    context.INLINE_TAG_RULES rather than each carrying its own paraphrase
+    that could silently drift out of sync with the primary-path rules."""
+    from borgesica.domain.context import INLINE_TAG_RULES
+    from borgesica.domain.orchestrator import _CRITIQUE_SYSTEM, _REVISE_SYSTEM
+
+    assert INLINE_TAG_RULES in _CRITIQUE_SYSTEM, (
+        "critique system prompt must embed the shared INLINE_TAG_RULES text "
+        "verbatim, not a second divergent description"
+    )
+    assert INLINE_TAG_RULES in _REVISE_SYSTEM, (
+        "revise system prompt must embed the shared INLINE_TAG_RULES text "
+        "verbatim, not a second divergent description"
+    )
