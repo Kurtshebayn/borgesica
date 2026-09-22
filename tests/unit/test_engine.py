@@ -704,18 +704,23 @@ def test_failed_chunk_indices_returns_sorted_failed_indices(tmp_path: Path) -> N
 
     class MismatchOn25Provider(FakeTranslationProvider):
         def translate(self, system: str, user: str, model: str, segment_count: int | None = None):
+            from borgesica.domain.errors import MalformedOutput
+            from borgesica.domain.models import TranslationResult, Usage
+
             self.call_log.append((system, user, model))
             if "Cue 3 " in user or "Cue 6 " in user:  # chunk indices 2 and 5 (1-based cues 3, 6)
-                unit = TranslationUnit(
-                    translation="<i>Always mismatched</i>",
-                    summary_update="Summary.",
+                # These cues carry no inline tags, so there is no placeholder
+                # id to ever mismatch on under the placeholder-based primary
+                # path — raising is the tag-independent way to force FAILED.
+                raise MalformedOutput(
+                    job_id="fake-job",
+                    chunk_index=len(self.call_log) - 1,
+                    usage=Usage(input_tokens=5, output_tokens=5),
                 )
-            else:
-                unit = TranslationUnit(
-                    translation=f"[translated] {user}",
-                    summary_update="Summary.",
-                )
-            from borgesica.domain.models import TranslationResult, Usage
+            unit = TranslationUnit(
+                translation=f"[translated] {user}",
+                summary_update="Summary.",
+            )
 
             in_tok = self.count_tokens(system + " " + user, model)
             out_tok = self.count_tokens(unit.translation, model)

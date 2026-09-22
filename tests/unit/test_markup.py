@@ -8,8 +8,11 @@ import pytest
 
 from borgesica.domain.markup import (
     reinsert,
+    restore_tags,
     strip,
     strip_all_tags,
+    tokenize_tags,
+    validate_placeholders,
     validate_segments,
     validate_tags,
 )
@@ -321,3 +324,227 @@ def test_strip_all_tags_no_tags_returns_unchanged() -> None:
 def test_strip_all_tags_does_not_eat_escaped_angle_brackets() -> None:
     """Real prose with a literal < arrives entity-escaped from the reader."""
     assert strip_all_tags("a &lt;b&gt; c") == "a &lt;b&gt; c"
+
+
+# ---------------------------------------------------------------------------
+# tokenize_tags() / restore_tags() / validate_placeholders()
+#
+# Placeholder-based inline tag round-trip: real tags (with their attributes —
+# hrefs, classes, ids) never reach the provider. Each tag is replaced by an
+# opaque numbered placeholder (paired tags: "⟦1⟧" ... "⟦/1⟧",
+# numbered in source order); a registry maps each id back to the exact
+# original tag text. validate_placeholders checks the placeholder SEQUENCE
+# (multiset + pairing + nesting) rather than raw tag counts, so a model that
+# swaps an attribute or drops one tag while adding an unrelated one can no
+# longer slip past validation the way count-only validate_tags did.
+#
+# Placeholder character choice: U+27E6/U+27E7 (MATHEMATICAL WHITE SQUARE
+# BRACKET) — extremely unlikely to occur in real prose or be "translated" by
+# the model (unlike ASCII brackets or angle brackets, which collide with
+# markup/code the source text may legitimately contain), and stable across
+# JSON string encoding.
+# ---------------------------------------------------------------------------
+
+
+def test_tokenize_tags_single_pair_produces_numbered_placeholder() -> None:
+    """A single <i>...</i> pair becomes ⟦1⟧...⟦/1⟧, and the
+    registry maps id 1 back to the exact open/close tag strings."""
+    placeholder_text, registry = tokenize_tags("The <i>quick</i> fox.")
+    assert placeholder_text == "The ⟦1⟧quick⟦/1⟧ fox."
+    assert registry == {1: ("<i>", "</i>")}
+
+
+def test_tokenize_tags_no_tags_returns_text_unchanged() -> None:
+    placeholder_text, registry = tokenize_tags("Plain text, no tags.")
+    assert placeholder_text == "Plain text, no tags."
+    assert registry == {}
+
+
+def test_tokenize_tags_numbers_in_source_order() -> None:
+    """Two sibling pairs get ids 1 and 2 in the order they appear."""
+    placeholder_text, registry = tokenize_tags("<b>Bold</b> and <i>italic</i>.")
+    assert placeholder_text == "⟦1⟧Bold⟦/1⟧ and ⟦2⟧italic⟦/2⟧."
+    assert registry == {1: ("<b>", "</b>"), 2: ("<i>", "</i>")}
+
+
+def test_tokenize_tags_nested_pairs_get_distinct_ids() -> None:
+    """Nested tags each get their own id; the outer pair opens first (id 1),
+    the inner pair opens second (id 2)."""
+    placeholder_text, registry = tokenize_tags("<b><i>text</i></b>")
+    assert placeholder_text == "⟦1⟧⟦2⟧text⟦/2⟧⟦/1⟧"
+    assert registry == {1: ("<b>", "</b>"), 2: ("<i>", "</i>")}
+
+
+def test_tokenize_tags_preserves_attributes_in_registry_only() -> None:
+    """Attributes (hrefs, classes) are captured in the registry, never in the
+    text that would be sent to the provider."""
+    placeholder_text, registry = tokenize_tags('<a href="https://example.com/x">link</a>')
+    assert "href" not in placeholder_text
+    assert "example.com" not in placeholder_text
+    assert registry[1][0] == '<a href="https://example.com/x">'
+    assert registry[1][1] == "</a>"
+
+
+# --- Required test 1: round trip ---
+
+
+def test_placeholder_roundtrip_identity_translation_byte_identical() -> None:
+    """strip -> placeholders -> (identity 'translation') -> restore reproduces
+    the original text byte-for-byte."""
+    source = '<a href="x">foo</a> and <em>bar</em>'
+    placeholder_text, registry = tokenize_tags(source)
+    # Simulate an identity "translation" — the provider echoes the placeholder
+    # text back unchanged.
+    translated = placeholder_text
+    restored = restore_tags(translated, registry)
+    assert restored == source
+
+
+# --- Required test 2: attributes never reach the provider ---
+
+
+def test_placeholder_text_never_contains_attributes() -> None:
+    source = '<a href="https://secret.example/path?token=abc" class="ext">Click</a>'
+    placeholder_text, _registry = tokenize_tags(source)
+    assert "href" not in placeholder_text
+    assert "secret.example" not in placeholder_text
+    assert "token=abc" not in placeholder_text
+    assert "class" not in placeholder_text
+    assert "<a" not in placeholder_text
+    assert "</a>" not in placeholder_text
+
+
+# --- Required test 3: swapped links — hrefs follow their own placeholder id ---
+
+
+def test_swapped_placeholders_restore_hrefs_by_id_not_position() -> None:
+    """If the model's output swaps WHICH placeholder id wraps which word, the
+    restored hrefs follow their own numbered id, wherever it landed — not the
+    textual position it originally occupied. This is the deliberate, documented
+    outcome: restore() is keyed by id, so each attribute set travels with its
+    number, never with a text position.
+    """
+    source = '<a href="https://x.example">Foo</a> and <a href="https://y.example">Bar</a>'
+    placeholder_text, registry = tokenize_tags(source)
+    assert placeholder_text == "⟦1⟧Foo⟦/1⟧ and ⟦2⟧Bar⟦/2⟧"
+
+    # The model swaps which id wraps which word (a legitimate word-order change
+    # or a genuine mistake — validate_placeholders cannot tell the difference,
+    # and does not need to: see validate_placeholders' reordering test below).
+    swapped = "⟦2⟧Foo⟦/2⟧ and ⟦1⟧Bar⟦/1⟧"
+    restored = restore_tags(swapped, registry)
+
+    assert restored == (
+        '<a href="https://y.example">Foo</a> and <a href="https://x.example">Bar</a>'
+    )
+    # id 2's original href ends up wherever id 2 landed (wrapping "Foo"), and
+    # id 1's href follows id 1 (wrapping "Bar") — each href stayed attached to
+    # its own placeholder id, never to the original word.
+
+
+# --- Required test 4: dropped / duplicated / broken nesting -> invalid ---
+
+
+def test_validate_placeholders_dropped_placeholder_is_invalid() -> None:
+    source = "The <i>quick</i> fox."
+    placeholder_text, registry = tokenize_tags(source)
+    translated = "El zorro rapido."  # placeholder pair dropped entirely
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is False
+
+
+def test_validate_placeholders_duplicated_placeholder_is_invalid() -> None:
+    source = "<b>Bold</b> and <i>italic</i>."
+    placeholder_text, registry = tokenize_tags(source)
+    # id 2 duplicated, id 1 dropped.
+    translated = "⟦2⟧Negrita⟦/2⟧ y ⟦2⟧cursiva⟦/2⟧."
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is False
+
+
+def test_validate_placeholders_broken_nesting_is_invalid() -> None:
+    """Crossing placeholders (⟦1⟧⟦2⟧...⟦/1⟧⟦/2⟧)
+    — each id appears exactly once, but the pairing is not properly nested."""
+    source = "<b><i>text</i></b>"
+    placeholder_text, registry = tokenize_tags(source)
+    translated = "⟦1⟧⟦2⟧texto⟦/1⟧⟦/2⟧"
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is False
+
+
+def test_validate_placeholders_valid_roundtrip_passes() -> None:
+    source = "The <i>quick</i> fox."
+    placeholder_text, registry = tokenize_tags(source)
+    translated = "El zorro ⟦1⟧rapido⟦/1⟧."
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is True
+    assert result.reordered is False
+
+
+# --- Required test 5: old count-only validate_tags wrongly accepts this;
+#     the new placeholder validator correctly rejects it. ---
+
+
+def test_validate_placeholders_rejects_what_count_only_validation_wrongly_accepted() -> None:
+    """Source has two SEPARATE <em> pairs. A translation that drops the first
+    pair entirely and duplicates the second still has the OLD count-only
+    validate_tags' magic number (4 raw tags total) — validate_tags wrongly
+    accepts it. validate_placeholders must reject it.
+    """
+    source = "<em>alpha</em> and <em>beta</em>."
+    placeholder_text, registry = tokenize_tags(source)
+    assert registry == {1: ("<em>", "</em>"), 2: ("<em>", "</em>")}
+
+    # Old-world equivalent: drop the first <em> pair, duplicate the second —
+    # net tag count unchanged (still 4 raw tags), so validate_tags(source,
+    # equivalent_raw) would return True. Demonstrate that directly:
+    equivalent_raw = "<em>uno</em> y <em>uno</em>."
+    assert validate_tags(source, equivalent_raw) is True  # old validator fooled
+
+    # New world: the same semantic corruption expressed as placeholders —
+    # id 1 missing, id 2 duplicated.
+    translated = "uno y ⟦2⟧uno⟦/2⟧ y ⟦2⟧uno⟦/2⟧."
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is False
+
+
+# --- Reordering: flagged, not rejected (explicit design decision) ---
+
+
+def test_validate_placeholders_sibling_reorder_is_valid_but_flagged() -> None:
+    """Two sibling placeholders appearing in a different order than the source
+    (a legitimate word-order change in translation) is VALID — multiset and
+    nesting both hold — but the result flags it via `reordered=True` so
+    callers may log/inspect it without rejecting the translation.
+    """
+    source = "<b>Bold</b> and <i>italic</i>."
+    placeholder_text, registry = tokenize_tags(source)
+    # Sibling order swapped: id 2 now appears before id 1.
+    translated = "⟦2⟧cursiva⟦/2⟧ y ⟦1⟧negrita⟦/1⟧."
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is True
+    assert result.reordered is True
+
+
+def test_validate_placeholders_unknown_placeholder_id_is_invalid() -> None:
+    """A placeholder id that was never issued by tokenize_tags (hallucinated
+    by the model) is invalid."""
+    source = "The <i>quick</i> fox."
+    placeholder_text, registry = tokenize_tags(source)
+    translated = "El ⟦1⟧zorro⟦/1⟧ ⟦2⟧rapido⟦/2⟧."
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is False
+
+
+# --- restore_tags() edge cases ---
+
+
+def test_restore_tags_no_placeholders_returns_text_unchanged() -> None:
+    assert restore_tags("Plain text.", {}) == "Plain text."
+
+
+def test_restore_tags_unknown_id_left_verbatim() -> None:
+    """A placeholder marker with no matching registry entry is left as-is
+    rather than crashing — defensive, matches the spirit of validate_placeholders
+    rejecting it upstream before restore is ever called on invalid output."""
+    assert restore_tags("⟦99⟧text⟦/99⟧", {}) == "⟦99⟧text⟦/99⟧"

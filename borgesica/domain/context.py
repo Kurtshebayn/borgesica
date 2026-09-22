@@ -115,22 +115,34 @@ an error.
 # ---------------------------------------------------------------------------
 
 _INLINE_TAG_RULES = """\
-## Inline Tag Preservation Rules
+## Inline Placeholder Preservation Rules
 
-The source text may contain inline formatting tags such as <i>, </i>, <b>, \
-</b>, <u>, </u>, <em>, </em>, <strong>, </strong>, <span ...>, </span>, \
-<a ...>, </a>.
+The source text may contain numbered placeholder markers such as ⟦1⟧, \
+⟦/1⟧, ⟦2⟧, ⟦/2⟧, and so on. Each marker stands in for an \
+inline formatting tag (italics, bold, a link, ...) that has been removed from \
+the text you see — you are never shown the real tag or its attributes.
 
-You MUST preserve every inline tag exactly as it appears:
-1. Keep every inline tag in the output — do NOT drop or add any tag.
-2. Move each tag WITH the word(s) it wraps: if <i>word</i> translates to \
-   <i>palabra</i>, keep the tag pair around the translated word.
-3. Preserve the EXACT tag count: the number of tags in the output MUST equal \
-   the number of tags in the source. Any mismatch is an error.
-4. Preserve nesting order: if tags are nested in the source, maintain the \
-   same nesting in the translation.
+You MUST keep every placeholder marker VERBATIM:
+1. Keep every placeholder marker in the output, character for character — do \
+   NOT drop one, add a new one, re-type it as an HTML-style tag, or change \
+   its number. A marker like ⟦1⟧ must reappear as EXACTLY ⟦1⟧ — \
+   never rewritten as a raw tag, a bracketed number, or a parenthesized \
+   number.
+2. Move each marker pair WITH the word(s) it wraps: if ⟦1⟧word⟦/1⟧ \
+   translates to ⟦1⟧palabra⟦/1⟧, keep the SAME pair of markers \
+   (opening ⟦1⟧ and closing ⟦/1⟧) around the translated word.
+3. Preserve every marker EXACTLY ONCE: each numbered marker that opens \
+   (⟦N⟧) must appear exactly once, and its matching close (⟦/N⟧) \
+   must also appear exactly once. Any marker that is dropped, duplicated, or \
+   invented is a critical error.
+4. Preserve nesting: if markers are nested in the source, maintain the same \
+   nesting in the translation.
+5. You MAY reorder sibling marker pairs relative to each other if the target \
+   language's word order requires it — but never break a pair's own open/close \
+   nesting to do so.
 
-Failure to preserve inline tags is a critical translation error."""
+Failure to preserve these placeholder markers verbatim is a critical \
+translation error."""
 
 
 _TASK_DESCRIPTION = """\
