@@ -189,6 +189,20 @@ def _make_epub_bytes(
         os.unlink(tmp)
 
 
+_DC_NS = "http://purl.org/dc/elements/1.1/"
+
+
+def _read_opf_language(epub_bytes: bytes) -> str | None:
+    """Read ``dc:language``'s text from the first ``*.opf`` entry, or None
+    if no such entry/element exists."""
+    with zipfile.ZipFile(io.BytesIO(epub_bytes), "r") as zf:
+        opf_name = next(name for name in zf.namelist() if name.endswith(".opf"))
+        opf_bytes = zf.read(opf_name)
+    tree = etree.fromstring(opf_bytes, parser=etree.XMLParser(recover=True))
+    lang_el = tree.find(f".//{{{_DC_NS}}}language")
+    return lang_el.text if lang_el is not None else None
+
+
 def _write_temp_epub(content: bytes) -> str:
     """Write bytes to a named temp file and return its path."""
     with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as f:
@@ -447,9 +461,15 @@ def test_no_partial_output_on_failure() -> None:
     class _BrokenWriter(EpubWriter):
         """Overrides _do_write to raise after the tmp is written but before rename."""
 
-        def _do_write(self, chunks: list[Chunk], src_path: str, tmp_path: str) -> None:
+        def _do_write(
+            self,
+            chunks: list[Chunk],
+            src_path: str,
+            tmp_path: str,
+            target_lang: str | None = None,
+        ) -> None:
             # Write the tmp (calls parent logic)
-            super()._do_write(chunks, src_path, tmp_path)
+            super()._do_write(chunks, src_path, tmp_path, target_lang)
             # Then raise to simulate a failure BEFORE os.replace
             raise RuntimeError("Simulated failure after write, before rename")
 
@@ -1508,3 +1528,91 @@ def _make_epub_ncx_only_no_nav_writer() -> bytes:
             "</html>",
         )
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# dc:language: the output EPUB must declare the job's TARGET language, not
+# whatever the source declared (a book translated to Spanish shipping
+# "<dc:language>en</dc:language>" misleads hyphenation/dictionaries/TTS in
+# reading systems). Scope: dc:language only — dc:title/dc:description are
+# NOT translated here (that needs a provider call and is a separate decision).
+# ---------------------------------------------------------------------------
+
+
+def test_writer_sets_opf_language_to_the_resolved_target_language() -> None:
+    """A source EPUB declaring English must ship declaring the target
+    language once EpubWriter is told what that target is."""
+    chapters = [("ch1.xhtml", _chapter_xhtml_plain("Hello, world!"))]
+    src_bytes = _make_epub_bytes(chapters)  # book.set_language("en")
+    assert _read_opf_language(src_bytes) == "en"
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+        chunks = _fake_translate(chunks)
+
+        writer = EpubWriter()
+        writer.write(chunks, src_path, out_path, target_lang="es-neutral")
+
+        out_bytes = open(out_path, "rb").read()
+        assert _read_opf_language(out_bytes) == "es"
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def test_writer_leaves_opf_language_untouched_when_target_lang_unresolvable() -> None:
+    """An unresolvable target_lang must never overwrite the existing
+    declaration with a wrong value — the original is kept."""
+    chapters = [("ch1.xhtml", _chapter_xhtml_plain("Hello, world!"))]
+    src_bytes = _make_epub_bytes(chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+        chunks = _fake_translate(chunks)
+
+        writer = EpubWriter()
+        writer.write(chunks, src_path, out_path, target_lang="not-a-real-language-tag")
+
+        out_bytes = open(out_path, "rb").read()
+        assert _read_opf_language(out_bytes) == "en"
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def test_writer_leaves_opf_language_untouched_when_target_lang_omitted() -> None:
+    """Backward compatibility: callers that do not pass target_lang at all
+    (e.g. older call sites) must see zero behavior change."""
+    chapters = [("ch1.xhtml", _chapter_xhtml_plain("Hello, world!"))]
+    src_bytes = _make_epub_bytes(chapters)
+    src_path = _write_temp_epub(src_bytes)
+    out_path = src_path.replace(".epub", "_out.epub")
+
+    try:
+        reader = EpubReader()
+        node_chunks = reader.read(src_path, _config())
+        provider = _FakeProvider()
+        chunks = chunk_prose(node_chunks, _config(), provider)
+        chunks = _fake_translate(chunks)
+
+        writer = EpubWriter()
+        writer.write(chunks, src_path, out_path)  # no target_lang
+
+        out_bytes = open(out_path, "rb").read()
+        assert _read_opf_language(out_bytes) == "en"
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)

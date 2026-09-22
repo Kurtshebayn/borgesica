@@ -21,6 +21,8 @@ character.
 
 from __future__ import annotations
 
+import re
+
 # Scripts that cannot plausibly appear as incidental content in a Spanish
 # translation. Greek is deliberately EXCLUDED: technical and mathematical prose
 # uses alpha/beta/pi as symbols, and flagging it would fail legitimate chunks.
@@ -101,4 +103,44 @@ def detect_unexpected_script(text: str, expected_target: str) -> str | None:
     script, count = max(counts.items(), key=lambda kv: kv[1])
     if count >= _MIN_FOREIGN_CHARS and count / letters >= _MIN_FOREIGN_SHARE:
         return script
+    return None
+
+
+# ---------------------------------------------------------------------------
+# JobConfig.target_lang -> BCP 47 language code, for writers that stamp the
+# OUTPUT language (e.g. EPUB dc:language). No such mapping existed anywhere
+# in the codebase before this — target_lang is a free-form string ("en",
+# "pt", the project's own "es-neutral" convention, ...), never a validated
+# code, so a writer that wants a real BCP 47 tag must resolve one itself.
+#
+# Every target_lang this codebase currently issues (see _LATIN_SCRIPT_TARGETS
+# above and JobConfig.target_lang's default) uses a bare 2-letter ISO 639-1
+# primary subtag, optionally followed by a project-specific suffix ("-neutral")
+# that is NOT a registered BCP 47 subtag. Validating against exactly that
+# shape — 2 alphabetic characters before the first "-" or "_" — accepts every
+# real code this project uses while rejecting garbage (empty, digits, a
+# single letter, or a multi-word non-code string) rather than fabricating a
+# plausible-looking but wrong language declaration.
+# ---------------------------------------------------------------------------
+
+_PRIMARY_SUBTAG_RE = re.compile(r"^[A-Za-z]{2}$")
+
+
+def resolve_bcp47(target_lang: str) -> str | None:
+    """Resolve *target_lang* to a valid BCP 47 language code, or None.
+
+    Args:
+        target_lang: JobConfig.target_lang (e.g. "es-neutral", "en", "pt-BR").
+
+    Returns:
+        The lowercased 2-letter primary language subtag (e.g. "es") when
+        *target_lang* starts with one, else None — callers MUST leave any
+        existing language declaration untouched on None rather than write an
+        unresolvable value.
+    """
+    if not target_lang:
+        return None
+    primary = target_lang.strip().split("-", 1)[0].split("_", 1)[0]
+    if _PRIMARY_SUBTAG_RE.fullmatch(primary):
+        return primary.lower()
     return None
