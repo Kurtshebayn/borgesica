@@ -730,7 +730,7 @@ def _pair(short: tuple[str, str], long: tuple[str, str]) -> "Glossary":
     )
 
 
-def test_contradiction_rule_a_kept_alone_but_changed_inside_a_compound():
+def test_contradiction_kept_alone_but_changed_inside_a_compound():
     from borgesica.domain.quality import detect_glossary_contradictions
 
     findings = detect_glossary_contradictions(
@@ -739,7 +739,7 @@ def test_contradiction_rule_a_kept_alone_but_changed_inside_a_compound():
 
     assert len(findings) == 1
     finding = findings[0]
-    assert finding.rule == "A"
+    assert finding.rule == "kept_alone_changed_inside"
     assert (finding.short_term, finding.short_translation) == ("Quintus", "Quintus")
     assert (finding.long_term, finding.long_translation) == (
         "Quintus Darinus",
@@ -747,7 +747,7 @@ def test_contradiction_rule_a_kept_alone_but_changed_inside_a_compound():
     )
 
 
-def test_contradiction_rule_b_translated_alone_but_kept_inside_a_compound():
+def test_contradiction_translated_alone_but_kept_inside_a_compound():
     from borgesica.domain.quality import detect_glossary_contradictions
 
     findings = detect_glossary_contradictions(
@@ -756,7 +756,7 @@ def test_contradiction_rule_b_translated_alone_but_kept_inside_a_compound():
 
     assert len(findings) == 1
     finding = findings[0]
-    assert finding.rule == "B"
+    assert finding.rule == "changed_alone_kept_inside"
     assert (finding.short_term, finding.short_translation) == ("Will", "Voluntad")
     assert (finding.long_term, finding.long_translation) == (
         "Will-carriage",
@@ -798,7 +798,7 @@ def test_contradiction_matches_terms_case_insensitively():
         _pair(("quintus", "Quintus"), ("QUINTUS Darinus", "Quinto Darino"))
     )
 
-    assert [f.rule for f in findings] == ["A"]
+    assert [f.rule for f in findings] == ["kept_alone_changed_inside"]
 
 
 def test_contradiction_skips_entries_with_an_empty_side():
@@ -938,7 +938,7 @@ def test_audit_reports_glossary_contradictions_once_for_the_job():
     ]
     assert findings[1:] == per_chunk
     contradiction = findings[0]
-    assert "rule A" in contradiction.detail
+    assert "kept on its own but not inside" in contradiction.detail
     for side in ("Quintus", "Quintus Darinus", "Quinto Darino"):
         assert side in contradiction.excerpt
 
@@ -957,8 +957,8 @@ def test_audit_reports_glossary_contradictions_even_with_no_chunks():
 
 def test_audit_words_each_contradiction_rule_exactly():
     """What a reader of ``borgesica audit`` sees, pinned for BOTH rules — the
-    wording is the finding's explanation, so a rule B finding must never be
-    described as rule A or the reverse."""
+    wording is the finding's explanation, so a term translated on its own must
+    never be described as one kept on its own, or the reverse."""
     from borgesica.domain.models import Glossary, GlossaryEntry
     from borgesica.domain.quality import AuditedDefect, audit_chunks
 
@@ -976,22 +976,22 @@ def test_audit_words_each_contradiction_rule_exactly():
             chunk_index=None,
             kind="glossary",
             term="Quintus",
-            detail="rule A: 'Quintus' is kept on its own but not inside 'Quintus Darinus'",
+            detail="'Quintus' is kept on its own but not inside 'Quintus Darinus'",
             excerpt="Quintus -> Quintus | Quintus Darinus -> Quinto Darino",
         ),
         AuditedDefect(
             chunk_index=None,
             kind="glossary",
             term="Will",
-            detail="rule B: 'Will' is translated on its own but kept inside 'Will-carriage'",
+            detail="'Will' is translated on its own but kept inside 'Will-carriage'",
             excerpt="Will -> Voluntad | Will-carriage -> carruaje Will",
         ),
     ]
 
 
 def test_audit_refuses_to_word_an_unknown_contradiction_rule(monkeypatch):
-    """An unknown rule must fail loudly. Falling through to the rule B wording
-    would hand the reader a confident, wrong explanation."""
+    """An unknown rule must fail loudly. Falling through to another rule's
+    wording would hand the reader a confident, wrong explanation."""
     from borgesica.domain import quality
     from borgesica.domain.models import Glossary
 

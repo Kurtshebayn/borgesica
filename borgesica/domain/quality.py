@@ -604,14 +604,14 @@ def detect_untranslated_defects(
     return defects
 
 
-ContradictionRule = Literal["A", "B"]
+ContradictionRule = Literal["kept_alone_changed_inside", "changed_alone_kept_inside"]
 
 # What each rule means, worded for the reader of ``borgesica audit``. Keyed by
 # rule so a rule without wording is a lookup failure, never a fall-through to
 # another rule's explanation.
 _CONTRADICTION_WORDING: dict[ContradictionRule, str] = {
-    "A": "rule A: {short!r} is kept on its own but not inside {long!r}",
-    "B": "rule B: {short!r} is translated on its own but kept inside {long!r}",
+    "kept_alone_changed_inside": "{short!r} is kept on its own but not inside {long!r}",
+    "changed_alone_kept_inside": "{short!r} is translated on its own but kept inside {long!r}",
 }
 
 
@@ -620,8 +620,9 @@ class GlossaryContradiction:
     """Two glossary entries that disagree about whether a term is carried over.
 
     ``short_term`` occurs as whole words inside ``long_term``. The rules are
-    worded in ``_CONTRADICTION_WORDING``: rule "A" keeps the term alone but
-    drops it inside the compound, rule "B" the reverse.
+    worded in ``_CONTRADICTION_WORDING``: "kept_alone_changed_inside" keeps the
+    term alone but drops it inside the compound, "changed_alone_kept_inside"
+    the reverse.
     """
 
     rule: ContradictionRule
@@ -645,8 +646,9 @@ def detect_glossary_contradictions(glossary: Glossary) -> list[GlossaryContradic
     For every ordered pair (short, long) of entries with case-insensitively
     distinct terms, where ``long.term`` contains ``short.term`` as whole words,
     the short term is "kept" when ``short.translation`` contains it as whole
-    words. Rule A fires when it is kept but ``long.translation`` does not
-    contain it; rule B when it is not kept but ``long.translation`` does.
+    words. "kept_alone_changed_inside" fires when it is kept but
+    ``long.translation`` does not contain it; "changed_alone_kept_inside" when
+    it is not kept but ``long.translation`` does.
 
     This checks the glossary against ITSELF, which no per-chunk detector can
     do. A bad entry is born once and injected into every later prompt: five
@@ -692,7 +694,7 @@ def detect_glossary_contradictions(glossary: Glossary) -> list[GlossaryContradic
                 continue
             findings.append(
                 GlossaryContradiction(
-                    rule="A" if kept else "B",
+                    rule="kept_alone_changed_inside" if kept else "changed_alone_kept_inside",
                     short_term=short_term,
                     short_translation=short_translation,
                     long_term=long_term,
