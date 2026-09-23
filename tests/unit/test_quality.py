@@ -818,7 +818,7 @@ def test_contradiction_does_not_pair_an_entry_with_its_own_case_variant():
 
 
 # ---------------------------------------------------------------------------
-# audit_chunks — both free detectors over a finished job
+# audit_chunks — every free detector over a finished job
 #
 # Exists so the whole-book vocabulary is built ONCE and no caller can forget
 # to pass it. Forgetting is not a small mistake: on job 9be143da the filter is
@@ -953,3 +953,56 @@ def test_audit_reports_glossary_contradictions_even_with_no_chunks():
     assert [(f.chunk_index, f.kind) for f in audit_chunks([], glossary)] == [
         (None, "glossary")
     ]
+
+
+def test_audit_words_each_contradiction_rule_exactly():
+    """What a reader of ``borgesica audit`` sees, pinned for BOTH rules — the
+    wording is the finding's explanation, so a rule B finding must never be
+    described as rule A or the reverse."""
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import AuditedDefect, audit_chunks
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Quintus", translation="Quintus"),
+            GlossaryEntry(term="Quintus Darinus", translation="Quinto Darino"),
+            GlossaryEntry(term="Will", translation="Voluntad"),
+            GlossaryEntry(term="Will-carriage", translation="carruaje Will"),
+        ]
+    )
+
+    assert audit_chunks([], glossary) == [
+        AuditedDefect(
+            chunk_index=None,
+            kind="glossary",
+            term="Quintus",
+            detail="rule A: 'Quintus' is kept on its own but not inside 'Quintus Darinus'",
+            excerpt="Quintus -> Quintus | Quintus Darinus -> Quinto Darino",
+        ),
+        AuditedDefect(
+            chunk_index=None,
+            kind="glossary",
+            term="Will",
+            detail="rule B: 'Will' is translated on its own but kept inside 'Will-carriage'",
+            excerpt="Will -> Voluntad | Will-carriage -> carruaje Will",
+        ),
+    ]
+
+
+def test_audit_refuses_to_word_an_unknown_contradiction_rule(monkeypatch):
+    """An unknown rule must fail loudly. Falling through to the rule B wording
+    would hand the reader a confident, wrong explanation."""
+    from borgesica.domain import quality
+    from borgesica.domain.models import Glossary
+
+    unknown = quality.GlossaryContradiction(
+        rule="C",  # type: ignore[arg-type]
+        short_term="Quintus",
+        short_translation="Quintus",
+        long_term="Quintus Darinus",
+        long_translation="Quinto Darino",
+    )
+    monkeypatch.setattr(quality, "detect_glossary_contradictions", lambda _: [unknown])
+
+    with pytest.raises(ValueError, match="'C'"):
+        quality.audit_chunks([], Glossary(entries=[]))

@@ -40,6 +40,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -603,20 +604,39 @@ def detect_untranslated_defects(
     return defects
 
 
+ContradictionRule = Literal["A", "B"]
+
+# What each rule means, worded for the reader of ``borgesica audit``. Keyed by
+# rule so a rule without wording is a lookup failure, never a fall-through to
+# another rule's explanation.
+_CONTRADICTION_WORDING: dict[ContradictionRule, str] = {
+    "A": "rule A: {short!r} is kept on its own but not inside {long!r}",
+    "B": "rule B: {short!r} is translated on its own but kept inside {long!r}",
+}
+
+
 @dataclass(frozen=True)
 class GlossaryContradiction:
     """Two glossary entries that disagree about whether a term is carried over.
 
-    ``short_term`` occurs as whole words inside ``long_term``. Rule "A": the
-    short entry keeps its term but the long entry drops it. Rule "B": the short
-    entry translates its term but the long entry keeps it.
+    ``short_term`` occurs as whole words inside ``long_term``. The rules are
+    worded in ``_CONTRADICTION_WORDING``: rule "A" keeps the term alone but
+    drops it inside the compound, rule "B" the reverse.
     """
 
-    rule: str  # "A" | "B"
+    rule: ContradictionRule
     short_term: str
     short_translation: str
     long_term: str
     long_translation: str
+
+    @property
+    def detail(self) -> str:
+        """The rule this pair breaks, in words. Raises on an unknown rule."""
+        wording = _CONTRADICTION_WORDING.get(self.rule)
+        if wording is None:
+            raise ValueError(f"unknown glossary contradiction rule {self.rule!r}")
+        return wording.format(short=self.short_term, long=self.long_term)
 
 
 def detect_glossary_contradictions(glossary: Glossary) -> list[GlossaryContradiction]:
@@ -742,13 +762,7 @@ def audit_chunks(
             chunk_index=None,
             kind="glossary",
             term=contradiction.short_term,
-            detail=(
-                f"rule A: {contradiction.short_term!r} is kept on its own but "
-                f"not inside {contradiction.long_term!r}"
-                if contradiction.rule == "A"
-                else f"rule B: {contradiction.short_term!r} is translated on its "
-                f"own but kept inside {contradiction.long_term!r}"
-            ),
+            detail=contradiction.detail,
             excerpt=(
                 f"{contradiction.short_term} -> {contradiction.short_translation}"
                 f" | {contradiction.long_term} -> {contradiction.long_translation}"
