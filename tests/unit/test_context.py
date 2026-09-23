@@ -383,6 +383,39 @@ def test_system_prompt_contains_tag_preservation_instruction():
     )
 
 
+def test_system_prompt_instructs_placeholders_kept_verbatim():
+    """M2-1 (placeholder rework): the static block no longer describes raw
+    HTML-like tags — it describes the numbered placeholder markers the
+    orchestrator now sends instead, and instructs the model to keep them
+    VERBATIM (never re-typed, re-numbered, or translated).
+    Spec: subtitle-translation/inline-tags-in-text — placeholder rework.
+    """
+    from borgesica.domain.context import ContextManager
+
+    cm = ContextManager()
+    config = make_config()
+    glossary = Glossary()
+    summary = RollingSummary()
+
+    sp = cm.build_system_prompt(config, glossary, summary)
+    text = sp.text
+
+    # Must show the placeholder syntax itself so the model recognizes it.
+    assert "⟦1⟧" in text or "⟦" in text, (
+        "system prompt must show the placeholder marker syntax"
+    )
+    assert "verbatim" in text.lower(), (
+        "system prompt must instruct the model to keep placeholders verbatim"
+    )
+    # Must NOT instruct the model in terms of raw HTML-like tag examples
+    # (that instruction described a prompt shape that no longer reaches the
+    # model — the model never sees a raw "<i>" in the user message now).
+    assert "<i>" not in text and "<em>" not in text, (
+        "static block must not describe raw HTML tag examples anymore — "
+        "the model only ever sees numbered placeholders"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Segmented output instructions (SRT vs prose static blocks)
 # ---------------------------------------------------------------------------
