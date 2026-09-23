@@ -711,6 +711,113 @@ def test_returns_nothing_without_identity_entries():
 
 
 # ---------------------------------------------------------------------------
+# detect_glossary_contradictions — the glossary checked against itself
+#
+# A bad entry is born once and injected into every later prompt, so one first
+# draw contaminates the rest of the book. Every case below is a real entry
+# pair from a finished job.
+# ---------------------------------------------------------------------------
+
+
+def _pair(short: tuple[str, str], long: tuple[str, str]) -> "Glossary":
+    from borgesica.domain.models import Glossary, GlossaryEntry
+
+    return Glossary(
+        entries=[
+            GlossaryEntry(term=short[0], translation=short[1]),
+            GlossaryEntry(term=long[0], translation=long[1]),
+        ]
+    )
+
+
+def test_contradiction_rule_a_kept_alone_but_changed_inside_a_compound():
+    from borgesica.domain.quality import detect_glossary_contradictions
+
+    findings = detect_glossary_contradictions(
+        _pair(("Quintus", "Quintus"), ("Quintus Darinus", "Quinto Darino"))
+    )
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.rule == "A"
+    assert (finding.short_term, finding.short_translation) == ("Quintus", "Quintus")
+    assert (finding.long_term, finding.long_translation) == (
+        "Quintus Darinus",
+        "Quinto Darino",
+    )
+
+
+def test_contradiction_rule_b_translated_alone_but_kept_inside_a_compound():
+    from borgesica.domain.quality import detect_glossary_contradictions
+
+    findings = detect_glossary_contradictions(
+        _pair(("Will", "Voluntad"), ("Will-carriage", "carruaje Will"))
+    )
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.rule == "B"
+    assert (finding.short_term, finding.short_translation) == ("Will", "Voluntad")
+    assert (finding.long_term, finding.long_translation) == (
+        "Will-carriage",
+        "carruaje Will",
+    )
+
+
+def test_contradiction_ignores_an_article_in_the_standalone_rendering():
+    """"Kept" is CONTAINMENT, not equality. Equality produced 21 false positives
+    in 21 on job 9be143da, this pair among them."""
+    from borgesica.domain.quality import detect_glossary_contradictions
+
+    glossary = _pair(("Magnus", "el Magnus"), ("Magnus Quintus", "Magnus Quintus"))
+
+    assert detect_glossary_contradictions(glossary) == []
+
+
+def test_contradiction_ignores_a_gloss_in_the_standalone_rendering():
+    from borgesica.domain.quality import detect_glossary_contradictions
+
+    glossary = _pair(("ap", "ap (hijo de)"), ("Mel ap Mor", "Mel ap Mor"))
+
+    assert detect_glossary_contradictions(glossary) == []
+
+
+def test_contradiction_needs_the_short_term_as_a_whole_word():
+    """"Will" inside "Willow" is a different word, not a compound of it."""
+    from borgesica.domain.quality import detect_glossary_contradictions
+
+    glossary = _pair(("Will", "Will"), ("Willow", "Sauce"))
+
+    assert detect_glossary_contradictions(glossary) == []
+
+
+def test_contradiction_matches_terms_case_insensitively():
+    from borgesica.domain.quality import detect_glossary_contradictions
+
+    findings = detect_glossary_contradictions(
+        _pair(("quintus", "Quintus"), ("QUINTUS Darinus", "Quinto Darino"))
+    )
+
+    assert [f.rule for f in findings] == ["A"]
+
+
+def test_contradiction_skips_entries_with_an_empty_side():
+    from borgesica.domain.quality import detect_glossary_contradictions
+
+    glossary = _pair(("Quintus", "  "), ("Quintus Darinus", "Quintus Darinus"))
+
+    assert detect_glossary_contradictions(glossary) == []
+
+
+def test_contradiction_does_not_pair_an_entry_with_its_own_case_variant():
+    from borgesica.domain.quality import detect_glossary_contradictions
+
+    glossary = _pair(("Will", "Voluntad"), ("will", "Will"))
+
+    assert detect_glossary_contradictions(glossary) == []
+
+
+# ---------------------------------------------------------------------------
 # audit_chunks — both free detectors over a finished job
 #
 # Exists so the whole-book vocabulary is built ONCE and no caller can forget
@@ -801,3 +908,48 @@ def test_audit_needs_no_provider():
     from borgesica.domain.quality import audit_chunks
 
     assert list(inspect.signature(audit_chunks).parameters) == ["chunks", "glossary"]
+
+
+def test_audit_reports_glossary_contradictions_once_for_the_job():
+    """A contradiction belongs to the JOB, not to a chunk: it is reported once,
+    ahead of the per-chunk findings, with no chunk index — and the per-chunk
+    findings are exactly what they were without it."""
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import audit_chunks
+
+    chunks = [
+        (7, "There is a Quintus position.", "Hay un puesto de Quinto."),
+        (9, "Easy, Vis.", "—Tranquila, Vis."),
+    ]
+    per_chunk = audit_chunks(chunks, _audit_glossary())
+    glossary = Glossary(
+        entries=[
+            *_audit_glossary().entries,
+            GlossaryEntry(term="Quintus Darinus", translation="Quinto Darino"),
+        ]
+    )
+
+    findings = audit_chunks(chunks, glossary)
+
+    assert [(f.chunk_index, f.kind, f.term) for f in findings] == [
+        (None, "glossary", "Quintus"),
+        (7, "untranslated", "Quintus"),
+        (9, "gender", "Vis"),
+    ]
+    assert findings[1:] == per_chunk
+    contradiction = findings[0]
+    assert "rule A" in contradiction.detail
+    for side in ("Quintus", "Quintus Darinus", "Quinto Darino"):
+        assert side in contradiction.excerpt
+
+
+def test_audit_reports_glossary_contradictions_even_with_no_chunks():
+    """Called once per audit, not once per chunk — so it neither repeats per
+    chunk nor disappears when nothing has been translated yet."""
+    from borgesica.domain.quality import audit_chunks
+
+    glossary = _pair(("Quintus", "Quintus"), ("Quintus Darinus", "Quinto Darino"))
+
+    assert [(f.chunk_index, f.kind) for f in audit_chunks([], glossary)] == [
+        (None, "glossary")
+    ]
