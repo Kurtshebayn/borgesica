@@ -114,7 +114,7 @@ an error.
 # Output format / task description
 # ---------------------------------------------------------------------------
 
-_INLINE_TAG_RULES = """\
+INLINE_TAG_RULES = """\
 ## Inline Placeholder Preservation Rules
 
 The source text may contain numbered placeholder markers such as ⟦1⟧, \
@@ -342,7 +342,7 @@ class ContextManager:
             if config.source_type == SourceType.SRT
             else _TASK_DESCRIPTION
         )
-        parts = [task, _PHILOSOPHY, _INLINE_TAG_RULES]
+        parts = [task, _PHILOSOPHY, INLINE_TAG_RULES]
         if config.target_lang == "es-neutral":
             parts.append(_NEUTRAL_SPANISH)
         return "\n\n".join(parts)

@@ -57,7 +57,7 @@ import re
 import threading
 from datetime import UTC, datetime
 
-from borgesica.domain.context import ContextManager
+from borgesica.domain.context import INLINE_TAG_RULES, ContextManager
 from borgesica.domain.cost import (
     _tool_schema_tokens,
     _waste_factor,
@@ -115,32 +115,50 @@ _MAX_TAG_RETRIES = 2
 # Reflective mode calls: translate (draft) → critique → revise
 _REFLECTIVE_PASSES = 3
 
-# System prompt used for the critique step in reflective mode
-_CRITIQUE_SYSTEM = """\
+# System prompt used for the critique step in reflective mode.
+#
+# Both this prompt and _REVISE_SYSTEM operate on placeholder-bearing text (the
+# draft/critique/revise sequence runs on the SAME tokenize_tags() output as
+# the primary path — see _translate_reflective), yet neither mentioned markup
+# before this fix. A revise step that silently drops or renumbers a
+# placeholder wastes a retry or trips the fallback, so both prompts embed the
+# SAME INLINE_TAG_RULES text the primary path already uses (imported from
+# context.py, not re-described here) — one source of truth instead of two
+# paraphrases that could drift apart.
+_CRITIQUE_SYSTEM = f"""\
 You are a translation quality reviewer. Review the following translation for:
 1. Literal calques or unnatural phrasing
 2. Register inconsistency
 3. Any loss of meaning or image from the source
 
+{INLINE_TAG_RULES}
+
+The draft may contain numbered placeholder markers (⟦1⟧, ⟦/1⟧, ...) standing in
+for inline formatting tags. A placeholder marker present, verbatim and in a
+sensible position is NOT a translation defect — do NOT flag it, mention it, or
+suggest removing it in your critique. Judge the surrounding prose only.
+
 Return a JSON object:
-  {
+  {{
     "translation": "<your critique notes, NOT the translation>",
     "summary_update": "Critique complete.",
     "glossary_additions": []
-  }"""
+  }}"""
 
 # System prompt used for the revise step in reflective mode
-_REVISE_SYSTEM = """\
+_REVISE_SYSTEM = f"""\
 You are a professional literary translator. You have received a draft translation
 and a critique of its weaknesses. Produce a revised translation that addresses
 the critique while remaining faithful to the source.
 
+{INLINE_TAG_RULES}
+
 Return a JSON object:
-  {
+  {{
     "translation": "<revised translation>",
     "summary_update": "<3-5 sentence narrative summary — REPLACES prior summary>",
     "glossary_additions": []
-  }"""
+  }}"""
 
 # Appended to the system prompt for SRT cue-batch chunks (segmented contract).
 # The exact count is stated per chunk because "one per segment" alone is what
