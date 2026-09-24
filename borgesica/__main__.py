@@ -33,7 +33,9 @@ Subcommands:
     audit   <job_id>
              Runs the deterministic quality detectors over a job's stored
              output and prints the findings as JSON. Makes NO provider calls,
-             so it is free and safe to repeat. Advisory: exits 0 even with
+             so it is free and safe to repeat. Glossary contradictions (kind
+             "glossary") belong to the job, so their chunk_index is null and
+             their excerpt shows both entries. Advisory: exits 0 even with
              findings, and a zero result is not a clean bill of health —
              the checks are structural, not semantic.
     glossary show   <job_id>
@@ -556,10 +558,11 @@ def _cmd_audit(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     """Print the free detectors' findings for a job as JSON.
 
     ADVISORY, and exits 0 even with findings — matching ``advisory_gate``,
-    which is documented as never raising. Both detectors buy precision with
-    recall and one carries a known false-positive class (a Latin plural read as
-    a vanished term), so failing the shell on a finding would get the command
-    switched off rather than the defect fixed.
+    which is documented as never raising. Every detector buys precision with
+    recall and two carry a known false-positive class (a Latin plural read as
+    a vanished term; an HTML tag extracted as a glossary term), so failing
+    the shell on a finding would get the command switched off rather than the
+    defect fixed.
     """
     try:
         findings = engine.audit_job(args.job_id)

@@ -1140,6 +1140,32 @@ def test_cli_audit_summarises_to_stderr(capsys: pytest.CaptureFixture) -> None:
     json.loads(captured.out)  # stdout stays parseable
 
 
+def test_cli_audit_prints_a_glossary_contradiction_with_no_chunk(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A glossary contradiction belongs to the job, so its chunk_index is JSON
+    null rather than a number a reader could mistake for a chunk."""
+    from borgesica.__main__ import main
+    from borgesica.domain.models import GlossaryEntry
+
+    engine = _audit_engine()
+    engine.update_glossary(
+        "job-1",
+        [GlossaryEntry(term="Quintus Darinus", translation="Quinto Darino")],
+    )
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = engine
+        main(["audit", "job-1"])
+
+    captured = capsys.readouterr()
+    findings = json.loads(captured.out)
+
+    assert findings[0]["chunk_index"] is None
+    assert findings[0]["kind"] == "glossary"
+    assert "Quinto Darino" in findings[0]["excerpt"]
+    assert "1 glossary" in captured.err
+
+
 def test_cli_audit_unknown_job_exits_non_zero(capsys: pytest.CaptureFixture) -> None:
     from borgesica.__main__ import main
 

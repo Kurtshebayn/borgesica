@@ -40,6 +40,7 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -603,8 +604,108 @@ def detect_untranslated_defects(
     return defects
 
 
+ContradictionRule = Literal["kept_alone_changed_inside", "changed_alone_kept_inside"]
+
+# What each rule means, worded for the reader of ``borgesica audit``. Keyed by
+# rule so a rule without wording is a lookup failure, never a fall-through to
+# another rule's explanation.
+_CONTRADICTION_WORDING: dict[ContradictionRule, str] = {
+    "kept_alone_changed_inside": "{short!r} is kept on its own but not inside {long!r}",
+    "changed_alone_kept_inside": "{short!r} is translated on its own but kept inside {long!r}",
+}
+
+
+@dataclass(frozen=True)
+class GlossaryContradiction:
+    """Two glossary entries that disagree about whether a term is carried over.
+
+    ``short_term`` occurs as whole words inside ``long_term``. The rules are
+    worded in ``_CONTRADICTION_WORDING``: "kept_alone_changed_inside" keeps the
+    term alone but drops it inside the compound, "changed_alone_kept_inside"
+    the reverse.
+    """
+
+    rule: ContradictionRule
+    short_term: str
+    short_translation: str
+    long_term: str
+    long_translation: str
+
+    @property
+    def detail(self) -> str:
+        """The rule this pair breaks, in words. Raises on an unknown rule."""
+        wording = _CONTRADICTION_WORDING.get(self.rule)
+        if wording is None:
+            raise ValueError(f"unknown glossary contradiction rule {self.rule!r}")
+        return wording.format(short=self.short_term, long=self.long_term)
+
+
+def detect_glossary_contradictions(glossary: Glossary) -> list[GlossaryContradiction]:
+    """Return every pair of entries that contradict each other about a term.
+
+    For every ordered pair (short, long) of entries with case-insensitively
+    distinct terms, where ``long.term`` contains ``short.term`` as whole words,
+    the short term is "kept" when ``short.translation`` contains it as whole
+    words. "kept_alone_changed_inside" fires when it is kept but
+    ``long.translation`` does not contain it; "changed_alone_kept_inside" when
+    it is not kept but ``long.translation`` does.
+
+    This checks the glossary against ITSELF, which no per-chunk detector can
+    do. A bad entry is born once and injected into every later prompt: five
+    repeated extracts of the chunk introducing "Quintus Darinus" produced
+    ``Quintus Darinus -> Quinto Darino`` beside ``Quintus -> Quintus`` in one
+    first draw of six, and that one draw steers the rest of the book.
+
+    "Kept" is CONTAINMENT, never equality. Equality produced 21 false positives
+    in 21 findings on job 9be143da — ``Magnus -> el Magnus`` and
+    ``ap -> ap (hijo de)`` keep the term and merely add an article or a gloss.
+
+    Measured on real glossaries before implementation: 9 of 9 findings real on
+    the two tuning jobs, 8 of 11 on four held-out jobs. The three false
+    positives were two HTML tags a local model extracted as terms and one
+    reversed entry. They are deliberately NOT filtered: a filter built from the
+    held-out misses would tune on the held-out set and hide the precision the
+    rule really has.
+
+    Pairwise over the entries, so O(n^2); a substring pre-check keeps the
+    regex off almost every pair.
+    """
+    before, after = _TERM_BOUNDARY
+    entries = [
+        (term, translation, re.compile(before + re.escape(term) + after, re.IGNORECASE))
+        for term, translation in (
+            (entry.term.strip(), entry.translation.strip())
+            for entry in glossary.entries
+        )
+        if term and translation
+    ]
+    findings: list[GlossaryContradiction] = []
+
+    for short_term, short_translation, pattern in entries:
+        folded = short_term.lower()
+        kept = pattern.search(short_translation) is not None
+        for long_term, long_translation, _ in entries:
+            if long_term.lower() == folded or folded not in long_term.lower():
+                continue
+            if not pattern.search(long_term):
+                continue
+            in_long = pattern.search(long_translation) is not None
+            if kept == in_long:
+                continue
+            findings.append(
+                GlossaryContradiction(
+                    rule="kept_alone_changed_inside" if kept else "changed_alone_kept_inside",
+                    short_term=short_term,
+                    short_translation=short_translation,
+                    long_term=long_term,
+                    long_translation=long_translation,
+                )
+            )
+    return findings
+
+
 # ---------------------------------------------------------------------------
-# Whole-job audit — both free detectors, one pass
+# Whole-job audit — every free detector, one pass
 # ---------------------------------------------------------------------------
 
 
@@ -612,15 +713,20 @@ def detect_untranslated_defects(
 class AuditedDefect:
     """One finding, tagged with the chunk and the detector that produced it.
 
-    The two detectors report different shapes (a gender disagreement names an
+    The detectors report different shapes (a gender disagreement names an
     expectation and a marker; a vanished term names a count). They are
     flattened into one record because the consumer is a reader triaging a
     finished book, and a single ordered list is what that reader wants. `kind`
     keeps the distinction that matters.
+
+    ``chunk_index`` is None for a finding about the JOB rather than a chunk —
+    a glossary contradiction lives in the glossary every chunk was given.
+    None rather than the -1 sentinel used elsewhere, because this record is
+    printed as JSON for a reader, and -1 there reads as a chunk number.
     """
 
-    chunk_index: int
-    kind: str  # "untranslated" | "gender"
+    chunk_index: int | None
+    kind: str  # "glossary" | "untranslated" | "gender"
     term: str
     detail: str
     excerpt: str
@@ -632,9 +738,10 @@ def audit_chunks(
 ) -> list[AuditedDefect]:
     """Run every FREE detector over a finished job's chunks.
 
-    Takes ``(chunk_index, source_text, translated_text)`` triples and returns
-    the findings in chunk order, untranslated terms before gender defects
-    within a chunk.
+    Takes ``(chunk_index, source_text, translated_text)`` triples. Glossary
+    contradictions come first, once for the whole job and with no chunk index;
+    then the per-chunk findings in chunk order, untranslated terms before
+    gender defects within a chunk.
 
     This exists to own the one thing a caller cannot get right by looping:
     ``lowercase_vocabulary`` must be built from the WHOLE source, once. A
@@ -647,12 +754,24 @@ def audit_chunks(
     can be audited as often as you like, including after a hand edit. The LLM
     judge is the opposite trade and is not called here.
 
-    A ZERO RESULT IS NOT A CLEAN BILL OF HEALTH — both detectors buy precision
-    with recall, and neither reads meaning. See their own docstrings for what
-    each one cannot see.
+    A ZERO RESULT IS NOT A CLEAN BILL OF HEALTH — every detector buys
+    precision with recall, and none reads meaning. See their own docstrings for
+    what each one cannot see.
     """
     vocabulary = lowercase_vocabulary("\n".join(source for _, source, _ in chunks))
-    findings: list[AuditedDefect] = []
+    findings: list[AuditedDefect] = [
+        AuditedDefect(
+            chunk_index=None,
+            kind="glossary",
+            term=contradiction.short_term,
+            detail=contradiction.detail,
+            excerpt=(
+                f"{contradiction.short_term} -> {contradiction.short_translation}"
+                f" | {contradiction.long_term} -> {contradiction.long_translation}"
+            ),
+        )
+        for contradiction in detect_glossary_contradictions(glossary)
+    ]
 
     for index, source, translation in chunks:
         for term_defect in detect_untranslated_defects(
