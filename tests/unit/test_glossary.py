@@ -562,6 +562,183 @@ def test_drop_reversed_never_drops_a_locked_entry():
     assert dropped == []
 
 
+# The real "Will" entries of job 13b43ac6 in the order SQLiteCheckpointStore
+# returns them: ``ORDER BY term`` sorts "Voluntad" before "Will", so an
+# order-based tie-break kept the reversed half and dropped the correct one.
+_REAL_WILL_ENTRIES = [
+    ("Voluntad", "Will"),
+    ("Will", "Voluntad"),
+    ("Will cage", "Jaula de Voluntad"),
+    ("Will shells", "proyectiles de Voluntad"),
+    ("jaula de Voluntad", "Will cage"),
+    ("proyectiles Voluntad", "Will shells"),
+]
+
+_WILL_SOURCE = (
+    "He felt the Will gather behind his eyes. The Will cage held, and the "
+    "gunners loaded the Will shells."
+)
+
+
+def test_sanitize_keeps_the_side_of_an_inverse_pair_whose_term_is_in_the_source():
+    """Regression: the stored order put the reversed half first and it won."""
+    from borgesica.domain.glossary import sanitize_glossary
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term=term, translation=translation)
+            for term, translation in _REAL_WILL_ENTRIES
+        ]
+    )
+
+    cleaned, dropped = sanitize_glossary(glossary, source_text=_WILL_SOURCE)
+
+    assert sorted((e.term, e.translation) for e in cleaned.entries) == [
+        ("Will", "Voluntad"),
+        ("Will cage", "Jaula de Voluntad"),
+        ("Will shells", "proyectiles de Voluntad"),
+    ]
+    assert sorted(e.term for e in dropped) == [
+        "Voluntad",
+        "jaula de Voluntad",
+        "proyectiles Voluntad",
+    ]
+
+
+@pytest.mark.parametrize("stored_order", [1, -1], ids=["reversed-first", "source-first"])
+def test_drop_reversed_decides_an_inverse_pair_the_same_in_either_order(
+    stored_order: int,
+):
+    """With source evidence, the order the pair arrives in no longer matters."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Voluntad", translation="Will"),
+            GlossaryEntry(term="Will", translation="Voluntad"),
+        ][::stored_order]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary, source_text=_WILL_SOURCE)
+
+    assert [(e.term, e.translation) for e in cleaned.entries] == [("Will", "Voluntad")]
+    assert [e.term for e in dropped] == ["Voluntad"]
+
+
+def test_drop_reversed_keeps_both_halves_when_the_source_attests_both_terms():
+    """Undecidable direction: never drop an entry whose term the source uses."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Pliegue", translation="Fold"),
+            GlossaryEntry(term="Fold", translation="Pliegue"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(
+        glossary, source_text="The Fold opened; she called it the Pliegue."
+    )
+
+    assert [e.term for e in cleaned.entries] == ["Pliegue", "Fold"]
+    assert dropped == []
+
+
+def test_drop_reversed_falls_back_to_order_when_the_source_attests_neither_term():
+    """No evidence either way leaves the recorded-order tie-break in charge."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Birthright", translation="Derecho de Nacimiento"),
+            GlossaryEntry(term="Derecho de Nacimiento", translation="Birthright"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary, source_text="Nothing here.")
+
+    assert [e.term for e in cleaned.entries] == ["Birthright"]
+    assert [e.term for e in dropped] == ["Derecho de Nacimiento"]
+
+
+def test_drop_reversed_keeps_the_attested_side_against_a_locked_reversal():
+    """A locked entry is never dropped, and its partner found in the source is not either."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Voluntad", translation="Will", locked=True),
+            GlossaryEntry(term="Will", translation="Voluntad"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary, source_text=_WILL_SOURCE)
+
+    assert [e.term for e in cleaned.entries] == ["Voluntad", "Will"]
+    assert dropped == []
+
+
+def test_drop_reversed_does_not_attest_a_term_inside_a_contraction():
+    """'Don' must not count as found in the source because of "don't"."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Don", translation="Lord"),
+            GlossaryEntry(term="Lord", translation="Don"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(
+        glossary, source_text="I don't know, my Lord."
+    )
+
+    assert [e.term for e in cleaned.entries] == ["Lord"]
+    assert [e.term for e in dropped] == ["Don"]
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    ["The Will’s reach was long.", "‘Bow to the Will’, he said."],
+    ids=["possessive", "closing-quote"],
+)
+def test_drop_reversed_attests_a_term_before_a_possessive_or_closing_quote(
+    source_text: str,
+):
+    """Only a contraction disqualifies a match; these are genuine occurrences."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Voluntad", translation="Will"),
+            GlossaryEntry(term="Will", translation="Voluntad"),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary, source_text=source_text)
+
+    assert [e.term for e in cleaned.entries] == ["Will"]
+    assert [e.term for e in dropped] == ["Voluntad"]
+
+
+def test_drop_reversed_never_drops_a_locked_duplicate_of_a_losing_term():
+    """Called without dedupe first, a locked case variant of a loser still survives."""
+    from borgesica.domain.glossary import drop_reversed_entries
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Voluntad", translation="Will"),
+            GlossaryEntry(term="Will", translation="Voluntad"),
+            GlossaryEntry(term="voluntad", translation="Will", locked=True),
+        ]
+    )
+
+    cleaned, dropped = drop_reversed_entries(glossary, source_text=_WILL_SOURCE)
+
+    assert [e.term for e in cleaned.entries] == ["Will", "voluntad"]
+    assert [e.term for e in dropped] == ["Voluntad"]
+
+
 def test_drop_reversed_never_drops_an_identity_entry():
     """'Aaru -> Aaru' states no direction, so it can never contradict one."""
     from borgesica.domain.glossary import drop_reversed_entries
