@@ -438,8 +438,22 @@ class TranslatorEngine:
         Deliberately does NOT write back: persisting is the job of the calls
         that already persist. See ``update_glossary``.
         """
-        cleaned, _dropped = sanitize_glossary(self._checkpoint.load_glossary(job_id))
+        cleaned, _dropped = self._sanitize(job_id, self._checkpoint.load_glossary(job_id))
         return cleaned
+
+    def _sanitize(
+        self, job_id: str, glossary: Glossary
+    ) -> tuple[Glossary, list[GlossaryEntry]]:
+        """Apply ``sanitize_glossary`` with the job's source text as evidence.
+
+        The store returns entries ``ORDER BY term``, not in the order they
+        were recorded, so the reversal rule cannot trust order to pick the
+        right half of an inverse pair. Without the source, job 13b43ac6 lost
+        "Will -> Voluntad" and kept "Voluntad -> Will".
+        """
+        chunks = sorted(self._checkpoint.load_chunks(job_id), key=lambda c: c.index)
+        source_text = "\n\n".join(c.source_text for c in chunks)
+        return sanitize_glossary(glossary, source_text=source_text)
 
     def get_glossary(self, job_id: str) -> Glossary:
         """Return the current persisted glossary for a job.
@@ -478,7 +492,7 @@ class TranslatorEngine:
             JobNotFoundError: if job_id is not found.
         """
         self._load_job_or_raise(job_id)
-        _cleaned, dropped = sanitize_glossary(self._checkpoint.load_glossary(job_id))
+        _cleaned, dropped = self._sanitize(job_id, self._checkpoint.load_glossary(job_id))
         return dropped
 
     def glossary_settlements(self, job_id: str) -> GlossarySettlements:
@@ -577,8 +591,8 @@ class TranslatorEngine:
                 update={"first_draw": None, "gender": carried}
             )
 
-        updated, _dropped = sanitize_glossary(
-            Glossary(entries=list(entry_map.values()))
+        updated, _dropped = self._sanitize(
+            job_id, Glossary(entries=list(entry_map.values()))
         )
 
         # Only the caller's OWN entries count as a rejection. Compared by

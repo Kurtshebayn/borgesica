@@ -844,6 +844,47 @@ def test_get_glossary_drops_reversed_entries(tmp_path: Path) -> None:
     assert [e.term for e in glossary.entries] == ["Will"]
 
 
+def test_sqlite_stored_reversed_pair_keeps_the_side_found_in_the_source(
+    tmp_path: Path,
+) -> None:
+    """Regression, job 13b43ac6: the real store loads ``ORDER BY term``.
+
+    That puts "Voluntad -> Will" ahead of "Will -> Voluntad", and an order-based
+    tie-break dropped the correct entry on every read — and on the next save,
+    for good. The in-memory store keeps insertion order, which hid it.
+    """
+    from borgesica.adapters.checkpoints.sqlite_checkpoint import SQLiteCheckpointStore
+
+    srt_path = tmp_path / "will.srt"
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:01,500\nThe Will answered him.\n",
+        encoding="utf-8",
+    )
+    checkpoint = SQLiteCheckpointStore(":memory:")
+    engine, _, _ = _make_engine(checkpoint=checkpoint)  # type: ignore[arg-type]
+    job = engine.create_job(str(srt_path), _make_config())
+    checkpoint.save_glossary(
+        job.id,
+        Glossary(
+            entries=[
+                GlossaryEntry(term="Will", translation="Voluntad"),
+                GlossaryEntry(term="Voluntad", translation="Will"),
+            ]
+        ),
+    )
+
+    shown = engine.get_glossary(job.id)
+    repairs = engine.glossary_repairs(job.id)
+    persisted = engine.update_glossary(
+        job.id, [GlossaryEntry(term="Aaru", translation="Aaru")]
+    )
+
+    assert [(e.term, e.translation) for e in shown.entries] == [("Will", "Voluntad")]
+    assert [e.term for e in repairs] == ["Voluntad"]
+    assert ("Will", "Voluntad") in [(e.term, e.translation) for e in persisted.entries]
+    assert "Voluntad" not in [e.term for e in persisted.entries]
+
+
 def test_get_glossary_does_not_rewrite_what_is_stored(tmp_path: Path) -> None:
     """A getter stays a getter — cleaning on read must not silently persist."""
     engine, job = _engine_with_glossary(

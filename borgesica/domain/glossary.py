@@ -247,8 +247,67 @@ def dedupe_glossary(glossary: Glossary) -> tuple[Glossary, list[GlossaryEntry]]:
 # ---------------------------------------------------------------------------
 
 
+def _attested(term: str, source_text: str) -> bool:
+    """Return whether ``term`` occurs as a whole term in the source text.
+
+    Case-insensitive, and any whitespace run in the source matches a space in
+    the term, so a multi-word term broken across a line still counts. A term
+    followed by a contraction does not count: otherwise Spanish "Don" is
+    found in every English "don't", and a falsely attested reversed term is
+    kept. A possessive "'s" and a closing single quote still count.
+    """
+    words = [re.escape(word) for word in normalize_term(term).split(" ")]
+    pattern = r"(?<!\w)" + r"\s+".join(words) + r"(?!\w|['’](?!s\b)\w)"
+    return re.search(pattern, source_text, re.IGNORECASE) is not None
+
+
+def _inverse_pair_verdicts(
+    entries: list[GlossaryEntry], source_text: str
+) -> tuple[set[str], set[str]]:
+    """Decide mutually inverse pairs from the source, returning (losers, protected).
+
+    Both sets hold casefolded terms. When exactly one term of "A -> B" /
+    "B -> A" occurs in the source, that entry is the source direction: it is
+    protected and its partner loses. When both occur the direction is
+    undecidable and both are protected — dropping an entry whose term the
+    source actually uses loses a real instruction. When neither occurs there is
+    no verdict and the caller's order tie-break applies. Locked entries are
+    never losers.
+    """
+    by_term: dict[str, GlossaryEntry] = {}
+    for entry in entries:
+        by_term.setdefault(normalize_term(entry.term).casefold(), entry)
+
+    losers: set[str] = set()
+    protected: set[str] = set()
+    for key, entry in by_term.items():
+        partner_key = normalize_term(entry.translation).casefold()
+        partner = by_term.get(partner_key)
+        if (
+            partner_key <= key  # identity entries, and each pair visited once
+            or partner is None
+            or normalize_term(partner.translation).casefold() != key
+        ):
+            continue
+
+        in_source = _attested(entry.term, source_text)
+        partner_in_source = _attested(partner.term, source_text)
+        if in_source:
+            protected.add(key)
+        if partner_in_source:
+            protected.add(partner_key)
+        if in_source and not partner_in_source and not partner.locked:
+            losers.add(partner_key)
+        if partner_in_source and not in_source and not entry.locked:
+            losers.add(key)
+
+    return losers, protected
+
+
 def drop_reversed_entries(
     glossary: Glossary,
+    *,
+    source_text: str | None = None,
 ) -> tuple[Glossary, list[GlossaryEntry]]:
     """Remove entries that point the wrong way, returning them for reporting.
 
@@ -275,11 +334,22 @@ def drop_reversed_entries(
     - LOCKED entries are never dropped. Locking is a human decision, and
       inference does not get to overrule it.
 
-    Order decides which half of an inverse pair survives, and the data backs
-    it: in all six real cases the source-language direction was recorded
-    FIRST, and the rendering leaked back as a term later, after the model had
-    already produced it.
+    Which half of a mutually inverse pair ("A -> B" alongside "B -> A")
+    survives is decided by ``source_text`` when given: the entry whose term
+    the source uses is the source direction. Order alone is NOT reliable
+    evidence. The source direction is usually recorded first, but
+    ``SQLiteCheckpointStore.load_glossary`` returns entries ``ORDER BY term``,
+    so on job 13b43ac6 "Voluntad -> Will" sorted ahead of "Will -> Voluntad"
+    and the correct entry was the one dropped. Checked against the source, all
+    six real inverse pairs across two jobs have exactly one side present. When
+    the source uses both terms, both entries are kept; when it uses neither,
+    or no source is given, the first-seen entry wins as before.
     """
+    losers, protected = (
+        _inverse_pair_verdicts(glossary.entries, source_text)
+        if source_text
+        else (set(), set())
+    )
     mapped_terms: set[str] = set()
     kept: list[GlossaryEntry] = []
     dropped: list[GlossaryEntry] = []
@@ -288,11 +358,15 @@ def drop_reversed_entries(
         term = normalize_term(entry.term)
         translation = normalize_term(entry.translation)
         is_identity = term == translation
+        key = term.casefold()
 
-        if (
-            not is_identity
-            and not entry.locked
-            and translation.casefold() in mapped_terms
+        if not entry.locked and (
+            key in losers
+            or (
+                not is_identity
+                and key not in protected
+                and translation.casefold() in mapped_terms
+            )
         ):
             dropped.append(entry)
             continue
@@ -304,12 +378,18 @@ def drop_reversed_entries(
     return Glossary(entries=kept), dropped
 
 
-def sanitize_glossary(glossary: Glossary) -> tuple[Glossary, list[GlossaryEntry]]:
+def sanitize_glossary(
+    glossary: Glossary,
+    *,
+    source_text: str | None = None,
+) -> tuple[Glossary, list[GlossaryEntry]]:
     """Apply every glossary hygiene rule, returning the entries that were removed.
 
     The canonical composition — deduplicate case and spacing variants, then
     drop entries that point the wrong way. Both rules are idempotent, so this
-    is safe to run on every load and every save.
+    is safe to run on every load and every save. Pass the job's source text
+    whenever the glossary's order may not be the order it was recorded in (any
+    glossary loaded from the store); see ``drop_reversed_entries``.
 
     Exists so there is ONE spelling of "a clean glossary". The rules are
     applied at each boundary where a glossary enters the system: on load, on
@@ -318,7 +398,9 @@ def sanitize_glossary(glossary: Glossary) -> tuple[Glossary, list[GlossaryEntry]
     keep its duplicates and contradictions forever.
     """
     deduped, duplicates = dedupe_glossary(glossary)
-    cleaned, reversed_entries = drop_reversed_entries(deduped)
+    cleaned, reversed_entries = drop_reversed_entries(
+        deduped, source_text=source_text
+    )
     return cleaned, duplicates + reversed_entries
 
 
