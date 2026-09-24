@@ -400,8 +400,9 @@ class TranslatorEngine:
             job_id: ID of the job.
 
         Returns:
-            Findings in chunk order. Empty means no detector fired, which is
-            NOT the same as a faithful translation — see ``audit_chunks``.
+            Job-level glossary contradictions first (``chunk_index`` None),
+            then findings in chunk order. Empty means no detector fired, which
+            is NOT the same as a faithful translation — see ``audit_chunks``.
 
         Raises:
             JobNotFoundError: if job_id is not found.
@@ -763,6 +764,8 @@ class TranslatorEngine:
         if final_job.status == JobStatus.DONE:
             writer = self._writers[job.config.source_type]
             done_chunks = self._checkpoint.load_chunks(job.id)
-            writer.write(done_chunks, job.source_path, out_path)
+            writer.write(
+                done_chunks, job.source_path, out_path, target_lang=job.config.target_lang
+            )
 
         return final_job

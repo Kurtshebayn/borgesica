@@ -14,13 +14,15 @@ Design (continue-on-error — replaces M2-0 per-chunk flow):
          translated_text = source_text (pass-through), make ZERO provider calls, and
          move to the next chunk. Applies identically regardless of continue_on_error.
       4. Build system prompt via ContextManager (using current glossary + last summary).
-      5. PRIMARY (tags-in-text): send source_text WITH inline tags to the provider.
-         After translate, validate_tags(source, translated):
-           - pass → chunk DONE.
+      5. PRIMARY (placeholders-in-text): tokenize_tags(source_text) replaces every
+         inline tag with an opaque numbered placeholder (attributes — hrefs,
+         classes, ids — never leave the orchestrator) and sends THAT to the
+         provider. After translate, validate_placeholders(source, translated):
+           - pass → restore_tags() puts the real tags back → chunk DONE.
            - mismatch → retry (≤2 additional, 3 total).
-      6. If quality_mode="reflective": critique + revise on the tagged user prompt.
-         Persisted text = REVISE step output.
-      7. FALLBACK (only after 3 tags-in-text attempts all fail validation):
+      6. If quality_mode="reflective": critique + revise on the placeholder-ized
+         user prompt. Persisted text = REVISE step output, restored.
+      7. FALLBACK (only after 3 placeholders-in-text attempts all fail validation):
          strip(source) → translate plain text (fresh provider call) → reinsert(tags)
          → validate_tags:
            - pass → chunk DONE using fallback output.
@@ -55,7 +57,7 @@ import re
 import threading
 from datetime import UTC, datetime
 
-from borgesica.domain.context import ContextManager
+from borgesica.domain.context import INLINE_TAG_RULES, ContextManager
 from borgesica.domain.cost import (
     _tool_schema_tokens,
     _waste_factor,
@@ -75,8 +77,11 @@ from borgesica.domain.glossary import (
 )
 from borgesica.domain.markup import (
     reinsert,
+    restore_tags,
     strip,
     strip_all_tags,
+    tokenize_tags,
+    validate_placeholders,
     validate_segments,
     validate_tags,
 )
@@ -110,32 +115,50 @@ _MAX_TAG_RETRIES = 2
 # Reflective mode calls: translate (draft) → critique → revise
 _REFLECTIVE_PASSES = 3
 
-# System prompt used for the critique step in reflective mode
-_CRITIQUE_SYSTEM = """\
+# System prompt used for the critique step in reflective mode.
+#
+# Both this prompt and _REVISE_SYSTEM operate on placeholder-bearing text (the
+# draft/critique/revise sequence runs on the SAME tokenize_tags() output as
+# the primary path — see _translate_reflective), yet neither mentioned markup
+# before this fix. A revise step that silently drops or renumbers a
+# placeholder wastes a retry or trips the fallback, so both prompts embed the
+# SAME INLINE_TAG_RULES text the primary path already uses (imported from
+# context.py, not re-described here) — one source of truth instead of two
+# paraphrases that could drift apart.
+_CRITIQUE_SYSTEM = f"""\
 You are a translation quality reviewer. Review the following translation for:
 1. Literal calques or unnatural phrasing
 2. Register inconsistency
 3. Any loss of meaning or image from the source
 
+{INLINE_TAG_RULES}
+
+The draft may contain numbered placeholder markers (⟦1⟧, ⟦/1⟧, ...) standing in
+for inline formatting tags. A placeholder marker present, verbatim and in a
+sensible position is NOT a translation defect — do NOT flag it, mention it, or
+suggest removing it in your critique. Judge the surrounding prose only.
+
 Return a JSON object:
-  {
+  {{
     "translation": "<your critique notes, NOT the translation>",
     "summary_update": "Critique complete.",
     "glossary_additions": []
-  }"""
+  }}"""
 
 # System prompt used for the revise step in reflective mode
-_REVISE_SYSTEM = """\
+_REVISE_SYSTEM = f"""\
 You are a professional literary translator. You have received a draft translation
 and a critique of its weaknesses. Produce a revised translation that addresses
 the critique while remaining faithful to the source.
 
+{INLINE_TAG_RULES}
+
 Return a JSON object:
-  {
+  {{
     "translation": "<revised translation>",
     "summary_update": "<3-5 sentence narrative summary — REPLACES prior summary>",
     "glossary_additions": []
-  }"""
+  }}"""
 
 # Appended to the system prompt for SRT cue-batch chunks (segmented contract).
 # The exact count is stated per chunk because "one per segment" alone is what
@@ -168,12 +191,14 @@ def _add_usage(a: Usage, b: Usage) -> Usage:
     )
 
 
-def _indexed_segments(cue_batches: list[dict]) -> str:
-    """Render cue batch texts as the indexed user prompt: "[k]\\n<text>"
-    blocks separated by blank lines. Markers are transport only — they never
-    enter chunk.source_text or the checkpoint format."""
+def _indexed_segments(texts: list[str]) -> str:
+    """Render segment texts as the indexed user prompt: "[k]\\n<text>" blocks
+    separated by blank lines. Markers are transport only — they never enter
+    chunk.source_text or the checkpoint format. *texts* are already in the
+    form sent to the provider (placeholder markers, not raw tags — see
+    tokenize_tags)."""
     return "\n\n".join(
-        f"[{i}]\n{cb['text']}" for i, cb in enumerate(cue_batches, start=1)
+        f"[{i}]\n{text}" for i, text in enumerate(texts, start=1)
     )
 
 
@@ -657,24 +682,38 @@ class TranslationOrchestrator:
         out_price: float,
         cache_price: float,
     ) -> tuple[TranslationUnit | None, str | None, float, bool, str | None]:
-        """Attempt translation using the tags-in-text PRIMARY path, with up to
-        _MAX_TAG_RETRIES retries on tag-count mismatch, then a deterministic
-        FALLBACK (strip → translate plain → reinsert) if all primary attempts fail.
+        """Attempt translation using the placeholder-based PRIMARY path, with
+        up to _MAX_TAG_RETRIES retries on placeholder-sequence mismatch, then
+        a deterministic FALLBACK (strip → translate plain → reinsert) if all
+        primary attempts fail.
 
-        PRIMARY (tags-in-text):
-          - Send chunk.source_text WITH inline tags as the user prompt.
-          - validate_tags(source, translated_text) on the raw output.
+        PRIMARY (placeholders-in-text):
+          - tokenize_tags(chunk.source_text) replaces every inline tag with an
+            opaque numbered placeholder (see markup.tokenize_tags) BEFORE
+            anything is sent to the provider — attributes (hrefs, classes,
+            ids) never leave the orchestrator.
+          - validate_placeholders(source_placeholder_text, translated_text,
+            tag_registry) on the raw output: every id present exactly once,
+            correctly paired/nested. Sibling reordering is accepted (flagged,
+            not rejected — see markup.PlaceholderValidation).
           - validate_segments(source, translated_text): the "\\n\\n" segment
             count must match the source (writers map segments to document
-            nodes positionally). Mismatch retries like a tag mismatch, but if
-            every attempt is tag-valid and only segment-mismatched, the LAST
-            such attempt is accepted (never FAILED, no fallback call) — the
-            writer's defensive mapping absorbs it.
+            nodes positionally) — unaffected by placeholders vs raw tags,
+            since neither carries "\\n\\n". Mismatch retries like a
+            placeholder mismatch, but if every attempt is placeholder-valid
+            and only segment-mismatched, the LAST such attempt is accepted
+            (never FAILED, no fallback call) — the writer's defensive mapping
+            absorbs it.
           - Retry up to _MAX_TAG_RETRIES times (3 total attempts) on mismatch.
+          - On acceptance, restore_tags() puts the real tags (with their
+            original attributes) back before the text is persisted.
 
-        FALLBACK (strip/reinsert deterministic path):
+        FALLBACK (strip/reinsert deterministic path) — UNCHANGED safety net:
           - Applied only after all primary attempts fail.
           - strip(source) → translate plain text (fresh provider call) → reinsert(tags).
+          - This path never uses placeholders: it operates on real tags via
+            the original strip()/reinsert()/validate_tags() trio, exactly as
+            before the placeholder rework.
           - validate_tags again; if pass → chunk DONE using fallback output.
           - If provider raises or validate_tags fails → return (None, None, total_cost, False).
 
@@ -682,12 +721,12 @@ class TranslationOrchestrator:
             (TranslationUnit, translated_text, total_call_cost, passed_validation,
             validation_errors) on success. passed_validation is True for the
             happy-path first-try match AND the strip/reinsert fallback success
-            (both are full validate_tags/validate_segments passes) — False for
-            the segment-mismatch best-effort acceptance (design decision #7:
-            DONE does NOT imply validation passed) and False when both primary
-            and fallback are exhausted (chunk FAILED — caller ignores the
-            flag's semantic weight there since translated_text is None, but it
-            is still threaded consistently).
+            (both are full placeholder/tag + segment validation passes) —
+            False for the segment-mismatch best-effort acceptance (design
+            decision #7: DONE does NOT imply validation passed) and False
+            when both primary and fallback are exhausted (chunk FAILED —
+            caller ignores the flag's semantic weight there since
+            translated_text is None, but it is still threaded consistently).
             (None, None, total_call_cost, False, validation_errors) if both
             primary and fallback fail.
             total_call_cost is the SUM of real usage costs from ALL calls made
@@ -697,23 +736,39 @@ class TranslationOrchestrator:
             attempt — None whenever passed_validation ends up True (a clean
             pass discards prior transient mismatches from earlier attempts).
         """
-        user_prompt = chunk.source_text  # PRIMARY: send WITH tags
+        # PRIMARY: tokenize once up front. Real tags (with attributes) live
+        # ONLY in tag_registry from this point on — the provider never sees
+        # them; it sees numbered placeholders instead (see markup.tokenize_tags).
+        source_placeholder_text, tag_registry = tokenize_tags(chunk.source_text)
+        user_prompt = source_placeholder_text
         total_call_cost = 0.0
         # T4b: validator issue messages collected across every mismatched or
-        # failed attempt (tag mismatch, segment mismatch, fallback failure).
-        # Serialized to JSON only when the chunk ends up NOT passing validation.
+        # failed attempt (placeholder mismatch, segment mismatch, fallback
+        # failure). Serialized to JSON only when the chunk ends up NOT passing
+        # validation.
         validation_issues: list[str] = []
 
         # Segmented (SRT) contract: cue-batch chunks request the translations
         # ARRAY — cue boundaries as structured data, not blank-line convention
         # (models "correct" blank lines between unpunctuated speech-to-text
         # fragments; they fill a fixed-length array reliably). The user prompt
-        # carries explicit [k] index markers; validation and checkpointing
-        # keep using the marker-free chunk.source_text.
+        # carries explicit [k] index markers over the PLACEHOLDER-ized text
+        # (SrtChunker builds chunk.source_text as the "\n\n" join of the same
+        # cue texts, so splitting the tokenized chunk on "\n\n" reproduces the
+        # per-cue placeholder text without re-tokenizing each cue separately —
+        # ids stay unique and consistent across the whole chunk). Validation
+        # and checkpointing keep using the marker-free chunk.source_text.
         cue_batches = chunk.meta.get("cue_batches")
         segment_count = len(cue_batches) if cue_batches else None
         if segment_count is not None:
-            user_prompt = _indexed_segments(cue_batches)
+            placeholder_segments = source_placeholder_text.split("\n\n")
+            if len(placeholder_segments) != segment_count:
+                # Defensive fallback for the (already-broken-elsewhere) case
+                # of a cue whose own text contains "\n\n" — falls back to
+                # per-cue raw text so segmentation stays correct; those tags
+                # then travel un-tokenized for this chunk only.
+                placeholder_segments = [cb["text"] for cb in cue_batches]
+            user_prompt = _indexed_segments(placeholder_segments)
             system = (
                 f"{system}\n\n"
                 + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count)
@@ -782,8 +837,25 @@ class TranslationOrchestrator:
             if segment_count is not None:
                 translated_text = _segmented_text(unit, translated_text, segment_count)
 
-            # Validate tag counts in the raw translation (tags-in-text path).
-            if validate_tags(chunk.source_text, translated_text):
+            # Validate the placeholder SEQUENCE in the raw translation
+            # (placeholders-in-text primary path) — multiset + pairing/nesting,
+            # not a raw tag count (see markup.validate_placeholders).
+            placeholder_result = validate_placeholders(
+                source_placeholder_text, translated_text, tag_registry
+            )
+            if placeholder_result.valid:
+                if placeholder_result.reordered:
+                    # Legitimate — sibling word-order changes are allowed, not
+                    # rejected (see markup.PlaceholderValidation). Logged only
+                    # so a real run's translations are inspectable, never
+                    # threaded into validation_issues (that would defeat the
+                    # "flag, don't reject" decision by tainting passed_validation).
+                    logger.info(
+                        "Chunk %d attempt %d: placeholder sibling order differs "
+                        "from source (translation-driven word order) — accepted",
+                        chunk.index,
+                        attempt + 1,
+                    )
                 if validate_segments(chunk.source_text, translated_text):
                     # Structure can be perfect while the LANGUAGE is wrong: a
                     # real run shipped one chunk translated into Chinese
@@ -793,7 +865,8 @@ class TranslationOrchestrator:
                         translated_text, config.target_lang
                     )
                     if foreign is None:
-                        return unit, translated_text, total_call_cost, True, None
+                        restored_text = restore_tags(translated_text, tag_registry)
+                        return unit, restored_text, total_call_cost, True, None
                     validation_issues.append(
                         f"attempt {attempt + 1}: output is in {foreign} script, "
                         f"not {config.target_lang}"
@@ -802,7 +875,8 @@ class TranslationOrchestrator:
                     continue
                 # Segment-count mismatch (model merged/split "\n\n" paragraphs,
                 # which desynchronizes the writer's positional node mapping):
-                # keep this tag-valid attempt and retry for a compliant one.
+                # keep this placeholder-valid attempt and retry for a
+                # compliant one.
                 src_segs = len(chunk.source_text.split("\n\n"))
                 got_segs = len(translated_text.split("\n\n"))
                 validation_issues.append(
@@ -812,10 +886,13 @@ class TranslationOrchestrator:
                 best_effort = (unit, translated_text)
                 continue
 
-            # Tag mismatch — retry unless this was the last attempt.
-            validation_issues.append(f"attempt {attempt + 1}: tag count mismatch")
+            # Placeholder mismatch — retry unless this was the last attempt.
+            validation_issues.append(
+                f"attempt {attempt + 1}: placeholder mismatch "
+                f"({'; '.join(placeholder_result.issues)})"
+            )
 
-        # All attempts exhausted with at least one tag-valid but
+        # All attempts exhausted with at least one placeholder-valid but
         # segment-mismatched output. Two different consequences:
         #
         # PROSE: accept the last one — the writer's defensive mapping absorbs
@@ -826,8 +903,8 @@ class TranslationOrchestrator:
         # timing, so it falls back to source text — untranslated cues shipped
         # silently). End the chunk FAILED instead: it surfaces in the CLI
         # skip summary and `resume` retries exactly these chunks. The
-        # strip/reinsert fallback below exists for TAG failures and would
-        # cost another call without fixing segmentation — skip it.
+        # strip/reinsert fallback below exists for PLACEHOLDER failures and
+        # would cost another call without fixing segmentation — skip it.
         if best_effort is not None:
             if segment_count is None:
                 logger.warning(
@@ -839,7 +916,7 @@ class TranslationOrchestrator:
                 best_unit, best_text = best_effort
                 return (
                     best_unit,
-                    best_text,
+                    restore_tags(best_text, tag_registry),
                     total_call_cost,
                     False,
                     json.dumps(validation_issues),
@@ -854,8 +931,9 @@ class TranslationOrchestrator:
             return None, None, total_call_cost, False, json.dumps(validation_issues)
 
         # --- FALLBACK: strip → translate plain → reinsert ---
-        # All primary (tags-in-text) attempts exhausted.
-        # Apply the OLD deterministic path as a last resort.
+        # All primary (placeholders-in-text) attempts exhausted.
+        # Apply the OLD deterministic path as a last resort — real tags,
+        # no placeholders, unchanged from before the placeholder rework.
         try:
             plain_source, tags = strip(chunk.source_text)
             fallback_result = self._provider.translate(

@@ -749,38 +749,38 @@ def test_reflective_carries_draft_and_critique_cost_when_revise_raises():
 
 
 def test_tag_mismatch_retry_succeeds_on_second():
-    """Provider returns mismatched tags on 1st call, correct tags on 2nd."""
+    """Provider returns a placeholder-mismatched translation on the 1st call
+    (duplicated placeholder id), a placeholder-valid one on the 2nd."""
     store = InMemoryCheckpointStore()
 
-    call_count_ref: list[int] = [0]
-
-    class TagMismatchProvider(FakeTranslationProvider):
+    class PlaceholderMismatchProvider(FakeTranslationProvider):
         def translate(self, system: str, user: str, model: str) -> TranslationResult:
             n = len(self.call_log)
             self.call_log.append((system, user, model))
             if n == 0:
-                # First call: translation has mismatched tags (extra <i>)
+                # First call: id 1 duplicated (used for two separate pairs) —
+                # multiset check fails (2 opens, 2 closes instead of 1/1).
                 unit = TranslationUnit(
-                    translation="<i>Texto</i> <i>extra</i>",
+                    translation="⟦1⟧Texto⟦/1⟧ ⟦1⟧extra⟦/1⟧",
                     summary_update="Summary.",
                 )
             else:
-                # Second call: correct — no tags (original source also has no tags)
+                # Second call: id 1 used exactly once — placeholder-valid.
                 unit = TranslationUnit(
-                    translation="Texto correcto.",
+                    translation="Texto ⟦1⟧correcto⟦/1⟧.",
                     summary_update="Summary.",
                 )
             in_tok = self.count_tokens(system + " " + user, model)
             out_tok = self.count_tokens(unit.translation, model)
             return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
 
-    provider = TagMismatchProvider()
+    provider = PlaceholderMismatchProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
 
     config = make_config()
     job = make_job(config, total=1)
-    # Chunk with NO tags in source so mismatch is detectable
-    chunks = [Chunk(index=0, source_text="Plain text without tags.")]
+    # Chunk with exactly one tag pair, so tokenize_tags assigns it id 1.
+    chunks = [Chunk(index=0, source_text="The <i>quick</i> fox.")]
 
     store.save_job(job)
     for c in chunks:
@@ -798,6 +798,7 @@ def test_tag_mismatch_retry_succeeds_on_second():
 
     assert provider.call_count == 2
     saved = store.load_chunks(job.id)
+    assert saved[0].translated_text == "Texto <i>correcto</i>."
     assert saved[0].status == ChunkStatus.DONE
     assert result.status == JobStatus.DONE
 
@@ -924,23 +925,30 @@ def test_segment_mismatch_all_attempts_accepts_best_effort():
 
 
 class _AlwaysMismatchProvider(FakeTranslationProvider):
-    """First chunk always returns a tag-mismatched translation (source has no
-    tags, translation always has one). Any subsequent chunk is translated
-    normally via a canned success response."""
+    """First chunk always fails validation forever (source has no inline
+    tags, so nothing the provider returns can ever satisfy
+    validate_placeholders — there is no registered id to match). Any
+    subsequent chunk is translated normally via a canned success response.
+
+    Placeholder rework: a tag-less source's primary AND fallback calls both
+    receive the SAME text ("No tags here." — strip() removes nothing either),
+    so raising on every attempt (rather than returning mismatched raw-tag
+    text, which the new placeholder validator no longer even inspects) is
+    the reliable way to force perpetual failure across all 4 calls.
+    """
 
     def translate(self, system: str, user: str, model: str) -> TranslationResult:
         self.call_log.append((system, user, model))
-        if user == "No tags here.":
-            # Always return extra tags — source has no tags → mismatch forever.
-            unit = TranslationUnit(
-                translation="<i>Always mismatched</i>",
-                summary_update="Summary.",
+        if "No tags here." in user:
+            raise MalformedOutput(
+                job_id="fake-job",
+                chunk_index=len(self.call_log) - 1,
+                usage=Usage(input_tokens=5, output_tokens=5),
             )
-        else:
-            unit = TranslationUnit(
-                translation=f"[translated] {user}",
-                summary_update="Summary.",
-            )
+        unit = TranslationUnit(
+            translation=f"[translated] {user}",
+            summary_update="Summary.",
+        )
         in_tok = self.count_tokens(system + " " + user, model)
         out_tok = self.count_tokens(unit.translation, model)
         return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
@@ -1003,22 +1011,29 @@ def test_tag_mismatch_all_retries_fail_chunk_failed_job_paused(continue_on_error
 
 def _always_mismatch_except(failing_texts: set[str]) -> type[FakeTranslationProvider]:
     """Build a provider class where any chunk whose source_text is in
-    *failing_texts* always returns a tag-mismatched translation (forcing
-    FAILED); every other chunk translates successfully."""
+    *failing_texts* always fails (forcing FAILED); every other chunk
+    translates successfully.
+
+    Placeholder rework: these chunks carry no inline tags, so there is no
+    placeholder id to ever mismatch on — raising MalformedOutput is the
+    tag-independent way to force perpetual failure across every attempt
+    (3 primary + 1 fallback), exactly as the old count-mismatch trick did
+    before validate_placeholders replaced validate_tags on the primary path.
+    """
 
     class _Provider(FakeTranslationProvider):
         def translate(self, system: str, user: str, model: str) -> TranslationResult:
             self.call_log.append((system, user, model))
             if user in failing_texts:
-                unit = TranslationUnit(
-                    translation="<i>Always mismatched</i>",
-                    summary_update="Summary.",
+                raise MalformedOutput(
+                    job_id="fake-job",
+                    chunk_index=len(self.call_log) - 1,
+                    usage=Usage(input_tokens=5, output_tokens=5),
                 )
-            else:
-                unit = TranslationUnit(
-                    translation=f"[translated] {user}",
-                    summary_update="Summary.",
-                )
+            unit = TranslationUnit(
+                translation=f"[translated] {user}",
+                summary_update="Summary.",
+            )
             in_tok = self.count_tokens(system + " " + user, model)
             out_tok = self.count_tokens(unit.translation, model)
             return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
@@ -1337,24 +1352,30 @@ def test_first_chunk_uses_placeholder_summary():
 
 
 # ===========================================================================
-# M2-0 Tests — Tag-rework: tags-in-text primary, strip/reinsert fallback
+# M2-0/M2-1 Tests — Tag-rework: placeholders-in-text primary, strip/reinsert
+# fallback
 # ===========================================================================
 
 
 # ===========================================================================
-# M2-0 Test 2: Tags-in-text primary: source is sent WITH tags, strip NOT applied
+# M2-1 Test 2: Placeholders-in-text primary: source is sent as PLACEHOLDERS,
+# never as raw tags — markup.strip must NOT have been applied either (that
+# would lose the tags entirely rather than opaque them).
 # ===========================================================================
 
 
 def test_tags_in_text_primary_strip_not_applied():
-    """Tags-in-text primary path: provider receives raw source WITH tags in the user
-    message. markup.strip must NOT have been applied before the provider call.
+    """Placeholders-in-text primary path: the provider receives the source
+    with inline tags replaced by numbered placeholders — never raw tags
+    (attributes must never reach the model) and never plain-stripped text
+    either (that would lose the tags' position/identity entirely).
     Spec: subtitle-translation/inline-tags-in-text scenario 'tags travel with translated words'.
     """
     store = InMemoryCheckpointStore()
-    # Provider returns a translation that KEEPS the tags and passes validate_tags
+    # Provider returns a translation that keeps the PLACEHOLDER (id 1, the
+    # only tag pair in "The <i>quick</i> fox.") and passes validate_placeholders.
     canned = TranslationUnit(
-        translation="El zorro <i>rápido</i>.",
+        translation="El zorro ⟦1⟧rápido⟦/1⟧.",
         summary_update="Summary.",
     )
     provider = FakeTranslationProvider(canned_unit=canned)
@@ -1382,14 +1403,81 @@ def test_tags_in_text_primary_strip_not_applied():
     assert result.status == JobStatus.DONE
     assert provider.call_count == 1
 
-    # The user message (second element of call_log tuple) must CONTAIN the raw tags.
-    # If strip had been applied, the user message would be plain text without tags.
+    # The user message (second element of call_log tuple) must contain the
+    # PLACEHOLDER marker, never the raw tag or its attributes.
     user_message = provider.call_log[0][1]
-    assert "<i>" in user_message, (
-        "User message must contain raw <i> tag — strip must NOT have been applied before call"
+    assert "⟦1⟧" in user_message, (
+        "User message must contain the placeholder marker ⟦1⟧"
     )
-    assert "</i>" in user_message, (
-        "User message must contain raw </i> tag — strip must NOT have been applied before call"
+    assert "⟦/1⟧" in user_message, (
+        "User message must contain the closing placeholder marker ⟦/1⟧"
+    )
+    assert "<i>" not in user_message and "</i>" not in user_message, (
+        "User message must NOT contain the raw tag — only the opaque placeholder"
+    )
+
+    # The persisted, restored text has the real tag back.
+    saved = store.load_chunks(job.id)
+    assert saved[0].translated_text == "El zorro <i>rápido</i>."
+
+
+# ===========================================================================
+# M2-1 Test — orchestrator-level end-to-end placeholder round trip (required
+# scenario: a fake provider receives placeholders, never raw tags/attributes,
+# returns them, and the final persisted chunk has the ORIGINAL markup —
+# attributes restored byte-for-byte).
+# ===========================================================================
+
+
+def test_orchestrator_roundtrip_provider_sees_only_placeholders():
+    """End-to-end: a chunk with an <a href="..."> link and an <em> pair goes
+    through the real orchestrator loop against a fake provider that echoes
+    its input back unchanged (an "identity translation"). The provider must
+    never see the href or any raw tag; the persisted chunk must have the
+    EXACT original markup back, byte-for-byte."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()  # default: echoes "[translated] " + user
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=1)
+    source = '<a href="https://example.com/secret?token=xyz">Click here</a> and <em>read this</em>.'
+    chunks = [Chunk(index=0, source_text=source)]
+
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    store.save_glossary(job.id, Glossary())
+
+    result = orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    assert result.status == JobStatus.DONE
+    assert provider.call_count == 1
+
+    user_message = provider.call_log[0][1]
+    # The href/token and the raw tags must never reach the provider.
+    assert "href" not in user_message
+    assert "token=xyz" not in user_message
+    assert "example.com" not in user_message
+    assert "<a" not in user_message and "</a>" not in user_message
+    assert "<em>" not in user_message and "</em>" not in user_message
+    # It DOES contain the opaque placeholder markers.
+    assert "⟦" in user_message
+
+    saved = store.load_chunks(job.id)
+    # The provider echoed "[translated] " + placeholder text; restore_tags()
+    # puts the real <a href="..."> and <em> back around their own content,
+    # wherever the placeholder landed in the echoed output.
+    assert saved[0].translated_text == (
+        '[translated] <a href="https://example.com/secret?token=xyz">Click here</a>'
+        " and <em>read this</em>."
     )
 
 
@@ -1399,9 +1487,9 @@ def test_tags_in_text_primary_strip_not_applied():
 
 
 def test_tags_in_text_mismatch_retry_succeeds_on_second():
-    """When validate_tags fails on attempt 1 but succeeds on attempt 2, the chunk
-    completes as DONE with exactly 2 provider calls (retry behavior preserved under
-    the new tags-in-text path).
+    """When validate_placeholders fails on attempt 1 but succeeds on attempt 2,
+    the chunk completes as DONE with exactly 2 provider calls (retry behavior
+    preserved under the placeholders-in-text path).
     Spec: subtitle-translation/inline-tags-in-text scenario 'tag count mismatch triggers retry'.
     """
     store = InMemoryCheckpointStore()
@@ -1411,16 +1499,16 @@ def test_tags_in_text_mismatch_retry_succeeds_on_second():
             n = len(self.call_log)
             self.call_log.append((system, user, model))
             if n == 0:
-                # First attempt: tags missing in output → validate_tags will fail
-                # (source has <i>...</i> but translation has none)
+                # First attempt: placeholder missing in output →
+                # validate_placeholders will fail (source has id 1, output none).
                 unit = TranslationUnit(
-                    translation="El zorro rápido.",  # missing tags
+                    translation="El zorro rápido.",  # missing placeholder
                     summary_update="Summary.",
                 )
             else:
-                # Second attempt: tags preserved → validate_tags passes
+                # Second attempt: placeholder preserved → validate_placeholders passes.
                 unit = TranslationUnit(
-                    translation="El zorro <i>rápido</i>.",
+                    translation="El zorro ⟦1⟧rápido⟦/1⟧.",
                     summary_update="Summary.",
                 )
             in_tok = self.count_tokens(system + " " + user, model)
@@ -1453,6 +1541,7 @@ def test_tags_in_text_mismatch_retry_succeeds_on_second():
     assert result.status == JobStatus.DONE
     saved = store.load_chunks(job.id)
     assert saved[0].status == ChunkStatus.DONE
+    assert saved[0].translated_text == "El zorro <i>rápido</i>."
 
 
 # ===========================================================================
@@ -1671,12 +1760,14 @@ def test_unexpected_exception_in_fallback_propagates():
 
 def test_cue_spanning_tag_regression():
     """Regression: a 2-cue chunk where cue 1 has <i>...</i> tags.
-    After the tags-in-text path and SrtWriter split on '\\n\\n', the <i>...</i>
-    pair must remain WITHIN cue 1's text — no tag may leak into cue 2.
+    After the placeholders-in-text path and SrtWriter split on '\\n\\n', the
+    <i>...</i> pair must remain WITHIN cue 1's text — no tag may leak into cue 2.
 
     This is the exact bug from the 2026-06-25 live test with proportional reinsert.
-    Using the tags-in-text primary path, the model is given the full source WITH tags
-    and told to carry them — so translation output keeps <i>...</i> in place.
+    Using the placeholders-in-text primary path, the model is given the full
+    source with its one inline tag replaced by placeholder id 1 and told to
+    carry it verbatim — so translation output keeps the placeholder in place,
+    and restore_tags() puts the real <i>...</i> back afterwards.
     The SrtWriter split on '\\n\\n' then correctly places them in cue 1.
     """
     from borgesica.domain.markup import validate_tags
@@ -1688,11 +1779,13 @@ def test_cue_spanning_tag_regression():
     cue2_source = "before they arrive."
     source_text = f"{cue1_source}\n\n{cue2_source}"
 
-    # The provider is given the raw source WITH tags (tags-in-text primary path).
-    # In a real translation, the model returns something like:
-    # "No tenemos <i>mucho</i> tiempo\n\nantes de que lleguen."
-    # We simulate this with a canned TranslationUnit that keeps tags in cue 1.
-    canned_translation = "No tenemos <i>mucho</i> tiempo\n\nantes de que lleguen."
+    # The provider is given the source with its ONE tag pair replaced by
+    # placeholder id 1 (placeholders-in-text primary path). In a real
+    # translation, the model returns something like:
+    # "No tenemos ⟦1⟧mucho⟦/1⟧ tiempo\n\nantes de que lleguen."
+    # We simulate this with a canned TranslationUnit that keeps the
+    # placeholder in cue 1.
+    canned_translation = "No tenemos ⟦1⟧mucho⟦/1⟧ tiempo\n\nantes de que lleguen."
     canned = TranslationUnit(
         translation=canned_translation,
         summary_update="Summary.",
@@ -1741,19 +1834,22 @@ def test_cue_spanning_tag_regression():
     assert "<i>" not in cue2_translated, f"<i> must NOT be in cue 2, got: {cue2_translated!r}"
     assert "</i>" not in cue2_translated, f"</i> must NOT be in cue 2, got: {cue2_translated!r}"
 
-    # Verify overall validate_tags still passes
+    # Verify overall validate_tags still passes on the RESTORED text
     assert validate_tags(source_text, translated_text), (
         "validate_tags must pass: tag count in source and translation must match"
     )
 
-    # S-M2-1: hardening assertion — the provider must have received the tags in
-    # the user message (tags-in-text primary path). call_log entries are
-    # (system, user, model); index [1] is the user prompt.
-    # Against the OLD strip-before-call flow, source_text would have been
-    # stripped of tags before being sent, and this assertion would FAIL.
-    assert "<i>" in provider.call_log[0][1], (
-        "Provider user-message must contain inline tags (tags-in-text path). "
-        f"Got user message: {provider.call_log[0][1][:200]!r}"
+    # S-M2-1 (updated for the placeholder rework): the provider must have
+    # received the PLACEHOLDER, never the raw tag, in the user message.
+    # call_log entries are (system, user, model); index [1] is the user prompt.
+    user_message = provider.call_log[0][1]
+    assert "⟦1⟧" in user_message and "⟦/1⟧" in user_message, (
+        "Provider user-message must contain the placeholder marker "
+        f"(placeholders-in-text path). Got user message: {user_message[:200]!r}"
+    )
+    assert "<i>" not in user_message and "</i>" not in user_message, (
+        "Provider user-message must NOT contain the raw tag — only the opaque "
+        f"placeholder. Got user message: {user_message[:200]!r}"
     )
 
 
@@ -1883,22 +1979,26 @@ def test_failed_chunk_cost_is_nonzero():
 
     accumulated_call_costs: list[float] = []
 
-    class AlwaysMismatchProvider(FakeTranslationProvider):
-        """Always returns mismatched tags; tracks individual call costs."""
+    class AlwaysFailingProvider(FakeTranslationProvider):
+        """Every attempt is billed (nonzero usage) but raises MalformedOutput —
+        tracks each billed-but-failed call's cost so the test can assert the
+        orchestrator accrues exactly that total. Placeholder rework: forcing
+        perpetual failure via a raise (rather than mismatched raw-tag text,
+        which the new placeholder validator no longer inspects for a tag-less
+        source) is tag-independent and keeps this a pure cost-accrual test."""
         def translate(self, system: str, user: str, model: str) -> "TranslationResult":  # type: ignore[override]
-            from borgesica.domain.models import TranslationResult, TranslationUnit, Usage
             self.call_log.append((system, user, model))
-            unit = TranslationUnit(
-                translation="<i>Always mismatched</i>",
-                summary_update="Summary.",
-            )
             in_tok = self.count_tokens(system + " " + user, model)
-            out_tok = self.count_tokens(unit.translation, model)
+            out_tok = 5  # provider billed some output before giving up
             call_cost = (in_tok / 1e6) * 1.0 + (out_tok / 1e6) * 5.0
             accumulated_call_costs.append(call_cost)
-            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
+            raise MalformedOutput(
+                job_id="fake-job",
+                chunk_index=len(self.call_log) - 1,
+                usage=Usage(input_tokens=in_tok, output_tokens=out_tok),
+            )
 
-    provider = AlwaysMismatchProvider()
+    provider = AlwaysFailingProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
 
     # continue_on_error=False: this test's job-status assertion (PAUSED) is
@@ -1908,7 +2008,7 @@ def test_failed_chunk_cost_is_nonzero():
     # the PAUSED and the continue-past-FAILED paths).
     config = make_config(continue_on_error=False)
     job = make_job(config, total=1)
-    # Plain text source (no tags) — provider returns tags → tag mismatch for all 3+1 calls
+    # Plain text source (no tags) — every attempt (3 primary + 1 fallback) raises.
     chunks = [Chunk(index=0, source_text="No tags here.")]
 
     store.save_job(job)
@@ -3507,3 +3607,58 @@ def test_character_gender_is_not_invented_for_a_thinly_evidenced_name():
     persisted = {e.term: e for e in store.load_glossary(job.id).entries}
     assert persisted["Tara"].gender is None
     assert "CHARACTER GENDER" not in provider.call_log[-1][0]
+
+
+# ===========================================================================
+# 22. Reflective critique/revise system prompts must state the placeholder
+#     preservation rule (they operate on placeholder-bearing text — see
+#     TranslationOrchestrator module docstring step 6 — but never mentioned
+#     markup before this fix).
+# ===========================================================================
+
+
+def test_critique_system_states_placeholder_rule():
+    """The critique step's system prompt must instruct the reviewer that
+    placeholder markers are not itself a defect to flag."""
+    from borgesica.domain.orchestrator import _CRITIQUE_SYSTEM
+
+    assert "⟦" in _CRITIQUE_SYSTEM, (
+        "critique system prompt must show the placeholder marker syntax"
+    )
+    assert "verbatim" in _CRITIQUE_SYSTEM.lower(), (
+        "critique system prompt must state placeholders must survive verbatim"
+    )
+    assert "defect" in _CRITIQUE_SYSTEM.lower(), (
+        "critique system prompt must tell the reviewer not to flag placeholders "
+        "as a translation defect"
+    )
+
+
+def test_revise_system_states_placeholder_rule():
+    """The revise step's system prompt must instruct the model that
+    placeholders must come back unchanged."""
+    from borgesica.domain.orchestrator import _REVISE_SYSTEM
+
+    assert "⟦" in _REVISE_SYSTEM, (
+        "revise system prompt must show the placeholder marker syntax"
+    )
+    assert "verbatim" in _REVISE_SYSTEM.lower(), (
+        "revise system prompt must state placeholders must survive verbatim"
+    )
+
+
+def test_reflective_prompts_share_one_placeholder_rule_source():
+    """Both reflective system prompts must reuse the SAME wording as
+    context.INLINE_TAG_RULES rather than each carrying its own paraphrase
+    that could silently drift out of sync with the primary-path rules."""
+    from borgesica.domain.context import INLINE_TAG_RULES
+    from borgesica.domain.orchestrator import _CRITIQUE_SYSTEM, _REVISE_SYSTEM
+
+    assert INLINE_TAG_RULES in _CRITIQUE_SYSTEM, (
+        "critique system prompt must embed the shared INLINE_TAG_RULES text "
+        "verbatim, not a second divergent description"
+    )
+    assert INLINE_TAG_RULES in _REVISE_SYSTEM, (
+        "revise system prompt must embed the shared INLINE_TAG_RULES text "
+        "verbatim, not a second divergent description"
+    )
