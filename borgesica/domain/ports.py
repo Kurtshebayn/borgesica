@@ -43,7 +43,25 @@ class DocumentReader(Protocol):
 class DocumentWriter(Protocol):
     """Reassemble translated Chunks into the same format as the source file."""
 
-    def write(self, chunks: list[Chunk], src_path: str, out_path: str) -> None:
+    def write(
+        self,
+        chunks: list[Chunk],
+        src_path: str,
+        out_path: str,
+        target_lang: str | None = None,
+    ) -> None:
+        """Write the translated document.
+
+        Args:
+            chunks:      Translated chunks.
+            src_path:    Source document path.
+            out_path:    Destination path for the written document.
+            target_lang: JobConfig.target_lang of the job that produced
+                         *chunks* (e.g. "es-neutral"). Optional and
+                         format-specific: a writer that has no use for it
+                         (SRT, the PDF stub) simply ignores it. EpubWriter
+                         uses it to set the output OPF's dc:language.
+        """
         ...
 
 

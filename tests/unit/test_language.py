@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from borgesica.domain.language import detect_unexpected_script
+from borgesica.domain.language import detect_unexpected_script, resolve_bcp47
 
 SPANISH = (
     "El niño corrió hacia la montaña mientras el señor Muñoz observaba "
@@ -106,3 +106,41 @@ def test_non_latin_target_disables_the_check() -> None:
     """
     text = "这是一个完全用中文写的段落，它本应该是西班牙语的翻译，但是模型换了语言。"
     assert detect_unexpected_script(text, "zh") is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_bcp47 — JobConfig.target_lang -> a valid BCP 47 language code, for
+# writers that need to stamp the OUTPUT language (e.g. EPUB dc:language).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_bcp47_strips_the_project_specific_neutral_suffix() -> None:
+    """"es-neutral" is borgesica's own project convention, not a registered
+    BCP 47 subtag — the primary language subtag "es" is what a reading
+    system needs."""
+    assert resolve_bcp47("es-neutral") == "es"
+
+
+@pytest.mark.parametrize(
+    ("target_lang", "expected"),
+    [
+        ("en", "en"),
+        ("pt", "pt"),
+        ("fr", "fr"),
+        ("DE", "de"),
+        ("Es", "es"),
+    ],
+)
+def test_resolve_bcp47_accepts_plain_language_codes(target_lang: str, expected: str) -> None:
+    assert resolve_bcp47(target_lang) == expected
+
+
+@pytest.mark.parametrize(
+    "target_lang",
+    ["", "   ", "not-a-real-language-tag", "123", "-", "a"],
+)
+def test_resolve_bcp47_returns_none_for_unresolvable_values(target_lang: str) -> None:
+    """An unresolvable target_lang must return None — callers must leave any
+    existing language declaration untouched rather than write something
+    wrong."""
+    assert resolve_bcp47(target_lang) is None

@@ -37,6 +37,7 @@ from collections import defaultdict
 from lxml import etree
 
 from borgesica.adapters.readers.epub_reader import _local_tag
+from borgesica.domain.language import resolve_bcp47
 from borgesica.domain.models import Chunk
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _XHTML_NS = "http://www.w3.org/1999/xhtml"
+_DC_NS = "http://purl.org/dc/elements/1.1/"
 
 # HTML5 void elements (self-closing in HTML but must have explicit close in XHTML)
 _VOID_ELEMENTS = frozenset({
@@ -384,6 +386,53 @@ def _patch_ncx_document(
 
 
 # ---------------------------------------------------------------------------
+# content.opf patcher — dc:language only (WU: OPF target-language fix)
+# ---------------------------------------------------------------------------
+
+
+def _patch_opf_document(raw_bytes: bytes, lang_code: str) -> bytes:
+    """Set ``dc:language``'s text in the OPF package document to *lang_code*.
+
+    Scope is deliberately narrow: ONLY ``dc:language`` is touched.
+    ``dc:title``/``dc:description`` are never rewritten here — translating
+    those needs a provider call and is a separate decision, out of scope for
+    this patcher.
+
+    *lang_code* must already be a resolved value (see
+    ``borgesica.domain.language.resolve_bcp47``) — this function does not
+    validate it further. Returns the ORIGINAL bytes unchanged, mirroring
+    ``_patch_ncx_document``/``_patch_xhtml_document``, when the document
+    cannot be parsed, re-serialized, or has no ``dc:language`` element to set
+    (a source EPUB missing that element is malformed enough that inventing
+    one is out of scope for this fix).
+    """
+    try:
+        parser = etree.XMLParser(recover=True)
+        tree = etree.fromstring(raw_bytes, parser=parser)
+    except Exception:  # noqa: BLE001
+        logger.warning("EpubWriter: failed to parse OPF document — leaving untouched")
+        return raw_bytes
+
+    if tree is None:
+        return raw_bytes
+
+    lang_el = tree.find(f".//{{{_DC_NS}}}language")
+    if lang_el is None:
+        logger.warning(
+            "EpubWriter: no dc:language element found in OPF document — leaving untouched"
+        )
+        return raw_bytes
+
+    lang_el.text = lang_code
+
+    try:
+        return etree.tostring(tree, encoding="utf-8", xml_declaration=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("EpubWriter: failed to serialize patched OPF — returning original")
+        return raw_bytes
+
+
+# ---------------------------------------------------------------------------
 # Public EpubWriter
 # ---------------------------------------------------------------------------
 
@@ -394,24 +443,40 @@ class EpubWriter:
     Implements ``borgesica.domain.ports.DocumentWriter`` via duck-typing.
     """
 
-    def write(self, chunks: list[Chunk], src_path: str, out_path: str) -> None:
+    def write(
+        self,
+        chunks: list[Chunk],
+        src_path: str,
+        out_path: str,
+        target_lang: str | None = None,
+    ) -> None:
         """Reinsert translated chunks into a copy of *src_path*, write to *out_path*.
 
         Atomic write: writes to ``out_path + ".tmp"`` first, then renames.
         On failure the tmp is removed and out_path is left untouched.
 
         Args:
-            chunks:   Translated Chunk objects (with translated_text set).
-                      Chunks without ``meta["prose_nodes"]`` (e.g. SRT-style
-                      chunks) are ignored gracefully.
-            src_path: Path to the source EPUB.
-            out_path: Destination path for the translated EPUB.
+            chunks:      Translated Chunk objects (with translated_text set).
+                         Chunks without ``meta["prose_nodes"]`` (e.g. SRT-style
+                         chunks) are ignored gracefully.
+            src_path:    Path to the source EPUB.
+            out_path:    Destination path for the translated EPUB.
+            target_lang: JobConfig.target_lang of the job that produced
+                         *chunks* (e.g. "es-neutral"). When it resolves to a
+                         valid BCP 47 code (see
+                         ``borgesica.domain.language.resolve_bcp47``), the
+                         output OPF's ``dc:language`` is set to that code —
+                         the source EPUB's own declared language is otherwise
+                         carried over unchanged (a book translated to Spanish
+                         must not still declare "en"). Defaults to None
+                         (zero behavior change for existing callers): no
+                         target language known, no OPF patch attempted.
         """
         # Place tmp in the same directory as out_path for same-filesystem rename
         tmp_path = out_path + ".tmp"
 
         try:
-            self._do_write(chunks, src_path, tmp_path)
+            self._do_write(chunks, src_path, tmp_path, target_lang)
             os.replace(tmp_path, out_path)
         except Exception:
             # Clean up tmp; propagate the original exception
@@ -422,12 +487,24 @@ class EpubWriter:
                 pass  # best-effort cleanup; do not shadow the original error
             raise
 
-    def _do_write(self, chunks: list[Chunk], src_path: str, tmp_path: str) -> None:
+    def _do_write(
+        self,
+        chunks: list[Chunk],
+        src_path: str,
+        tmp_path: str,
+        target_lang: str | None = None,
+    ) -> None:
         """Internal: perform the actual write to *tmp_path*.
 
         Separated from ``write`` so tests can subclass and inject failures
         at precise points (after _do_write but before os.replace).
         """
+        # Resolved ONCE per write, not per ZIP entry — resolve_bcp47 is pure
+        # string logic (no I/O) but there is exactly one OPF document to
+        # patch, so there is nothing to gain from re-resolving per entry.
+        # None when target_lang is None/unresolvable: _patch_entry then
+        # leaves any .opf entry byte-for-byte untouched.
+        lang_code = resolve_bcp47(target_lang) if target_lang else None
         # -------------------------------------------------------------------
         # Step 1: Build patch map
         #   patches = {epub_item_href: {node_path: concatenated_translated_text}}
@@ -515,7 +592,11 @@ class EpubWriter:
                     # epub_item_href values are relative paths without leading slash
                     # The ZIP entry name may include "OEBPS/" or "EPUB/" prefix
                     patched_data = self._patch_entry(
-                        info.filename, original_data, flat_patches, nav_label_lookup
+                        info.filename,
+                        original_data,
+                        flat_patches,
+                        nav_label_lookup,
+                        lang_code,
                     )
                     out_zip.writestr(info, patched_data)
 
@@ -525,8 +606,13 @@ class EpubWriter:
         original_data: bytes,
         flat_patches: dict[str, dict[str, str]],
         nav_label_lookup: dict[str, str] | None = None,
+        lang_code: str | None = None,
     ) -> bytes:
         """Return patched data for *zip_entry_name*, or *original_data* if no patch.
+
+        *lang_code* (dc:language fix) is consulted ONLY for ``.opf`` entries —
+        a resolved BCP 47 code (or None to leave dc:language untouched, e.g.
+        no target_lang was given or it didn't resolve).
 
         *nav_label_lookup* (D4, WU6-2) is consulted ONLY for ``.ncx`` entries
         — it is independent of *flat_patches* (an ncx-only book with no nav
@@ -535,6 +621,13 @@ class EpubWriter:
         """
         if zip_entry_name.endswith(".ncx"):
             return _patch_ncx_document(original_data, nav_label_lookup or {})
+
+        if zip_entry_name.endswith(".opf"):
+            return (
+                _patch_opf_document(original_data, lang_code)
+                if lang_code is not None
+                else original_data
+            )
 
         if not flat_patches:
             return original_data

@@ -749,6 +749,8 @@ class TranslatorEngine:
         if final_job.status == JobStatus.DONE:
             writer = self._writers[job.config.source_type]
             done_chunks = self._checkpoint.load_chunks(job.id)
-            writer.write(done_chunks, job.source_path, out_path)
+            writer.write(
+                done_chunks, job.source_path, out_path, target_lang=job.config.target_lang
+            )
 
         return final_job

@@ -107,8 +107,18 @@ def _parse_ts(ts: str) -> timedelta:
 class SrtWriter:
     """DocumentWriter implementation for .srt files."""
 
-    def write(self, chunks: list[Chunk], src_path: str, out_path: str) -> None:  # noqa: ARG002
+    def write(
+        self,
+        chunks: list[Chunk],
+        src_path: str,
+        out_path: str,
+        target_lang: str | None = None,  # noqa: ARG002
+    ) -> None:  # noqa: ARG002
         """Write translated chunks to out_path as a valid SRT file.
+
+        *target_lang* is part of the DocumentWriter Protocol (used by
+        EpubWriter to set dc:language) but has no SRT equivalent — accepted
+        and ignored.
 
         Each Chunk may represent a *batch* of original SRT cues
         (when produced by SrtChunker) or a single cue (when Chunks come

@@ -19,13 +19,20 @@ class PdfWriter:
     Always raises ``NotImplementedError`` — PDF output is not supported in M3.
     """
 
-    def write(self, chunks: list[Chunk], src_path: str, out_path: str) -> None:
+    def write(
+        self,
+        chunks: list[Chunk],
+        src_path: str,
+        out_path: str,
+        target_lang: str | None = None,
+    ) -> None:
         """Raise NotImplementedError — PDF output is not supported in M3.
 
         Args:
-            chunks:   Translated chunks (unused).
-            src_path: Source PDF path (unused).
-            out_path: Intended output path (unused).
+            chunks:      Translated chunks (unused).
+            src_path:    Source PDF path (unused).
+            out_path:    Intended output path (unused).
+            target_lang: Part of the DocumentWriter Protocol (unused).
 
         Raises:
             NotImplementedError: Always.
