@@ -56,6 +56,18 @@ through to the JSON-mode/prompt-parse fallback tiers.
 > Selecting an o-series `--model` is not special-cased or validated — the raw OpenAI API
 > error is surfaced unmodified. This is an explicit, documented scope boundary, not a bug.
 
+### OpenRouter
+
+Reuses the same `OpenAICompatibleProvider` adapter via a dedicated `.openrouter()` preset
+(`--provider openrouter`, `OPENROUTER_API_KEY`). Any `vendor/model` id OpenRouter routes can be
+passed with `--model`; only the one below has a price entry, the rest fall back to the default
+estimate rate. The retry-waste ceiling factor stays at the untuned `3.0`: tier fallthrough has not
+been measured on this endpoint yet.
+
+| Model | Provider | Notes |
+|-------|----------|-------|
+| `xiaomi/mimo-v2.6-pro` | OpenRouter (`https://openrouter.ai/api/v1`) | $0.435/Mtok input, $0.87/Mtok output, $0.0036/Mtok cache read (OpenRouter listing, 2026-09-25). Default model for `--provider openrouter`. Translation quality not yet evaluated. |
+
 ### Private / Free / Offline
 
 Runs locally through Ollama, with no API key and no connection required — supported today,

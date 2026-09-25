@@ -9,7 +9,8 @@ Usage:
     borgesica <subcommand> [options]          # after pip install
 
 Subcommands:
-    create  <source_file> --model <model> [--provider anthropic|deepseek|openai|ollama]
+    create  <source_file> --model <model>
+             [--provider anthropic|deepseek|openai|openrouter|ollama]
              [--chunk-size N] [--budget USD] [--quality-mode fast|reflective] [--strict]
              [--extract N] [--from M]
              (source format auto-detected from .srt/.epub/.pdf extension)
@@ -69,12 +70,14 @@ Subcommands:
 
 Provider selection:
     Pass --provider on any command, or let it auto-detect: BORGESICA_PROVIDER env
-    var if set, otherwise whichever key is present (anthropic → deepseek → openai → ollama).
+    var if set, otherwise whichever key is present
+    (anthropic → deepseek → openai → openrouter → ollama).
 
 Environment (per provider; only the selected provider's key is required):
     ANTHROPIC_API_KEY  — for --provider anthropic
     DEEPSEEK_API_KEY   — for --provider deepseek
     OPENAI_API_KEY     — for --provider openai
+    OPENROUTER_API_KEY — for --provider openrouter
     OLLAMA_HOST        — for --provider ollama (optional; defaults to localhost:11434)
     BORGESICA_PROVIDER — optional; sets the default provider when --provider is omitted
     BORGESICA_WORKERS  — optional; default --workers for run, resume and serve
@@ -174,7 +177,7 @@ def _default_provider() -> str:
     """Resolve the provider when --provider is not given.
 
     Precedence: explicit BORGESICA_PROVIDER env var → auto-detect from whichever
-    provider key is present (anthropic → deepseek → openai → ollama) → 'anthropic'
+    provider key is present (anthropic → deepseek → openai → openrouter → ollama) → 'anthropic'
     (which then errors clearly about its missing key).
     """
     explicit = os.environ.get("BORGESICA_PROVIDER")
@@ -186,6 +189,8 @@ def _default_provider() -> str:
         return "deepseek"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
     if os.environ.get("OLLAMA_HOST"):
         return "ollama"
     return "anthropic"
@@ -313,7 +318,8 @@ def _build_provider(provider: str, *, key_stdin: bool = False) -> Any:
     """Instantiate a TranslationProvider by name.
 
     Supported: 'anthropic' (ANTHROPIC_API_KEY), 'deepseek' (DEEPSEEK_API_KEY),
-    'openai' (OPENAI_API_KEY), 'ollama' (local; OLLAMA_HOST optional, no key needed).
+    'openai' (OPENAI_API_KEY), 'openrouter' (OPENROUTER_API_KEY),
+    'ollama' (local; OLLAMA_HOST optional, no key needed).
 
     key_stdin: when True, the provider's API key is read from a JSON init line
     on stdin (desktop-app mode) instead of the environment. ollama needs no key,
@@ -343,12 +349,20 @@ def _build_provider(provider: str, *, key_stdin: bool = False) -> Any:
 
         key = _resolve_key("OPENAI_API_KEY", "openai", key_stdin=key_stdin)
         return OpenAICompatibleProvider.openai(api_key=key)
+    if name == "openrouter":
+        from borgesica.adapters.providers.openai_compatible_provider import (
+            OpenAICompatibleProvider,
+        )
+
+        key = _resolve_key("OPENROUTER_API_KEY", "openrouter", key_stdin=key_stdin)
+        return OpenAICompatibleProvider.openrouter(api_key=key)
     if name == "ollama":
         from borgesica.adapters.providers.ollama_provider import OllamaProvider
 
         return OllamaProvider()  # base_url resolved from OLLAMA_HOST; no API key needed
     print(
-        f"ERROR: unknown provider {provider!r} (choose: anthropic, deepseek, openai, ollama).",
+        f"ERROR: unknown provider {provider!r} "
+        f"(choose: anthropic, deepseek, openai, openrouter, ollama).",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -361,7 +375,8 @@ def _build_engine(
     """Construct a TranslatorEngine wired with real adapters for all formats.
 
     Args:
-        provider: Provider name — 'anthropic' (default), 'deepseek', 'openai', or 'ollama'.
+        provider: Provider name — 'anthropic' (default), 'deepseek', 'openai',
+                  'openrouter', or 'ollama'.
         model:    Model string (persisted in JobConfig; not validated here).
         db_path:  SQLite checkpoint DB path. Defaults to ~/.borgesica/jobs.db.
                   Pass ":memory:" for ephemeral use.
@@ -878,9 +893,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
-    provider_choices = ["anthropic", "deepseek", "openai", "ollama"]
+    provider_choices = ["anthropic", "deepseek", "openai", "openrouter", "ollama"]
     provider_help = (
-        "Provider: anthropic/deepseek/openai/ollama. Default: auto-detect from "
+        "Provider: anthropic/deepseek/openai/openrouter/ollama. Default: auto-detect from "
         "BORGESICA_PROVIDER env or whichever API key is set."
     )
 

@@ -184,6 +184,19 @@ _OPENAI_REASONING_EFFORT: dict[str, str | None] = {
     "gpt-6.1-sol": "low",
 }
 
+# OpenRouter price table — (input_usd_per_mtok, output_usd_per_mtok).
+# NOT used for billing; only for pre-flight cost estimates. Taken from the
+# OpenRouter model listing on 2026-09-25, not from a bill.
+_OPENROUTER_PRICE_TABLE: dict[str, tuple[float, float]] = {
+    "xiaomi/mimo-v2.6-pro": (0.435, 0.87),
+}
+
+# USD per Mtok for cache reads, from the same OpenRouter listing (2026-09-25).
+# Listed, not measured: unlike _DEEPSEEK_CACHE_PRICE, no bill has confirmed it.
+_OPENROUTER_CACHE_PRICE: dict[str, float] = {
+    "xiaomi/mimo-v2.6-pro": 0.0036,
+}
+
 
 # ---------------------------------------------------------------------------
 # OpenAICompatibleProvider
@@ -382,6 +395,40 @@ class OpenAICompatibleProvider:
         provider._completion_tokens_param_name = "max_completion_tokens"  # instance attr
         provider._reasoning_effort_by_model = dict(_OPENAI_REASONING_EFFORT)  # instance attr
         return provider
+
+    @classmethod
+    def openrouter(
+        cls,
+        api_key: str,
+        default_model: str = "xiaomi/mimo-v2.6-pro",
+        extra_price_table: dict[str, tuple[float, float]] | None = None,
+        _client: Any | None = None,
+    ) -> "OpenAICompatibleProvider":
+        """Preset for OpenRouter (https://openrouter.ai/api/v1).
+
+        Prices: xiaomi/mimo-v2.6-pro = ($0.435, $0.87)/Mtok,
+                cache read $0.0036/Mtok (OpenRouter listing, 2026-09-25).
+        The model string passed to translate() is forwarded unchanged, so any
+        "vendor/model" id OpenRouter routes can be used; unlisted ones fall
+        back to _FALLBACK_PRICE for estimates.
+
+        retry_waste_factor is deliberately NOT overridden: nobody has measured
+        how often OpenRouter-routed models fall through the tiers, so the
+        instance keeps the heavy 3.0 class default for an unmeasured endpoint.
+        _completion_tokens_param_name and reasoning_effort also keep their
+        class defaults ("max_tokens", "none").
+        """
+        table = dict(_OPENROUTER_PRICE_TABLE)
+        if extra_price_table:
+            table.update(extra_price_table)
+        return cls(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+            default_model=default_model,
+            price_table=table,
+            _client=_client,
+            cache_price_table=dict(_OPENROUTER_CACHE_PRICE),
+        )
 
     # ------------------------------------------------------------------
     # TranslationProvider Protocol

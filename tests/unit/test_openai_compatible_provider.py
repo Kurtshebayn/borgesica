@@ -813,6 +813,50 @@ class TestOpenAIPreset:
 
 
 # ---------------------------------------------------------------------------
+# Test 9c: OpenRouter preset — base_url, default model, price and cache tables,
+# and the UNMEASURED retry_waste_factor it must keep.
+# ---------------------------------------------------------------------------
+
+
+class TestOpenRouterPreset:
+    def test_openrouter_preset_sets_correct_base_url(self):
+        """OpenRouter preset uses base_url='https://openrouter.ai/api/v1'."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.base_url == "https://openrouter.ai/api/v1"
+
+    def test_openrouter_preset_sets_correct_default_model(self):
+        """OpenRouter preset defaults to model='xiaomi/mimo-v2.6-pro'."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.default_model == "xiaomi/mimo-v2.6-pro"
+
+    def test_openrouter_preset_prices_mimo_v2_6_pro(self):
+        """xiaomi/mimo-v2.6-pro is priced at $0.435/$0.87 per Mtok."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.price("xiaomi/mimo-v2.6-pro") == (0.435, 0.87)
+
+    def test_openrouter_preset_cache_price_for_mimo_v2_6_pro(self):
+        """xiaomi/mimo-v2.6-pro cache reads are priced at $0.0036 per Mtok."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.cache_price("xiaomi/mimo-v2.6-pro") == pytest.approx(0.0036)
+
+    def test_openrouter_preset_keeps_unmeasured_retry_waste_factor(self):
+        """Nobody has measured OpenRouter's tier fallthrough, so the preset must
+        keep the heavy 3.0 class default rather than a tuned override."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.retry_waste_factor == 3.0
+
+    def test_openrouter_preset_accepts_extra_price_table(self):
+        """extra_price_table entries are added to the preset table."""
+        provider = OpenAICompatibleProvider.openrouter(
+            api_key="sk-or-fake",
+            extra_price_table={"vendor/other-model": (1.0, 2.0)},
+            _client=object(),
+        )
+        assert provider.price("vendor/other-model") == (1.0, 2.0)
+        assert provider.price("xiaomi/mimo-v2.6-pro") == (0.435, 0.87)
+
+
+# ---------------------------------------------------------------------------
 # Test 10: Segmented output (SRT cue arrays — segment_count contract)
 # ---------------------------------------------------------------------------
 

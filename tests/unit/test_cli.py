@@ -256,6 +256,67 @@ def test_build_provider_openai_resolves_key_and_targets_openai_base_url() -> Non
     assert provider.default_model == "gpt-5.6-luna"
 
 
+def test_build_provider_openrouter_resolves_key_and_targets_openrouter_base_url() -> None:
+    """_build_provider('openrouter') resolves OPENROUTER_API_KEY and dispatches to
+    OpenAICompatibleProvider.openrouter()."""
+    import os
+
+    from borgesica.__main__ import _build_provider
+
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or"}, clear=True):
+        provider = _build_provider("openrouter")
+
+    assert provider.base_url == "https://openrouter.ai/api/v1"
+    assert provider.default_model == "xiaomi/mimo-v2.6-pro"
+
+
+def test_build_provider_openrouter_missing_key_exits_with_clear_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing OPENROUTER_API_KEY exits(1) with the same message the other
+    keyed providers give, naming the variable and the provider."""
+    import os
+
+    from borgesica.__main__ import _build_provider
+
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(SystemExit) as exc_info:
+            _build_provider("openrouter")
+
+    assert exc_info.value.code == 1
+    assert (
+        "ERROR: OPENROUTER_API_KEY environment variable is not set "
+        "(required for --provider openrouter)."
+    ) in capsys.readouterr().err
+
+
+def test_default_provider_resolution_openrouter_after_openai_before_ollama() -> None:
+    """_default_provider: OPENROUTER_API_KEY is detected after OPENAI_API_KEY and
+    before OLLAMA_HOST."""
+    import os
+
+    from borgesica.__main__ import _default_provider
+
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or"}, clear=True):
+        assert _default_provider() == "openrouter"
+    with patch.dict(
+        os.environ, {"OPENAI_API_KEY": "sk-oa", "OPENROUTER_API_KEY": "sk-or"}, clear=True
+    ):
+        assert _default_provider() == "openai"
+    with patch.dict(
+        os.environ, {"OPENROUTER_API_KEY": "sk-or", "OLLAMA_HOST": "localhost:11434"}, clear=True
+    ):
+        assert _default_provider() == "openrouter"
+
+
+def test_provider_flag_accepts_openrouter() -> None:
+    """--provider openrouter is an accepted argparse choice."""
+    from borgesica.__main__ import _build_parser
+
+    args = _build_parser().parse_args(["status", "job-1", "--provider", "openrouter"])
+    assert args.provider == "openrouter"
+
+
 def test_estimate_resolves_provider_from_env_not_hardcoded_anthropic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
