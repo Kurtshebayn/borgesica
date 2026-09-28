@@ -1704,7 +1704,9 @@ def test_translation_aligned_with_source_is_written_even_if_nodes_disagree() -> 
             name = next(n for n in zf.namelist() if n.endswith("ch1.xhtml"))
             root = etree.fromstring(zf.read(name))
         texts = ["".join(p.itertext()) for p in root.iter("{http://www.w3.org/1999/xhtml}p")]
-        assert texts[:2] == ["[ES] A.", "[ES] B."]
+        # The surplus 4th segment is folded into the last node: nothing lost,
+        # nothing shifted onto an earlier paragraph.
+        assert texts == ["[ES] A.", "[ES] B.", "[ES] C.\n\n[ES] C bis."]
     finally:
         os.unlink(src_path)
         if os.path.exists(out_path):

@@ -914,6 +914,83 @@ def test_segment_mismatch_all_attempts_fails_chunk():
     assert "segment count mismatch" in (saved[0].validation_errors or "")
 
 
+def test_segment_mismatch_pauses_job_by_default_and_resume_recovers():
+    """Default config (continue_on_error=False): a chunk that never aligns
+    PAUSES the job instead of finishing it with misplaced paragraphs, and a
+    resumed run retries exactly that chunk and completes the job."""
+    store = InMemoryCheckpointStore()
+    config = make_config(continue_on_error=False)
+    job = make_job(config, total=2)
+    chunks = [
+        Chunk(index=i, source_text="Paragraph one.\n\nParagraph two.") for i in range(2)
+    ]
+
+    stubborn = _MergesInTextModeProvider(aligned=False)
+    orch, _, _ = make_orchestrator(provider=stubborn, store=store)
+    paused = run_job(orch, job, chunks, config=config, store=store)
+
+    assert paused.status == JobStatus.PAUSED
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[1].status == ChunkStatus.PENDING
+
+    compliant = _MergesInTextModeProvider(aligned=True)
+    orch, _, _ = make_orchestrator(provider=compliant, store=store)
+    resumed = orch.run(
+        job=paused,
+        chunks=store.load_chunks(job.id),
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+    )
+
+    assert resumed.status == JobStatus.DONE
+    for c in store.load_chunks(job.id):
+        assert c.status == ChunkStatus.DONE
+        assert c.translated_text == "Párrafo uno.\n\nPárrafo dos."
+
+
+def test_srt_mismatch_then_placeholder_failures_reach_fallback_but_never_store_misaligned():
+    """SRT: a misaligned array, then aligned arrays that drop the tags, now
+    reach the strip/reinsert fallback (one extra call). That fallback is a
+    free-text call without the array contract; a misaligned reply from it is
+    rejected by validate_segments, so the batch still ends FAILED."""
+    store = InMemoryCheckpointStore()
+
+    class MisalignThenDropTagsProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            if n == 0:  # placeholders kept, one item too many
+                items = [b.split("\n", 1)[1] for b in user.split("\n\n")] + ["extra"]
+                unit = TranslationUnit(translations=items, summary_update="S.")
+            elif segment_count is not None:  # aligned, placeholders dropped
+                unit = TranslationUnit(
+                    translations=["y luego", "por el pasillo"], summary_update="S."
+                )
+            else:  # fallback: plain text, cues merged
+                unit = TranslationUnit(
+                    translation="y luego por el pasillo", summary_update="S."
+                )
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=1, output_tokens=1))
+
+    provider = MisalignThenDropTagsProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["<i>and</i> then", "down the hall"])]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    assert provider.segment_count_log == [2, 2, 2, None]  # 3 primary + fallback
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.FAILED
+    assert saved.translated_text is None
+    assert "fallback: segment count mismatch" in (saved.validation_errors or "")
+
+
 def test_fallback_output_with_segment_mismatch_fails_chunk():
     """Every primary attempt drops the placeholders, and the strip/reinsert
     fallback reply is tag-valid but merges the paragraphs: it must not be
