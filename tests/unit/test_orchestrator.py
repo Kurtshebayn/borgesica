@@ -811,109 +811,251 @@ def test_tag_mismatch_retry_succeeds_on_second():
 # desynchronizes every node after the divergence point (observed live:
 # DeepSeek chunks 0/8/11/13/15, one real paragraph-join in human review).
 #
-# Contract: retry for a compliant output; if every attempt is tag-valid but
-# segment-mismatched, ACCEPT the last attempt (the writer's defensive mapping
-# is the safety net) — the chunk must NOT fail and the strip/reinsert
-# fallback (which exists for TAG failures) must NOT be invoked.
+# Contract: a segment-mismatched output is NEVER accepted for prose — the
+# writer cannot know where the divergence is, so any positional mapping of it
+# puts text in the wrong paragraph from that point on. After the first
+# mismatch the remaining attempts switch to the indexed translations-array
+# contract (the SRT one: the schema pins exactly N items, one per source
+# paragraph). If no attempt aligns, the chunk ends FAILED (resumable) and the
+# strip/reinsert fallback (which exists for TAG failures) is NOT invoked.
 # ===========================================================================
 
 
-def test_segment_mismatch_retry_succeeds_on_second():
-    """Provider merges paragraphs on 1st call, respects "\n\n" on 2nd."""
+class _MergesInTextModeProvider(FakeTranslationProvider):
+    """Free-text replies merge the two source paragraphs into one segment.
+    Indexed-array replies return one item per "[k]" block when *aligned*,
+    else a single merged item (a misaligned array)."""
+
+    def __init__(self, aligned: bool) -> None:
+        super().__init__()
+        self.aligned = aligned
+
+    def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+        self.call_log.append((system, user, model))
+        self.segment_count_log.append(segment_count)
+        if segment_count is not None and self.aligned:
+            unit = TranslationUnit(
+                translations=["Párrafo uno.", "Párrafo dos."], summary_update="Summary."
+            )
+        elif segment_count is not None:
+            unit = TranslationUnit(
+                translations=["Párrafo uno. Párrafo dos."], summary_update="Summary."
+            )
+        else:
+            unit = TranslationUnit(
+                translation="Párrafo uno. Párrafo dos.", summary_update="Summary."
+            )
+        return TranslationResult(unit=unit, usage=Usage(input_tokens=1, output_tokens=1))
+
+
+def test_segment_mismatch_retries_with_indexed_paragraph_array():
+    """First free-text reply merges paragraphs; the retry requests the indexed
+    translations array (segment_count=2, "[k]" markers) and the aligned array
+    is accepted as a full validation pass."""
     store = InMemoryCheckpointStore()
-
-    class SegmentMergeOnceProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationResult:
-            n = len(self.call_log)
-            self.call_log.append((system, user, model))
-            if n == 0:
-                # First call: two source paragraphs merged into ONE segment
-                unit = TranslationUnit(
-                    translation="Párrafo uno. Párrafo dos.",
-                    summary_update="Summary.",
-                )
-            else:
-                # Second call: segment count matches the source (2)
-                unit = TranslationUnit(
-                    translation="Párrafo uno.\n\nPárrafo dos.",
-                    summary_update="Summary.",
-                )
-            in_tok = self.count_tokens(system + " " + user, model)
-            out_tok = self.count_tokens(unit.translation, model)
-            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
-
-    provider = SegmentMergeOnceProvider()
+    provider = _MergesInTextModeProvider(aligned=True)
     orch, _, _ = make_orchestrator(provider=provider, store=store)
-
     config = make_config()
     job = make_job(config, total=1)
     chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
 
-    store.save_job(job)
-    for c in chunks:
-        store.save_chunk(job.id, c)
-    store.save_glossary(job.id, Glossary())
+    result = run_job(orch, job, chunks, store=store)
 
-    result = orch.run(
-        job=job,
-        chunks=chunks,
-        glossary=Glossary(),
-        config=config,
-        on_progress=lambda p: None,
-        cancel_flag=threading.Event(),
-    )
-
-    assert provider.call_count == 2
+    assert provider.segment_count_log == [None, 2]
+    retry_system, retry_user, _ = provider.call_log[1]
+    assert retry_user == "[1]\nParagraph one.\n\n[2]\nParagraph two."
+    assert "exactly 2 paragraphs" in retry_system
     saved = store.load_chunks(job.id)
     assert saved[0].status == ChunkStatus.DONE
     assert saved[0].translated_text == "Párrafo uno.\n\nPárrafo dos."
+    assert saved[0].passed_validation is True
     assert result.status == JobStatus.DONE
 
 
-def test_segment_mismatch_all_attempts_accepts_best_effort():
-    """Provider ALWAYS merges paragraphs: after 3 tag-valid attempts the last
-    one is accepted — chunk DONE (not FAILED), no strip/reinsert fallback call."""
+def test_reflective_segment_mismatch_retries_draft_and_revise_as_paragraph_array():
+    """Reflective mode: after the first mismatched pass, the retry's draft and
+    revise calls request the paragraph array; the critique keeps plain text."""
     store = InMemoryCheckpointStore()
-
-    class AlwaysMergeProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationResult:
-            self.call_log.append((system, user, model))
-            unit = TranslationUnit(
-                translation="Párrafo uno. Párrafo dos.",
-                summary_update="Summary.",
-            )
-            in_tok = self.count_tokens(system + " " + user, model)
-            out_tok = self.count_tokens(unit.translation, model)
-            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
-
-    provider = AlwaysMergeProvider()
+    provider = _MergesInTextModeProvider(aligned=True)
     orch, _, _ = make_orchestrator(provider=provider, store=store)
-
-    config = make_config()
+    config = make_config(quality_mode="reflective")
     job = make_job(config, total=1)
     chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
 
-    store.save_job(job)
-    for c in chunks:
-        store.save_chunk(job.id, c)
-    store.save_glossary(job.id, Glossary())
+    run_job(orch, job, chunks, config=config, store=store)
 
-    result = orch.run(
-        job=job,
-        chunks=chunks,
+    assert provider.segment_count_log == [None, None, None, 2, None, 2]
+    revise_system = provider.call_log[5][0]
+    assert "exactly 2 paragraphs" in revise_system
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.DONE
+    assert saved.translated_text == "Párrafo uno.\n\nPárrafo dos."
+
+
+def test_segment_mismatch_all_attempts_fails_chunk():
+    """No attempt ever aligns: the chunk ends FAILED — never DONE with text
+    the writer would map onto the wrong paragraphs — after exactly 3 calls
+    (no strip/reinsert fallback call: it cannot fix segmentation)."""
+    store = InMemoryCheckpointStore()
+    provider = _MergesInTextModeProvider(aligned=False)
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    assert provider.call_count == 3
+    assert provider.segment_count_log == [None, 2, 2]
+    saved = store.load_chunks(job.id)
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[0].translated_text is None
+    assert saved[0].passed_validation is False
+    assert "segment count mismatch" in (saved[0].validation_errors or "")
+
+
+def test_segment_mismatch_pauses_job_by_default_and_resume_recovers():
+    """Default config (continue_on_error=False): a chunk that never aligns
+    PAUSES the job instead of finishing it with misplaced paragraphs, and a
+    resumed run retries exactly that chunk and completes the job."""
+    store = InMemoryCheckpointStore()
+    config = make_config(continue_on_error=False)
+    job = make_job(config, total=2)
+    chunks = [
+        Chunk(index=i, source_text="Paragraph one.\n\nParagraph two.") for i in range(2)
+    ]
+
+    stubborn = _MergesInTextModeProvider(aligned=False)
+    orch, _, _ = make_orchestrator(provider=stubborn, store=store)
+    paused = run_job(orch, job, chunks, config=config, store=store)
+
+    assert paused.status == JobStatus.PAUSED
+    saved = {c.index: c for c in store.load_chunks(job.id)}
+    assert saved[0].status == ChunkStatus.FAILED
+    assert saved[1].status == ChunkStatus.PENDING
+
+    compliant = _MergesInTextModeProvider(aligned=True)
+    orch, _, _ = make_orchestrator(provider=compliant, store=store)
+    resumed = orch.run(
+        job=paused,
+        chunks=store.load_chunks(job.id),
         glossary=Glossary(),
         config=config,
         on_progress=lambda p: None,
         cancel_flag=threading.Event(),
     )
 
-    # 3 primary attempts (all tag-valid, all segment-mismatched) and NOTHING
-    # else: accepting best effort must not trigger the strip/reinsert fallback.
-    assert provider.call_count == 3
+    assert resumed.status == JobStatus.DONE
+    for c in store.load_chunks(job.id):
+        assert c.status == ChunkStatus.DONE
+        assert c.translated_text == "Párrafo uno.\n\nPárrafo dos."
+
+
+def test_srt_mismatch_then_placeholder_failures_reach_fallback_but_never_store_misaligned():
+    """SRT: a misaligned array, then aligned arrays that drop the tags, now
+    reach the strip/reinsert fallback (one extra call). That fallback is a
+    free-text call without the array contract; a misaligned reply from it is
+    rejected by validate_segments, so the batch still ends FAILED."""
+    store = InMemoryCheckpointStore()
+
+    class MisalignThenDropTagsProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            if n == 0:  # placeholders kept, one item too many
+                items = [b.split("\n", 1)[1] for b in user.split("\n\n")] + ["extra"]
+                unit = TranslationUnit(translations=items, summary_update="S.")
+            elif segment_count is not None:  # aligned, placeholders dropped
+                unit = TranslationUnit(
+                    translations=["y luego", "por el pasillo"], summary_update="S."
+                )
+            else:  # fallback: plain text, cues merged
+                unit = TranslationUnit(
+                    translation="y luego por el pasillo", summary_update="S."
+                )
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=1, output_tokens=1))
+
+    provider = MisalignThenDropTagsProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [make_srt_chunk(["<i>and</i> then", "down the hall"])]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    assert provider.segment_count_log == [2, 2, 2, None]  # 3 primary + fallback
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.FAILED
+    assert saved.translated_text is None
+    assert "fallback: segment count mismatch" in (saved.validation_errors or "")
+
+
+def test_fallback_output_with_segment_mismatch_fails_chunk():
+    """Every primary attempt drops the placeholders, and the strip/reinsert
+    fallback reply is tag-valid but merges the paragraphs: it must not be
+    accepted either (it would shift nodes exactly like a primary reply)."""
+    store = InMemoryCheckpointStore()
+
+    class DropsTagsThenMergesProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+            self.call_log.append((system, user, model))
+            unit = TranslationUnit(
+                translation="El zorro rápido. Párrafo dos.", summary_update="Summary."
+            )
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=1, output_tokens=1))
+
+    provider = DropsTagsThenMergesProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="The <i>quick</i> fox.\n\nParagraph two.")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    assert provider.call_count == 4  # 3 primary + 1 fallback
     saved = store.load_chunks(job.id)
-    assert saved[0].status == ChunkStatus.DONE
-    assert saved[0].translated_text == "Párrafo uno. Párrafo dos."
-    assert result.status == JobStatus.DONE
+    assert saved[0].status == ChunkStatus.FAILED
+    assert "fallback: segment count mismatch" in (saved[0].validation_errors or "")
+
+
+def test_mismatch_then_placeholder_failures_still_reach_fallback():
+    """A first reply that splits paragraphs, then array replies that drop the
+    placeholders: the strip/reinsert fallback exists for exactly those
+    placeholder failures and now validates segments too, so it must still
+    run — and its aligned reply is a full validation pass."""
+    store = InMemoryCheckpointStore()
+
+    class SplitThenDropTagsProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            if n == 0:  # placeholder-valid echo with one extra segment
+                unit = TranslationUnit(translation=f"{user}\n\nExtra.", summary_update="S.")
+            elif segment_count is not None:  # aligned array, placeholders dropped
+                unit = TranslationUnit(
+                    translations=["El zorro rápido.", "Párrafo dos."], summary_update="S."
+                )
+            else:  # strip/reinsert fallback: plain text, aligned
+                unit = TranslationUnit(
+                    translation="El zorro rápido.\n\nPárrafo dos.", summary_update="S."
+                )
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=1, output_tokens=1))
+
+    provider = SplitThenDropTagsProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="The <i>quick</i> fox.\n\nParagraph two.")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    assert provider.segment_count_log == [None, 2, 2, None]
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.DONE
+    assert saved.passed_validation is True
+    assert len(saved.translated_text.split("\n\n")) == 2
 
 
 # ===========================================================================
@@ -2901,29 +3043,18 @@ def test_passed_validation_true_on_first_try_success():
     assert saved[0].passed_validation is True
 
 
-def test_passed_validation_false_on_best_effort_segment_mismatch():
-    """Return path 2 (best-effort accepted): a prose chunk that never produces
-    a segment-compliant output is accepted DONE after 3 attempts (design
-    decision #7 / orchestrator.py:612-621) with passed_validation=False."""
+def test_passed_validation_false_on_best_effort_wrong_script():
+    """Return path 2 (best-effort accepted): a prose chunk whose every attempt
+    is structurally valid but in the wrong script is accepted DONE after 3
+    attempts with passed_validation=False. (A segment-MISMATCHED prose chunk
+    is never accepted as best effort — see section 16b.)"""
     store = InMemoryCheckpointStore()
-
-    class AlwaysMergeProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationResult:
-            self.call_log.append((system, user, model))
-            unit = TranslationUnit(
-                translation="Párrafo uno. Párrafo dos.",
-                summary_update="Summary.",
-            )
-            in_tok = self.count_tokens(system + " " + user, model)
-            out_tok = self.count_tokens(unit.translation, model)
-            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
-
-    provider = AlwaysMergeProvider()
+    provider = _ScriptedProvider(scripted=[_CHINESE])
     orch, _, _ = make_orchestrator(provider=provider, store=store)
 
     config = make_config()
     job = make_job(config, total=1)
-    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+    chunks = [Chunk(index=0, source_text="Paragraph one.")]
 
     result = run_job(orch, job, chunks, store=store)
 
@@ -3158,30 +3289,18 @@ def test_corpus_store_skips_failed_chunk():
 
 
 def test_corpus_store_best_effort_chunk_carries_validator_messages():
-    """A prose chunk accepted as best-effort (segment-count mismatch on every
+    """A prose chunk accepted as best-effort (wrong output script on every
     attempt) is captured with validation_errors populated with the actual
     validator issue messages (JSON list of strings)."""
     import json
 
     store = InMemoryCheckpointStore()
     corpus = FakeCorpusStore()
-
-    class AlwaysMergeProvider(FakeTranslationProvider):
-        def translate(self, system: str, user: str, model: str) -> TranslationResult:
-            self.call_log.append((system, user, model))
-            unit = TranslationUnit(
-                translation="Párrafo uno. Párrafo dos.",
-                summary_update="Summary.",
-            )
-            in_tok = self.count_tokens(system + " " + user, model)
-            out_tok = self.count_tokens(unit.translation, model)
-            return TranslationResult(unit=unit, usage=Usage(input_tokens=in_tok, output_tokens=out_tok))
-
-    provider = AlwaysMergeProvider()
+    provider = _ScriptedProvider(scripted=[_CHINESE])
     orch, _, _ = make_orchestrator(provider=provider, store=store, corpus_store=corpus)
     config = make_config()
     job = make_job(config, total=1)
-    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+    chunks = [Chunk(index=0, source_text="Paragraph one.")]
 
     run_job(orch, job, chunks, config=config, store=store)
 
@@ -3194,7 +3313,7 @@ def test_corpus_store_best_effort_chunk_carries_validator_messages():
     assert sample.validation_errors is not None
     issues = json.loads(sample.validation_errors)
     assert isinstance(issues, list) and len(issues) > 0
-    assert any("segment" in issue.lower() for issue in issues)
+    assert any("script" in issue.lower() for issue in issues)
 
 
 def test_corpus_store_passing_chunk_validation_errors_none():

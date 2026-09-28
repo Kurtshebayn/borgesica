@@ -536,9 +536,27 @@ class EpubWriter:
 
             segments = translated_text.split("\n\n")
             n_nodes = len(prose_nodes)
+
+            source_segments = chunk.source_text.split("\n\n")
+            if len(segments) != len(source_segments):
+                # A translation that split or merged paragraphs cannot be
+                # placed: nothing tells where the divergence is, and a
+                # positional mapping puts every later paragraph's text in the
+                # wrong node. Keep this chunk's source text instead — visibly
+                # untranslated, never misplaced. The orchestrator no longer
+                # stores such output; this guards chunks stored before it.
+                logger.error(
+                    "EpubWriter: translated segment count (%d) does not match "
+                    "its source (%d) for chunk index=%d — writing its source "
+                    "text instead of misplacing paragraphs",
+                    len(segments), len(source_segments), chunk.index,
+                )
+                segments = source_segments
             n_segs = len(segments)
 
             if n_segs != n_nodes:
+                # Reached only when the SOURCE text itself disagrees with its
+                # prose_nodes (a reader/chunker invariant violation).
                 # Defensive mismatch handling:
                 # If we have MORE segments than nodes, concatenate excess segments
                 # into the last node to avoid index errors.

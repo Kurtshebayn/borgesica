@@ -1616,3 +1616,98 @@ def test_writer_leaves_opf_language_untouched_when_target_lang_omitted() -> None
         os.unlink(src_path)
         if os.path.exists(out_path):
             os.unlink(out_path)
+
+
+# ---------------------------------------------------------------------------
+# A translated chunk whose "\n\n" segment count differs from its prose nodes
+# (e.g. a mismatched chunk stored by an older version) must never be mapped
+# positionally: from the divergence point every node would receive the text
+# of a different paragraph. The writer keeps that chunk's SOURCE text instead.
+# ---------------------------------------------------------------------------
+
+
+def _multi_paragraph_xhtml(paragraphs: list[str]) -> bytes:
+    body = "".join(f"<p>{p}</p>" for p in paragraphs)
+    return (
+        "<?xml version='1.0' encoding='utf-8'?>"
+        "<html xmlns='http://www.w3.org/1999/xhtml'>"
+        "<head><title>Chapter</title></head>"
+        f"<body>{body}</body>"
+        "</html>"
+    ).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "translated",
+    [
+        # one extra segment: "Bravo" split in two
+        "[ES] Alpha.\n\n[ES] Bravo one.\n\n[ES] Bravo two.\n\n[ES] Charlie.",
+        # one missing segment: "Alpha" and "Bravo" merged
+        "[ES] Alpha. [ES] Bravo one. Bravo two.\n\n[ES] Charlie.",
+    ],
+)
+def test_segment_count_mismatch_keeps_source_instead_of_shifting(translated, caplog) -> None:
+    paragraphs = ["Alpha.", "Bravo one. Bravo two.", "Charlie."]
+    src_path = _write_temp_epub(
+        _make_epub_bytes([("ch1.xhtml", _multi_paragraph_xhtml(paragraphs))])
+    )
+    out_path = src_path.replace(".epub", "_out.epub")
+    try:
+        chunks = chunk_prose(EpubReader().read(src_path, _config()), _config(), _FakeProvider())
+        body = [c for c in chunks if len(c.meta["prose_nodes"]) == 3]
+        assert len(body) == 1
+        mismatched = body[0].model_copy(
+            update={"translated_text": translated, "status": ChunkStatus.DONE}
+        )
+        chunks = [mismatched if c.index == mismatched.index else c for c in chunks]
+
+        EpubWriter().write(chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path) as zf:
+            name = next(n for n in zf.namelist() if n.endswith("ch1.xhtml"))
+            root = etree.fromstring(zf.read(name))
+        texts = ["".join(p.itertext()) for p in root.iter("{http://www.w3.org/1999/xhtml}p")]
+        assert texts == paragraphs
+        assert any(r.levelname == "ERROR" and "segment" in r.getMessage() for r in caplog.records)
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def test_translation_aligned_with_source_is_written_even_if_nodes_disagree() -> None:
+    """The guard judges the TRANSLATION against its source (what the
+    orchestrator validated), not against prose_nodes: when the source itself
+    disagrees with its nodes, that is a reader invariant violation, and
+    discarding an aligned translation for it would only lose work."""
+    paragraphs = ["Alpha.", "Bravo.", "Charlie."]
+    src_path = _write_temp_epub(
+        _make_epub_bytes([("ch1.xhtml", _multi_paragraph_xhtml(paragraphs))])
+    )
+    out_path = src_path.replace(".epub", "_out.epub")
+    try:
+        chunks = chunk_prose(EpubReader().read(src_path, _config()), _config(), _FakeProvider())
+        body = next(c for c in chunks if len(c.meta["prose_nodes"]) == 3)
+        # Source carries one segment more than its 3 nodes.
+        broken = body.model_copy(
+            update={
+                "source_text": "Alpha.\n\nBravo.\n\nCharlie.\n\nCharlie bis.",
+                "translated_text": "[ES] A.\n\n[ES] B.\n\n[ES] C.\n\n[ES] C bis.",
+                "status": ChunkStatus.DONE,
+            }
+        )
+        chunks = [broken if c.index == broken.index else c for c in chunks]
+
+        EpubWriter().write(chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path) as zf:
+            name = next(n for n in zf.namelist() if n.endswith("ch1.xhtml"))
+            root = etree.fromstring(zf.read(name))
+        texts = ["".join(p.itertext()) for p in root.iter("{http://www.w3.org/1999/xhtml}p")]
+        # The surplus 4th segment is folded into the last node: nothing lost,
+        # nothing shifted onto an earlier paragraph.
+        assert texts == ["[ES] A.", "[ES] B.", "[ES] C.\n\n[ES] C bis."]
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
