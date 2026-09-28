@@ -160,7 +160,10 @@ Return a JSON object:
     "glossary_additions": []
   }}"""
 
-# Appended to the system prompt for SRT cue-batch chunks (segmented contract).
+# Appended to the system prompt for SRT cue-batch chunks (segmented contract),
+# and for a prose chunk's retries after its free-text reply split or merged
+# paragraphs. {unit} names what a segment is ("subtitle segments" or
+# "paragraphs").
 # The exact count is stated per chunk because "one per segment" alone is what
 # models silently violate on unpunctuated speech-to-text fragments. Segments
 # carry explicit [k] index markers because blank-line separation alone is
@@ -168,7 +171,7 @@ Return a JSON object:
 # miscounted chunk desynchronizes the whole positional mapping.
 _SEGMENT_SYSTEM_INSTRUCTION = """\
 [SEGMENTS]
-This chunk contains exactly {n} subtitle segments. Each source segment \
+This chunk contains exactly {n} {unit}. Each source segment \
 begins with an index marker line "[k]" (from [1] to [{n}]); everything until \
 the next marker belongs to that ONE segment, even across line breaks. Fill \
 the "translations" array with EXACTLY {n} strings — item k is the \
@@ -699,11 +702,13 @@ class TranslationOrchestrator:
           - validate_segments(source, translated_text): the "\\n\\n" segment
             count must match the source (writers map segments to document
             nodes positionally) — unaffected by placeholders vs raw tags,
-            since neither carries "\\n\\n". Mismatch retries like a
-            placeholder mismatch, but if every attempt is placeholder-valid
-            and only segment-mismatched, the LAST such attempt is accepted
-            (never FAILED, no fallback call) — the writer's defensive mapping
-            absorbs it.
+            since neither carries "\\n\\n". A mismatched output is NEVER
+            accepted: nothing can tell where the split or merge happened, so
+            every node after it would receive another paragraph's text. A
+            prose mismatch switches the remaining attempts to the indexed
+            translations-array contract (one schema-pinned item per source
+            paragraph); if no attempt aligns, the chunk ends FAILED
+            (resumable) without the strip/reinsert fallback call.
           - Retry up to _MAX_TAG_RETRIES times (3 total attempts) on mismatch.
           - On acceptance, restore_tags() puts the real tags (with their
             original attributes) back before the text is persisted.
@@ -714,7 +719,8 @@ class TranslationOrchestrator:
           - This path never uses placeholders: it operates on real tags via
             the original strip()/reinsert()/validate_tags() trio, exactly as
             before the placeholder rework.
-          - validate_tags again; if pass → chunk DONE using fallback output.
+          - validate_tags and validate_segments; if both pass → chunk DONE
+            using fallback output.
           - If provider raises or validate_tags fails → return (None, None, total_cost, False).
 
         Returns:
@@ -722,8 +728,8 @@ class TranslationOrchestrator:
             validation_errors) on success. passed_validation is True for the
             happy-path first-try match AND the strip/reinsert fallback success
             (both are full placeholder/tag + segment validation passes) —
-            False for the segment-mismatch best-effort acceptance (design
-            decision #7: DONE does NOT imply validation passed) and False
+            False for the wrong-script best-effort acceptance of a prose chunk
+            (design decision #7: DONE does NOT imply validation passed) and False
             when both primary and fallback are exhausted (chunk FAILED —
             caller ignores the flag's semantic weight there since
             translated_text is None, but it is still threaded consistently).
@@ -760,6 +766,7 @@ class TranslationOrchestrator:
         # and checkpointing keep using the marker-free chunk.source_text.
         cue_batches = chunk.meta.get("cue_batches")
         segment_count = len(cue_batches) if cue_batches else None
+        segment_unit = "subtitle segments"
         if segment_count is not None:
             placeholder_segments = source_placeholder_text.split("\n\n")
             if len(placeholder_segments) != segment_count:
@@ -771,7 +778,7 @@ class TranslationOrchestrator:
             user_prompt = _indexed_segments(placeholder_segments)
             system = (
                 f"{system}\n\n"
-                + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count)
+                + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count, unit=segment_unit)
             )
         # Passed as **kwargs so providers (and test fakes) that predate
         # segment_count keep working on the prose path.
@@ -788,9 +795,14 @@ class TranslationOrchestrator:
         # orchestrator has no other per-chunk-kind branch — this is the ONLY one.
         is_nav_label = chunk.meta.get("kind") == "nav-label"
 
-        # Last tag-valid attempt whose "\n\n" segment count diverged from the
-        # source — accepted after the loop if no compliant output arrives.
+        # Last segment-ALIGNED attempt rejected only for its script — accepted
+        # after the loop (prose only) if no compliant output arrives.
         best_effort: tuple[TranslationUnit, str] | None = None
+        # A segment-MISMATCHED attempt is never kept: the writers map
+        # segments to document nodes by position, and nothing can tell where
+        # the split or merge happened, so every node after it would receive
+        # another paragraph's text.
+        segment_mismatched = False
 
         # --- PRIMARY: tags-in-text attempts ---
         for attempt in range(_MAX_TAG_RETRIES + 1):  # 0, 1, 2
@@ -804,6 +816,7 @@ class TranslationOrchestrator:
                         out_price=out_price,
                         cache_price=cache_price,
                         segment_count=segment_count,
+                        segment_unit=segment_unit,
                     )
                     total_call_cost += call_cost
                 else:
@@ -875,15 +888,32 @@ class TranslationOrchestrator:
                     continue
                 # Segment-count mismatch (model merged/split "\n\n" paragraphs,
                 # which desynchronizes the writer's positional node mapping):
-                # keep this placeholder-valid attempt and retry for a
-                # compliant one.
+                # discard it and retry for a compliant one.
                 src_segs = len(chunk.source_text.split("\n\n"))
                 got_segs = len(translated_text.split("\n\n"))
                 validation_issues.append(
                     f"attempt {attempt + 1}: segment count mismatch "
                     f"(expected {src_segs}, got {got_segs})"
                 )
-                best_effort = (unit, translated_text)
+                segment_mismatched = True
+                if segment_count is None:
+                    # Prose: a free-text retry tends to split the same
+                    # paragraph again. Switch the remaining attempts to the
+                    # indexed translations array (the SRT contract), whose
+                    # schema pins exactly one item per source paragraph —
+                    # same number of calls, alignment by construction.
+                    paragraphs = source_placeholder_text.split("\n\n")
+                    if len(paragraphs) == src_segs:
+                        segment_count = src_segs
+                        segment_unit = "paragraphs"
+                        user_prompt = _indexed_segments(paragraphs)
+                        system = (
+                            f"{system}\n\n"
+                            + _SEGMENT_SYSTEM_INSTRUCTION.format(
+                                n=segment_count, unit=segment_unit
+                            )
+                        )
+                        segment_kwargs["segment_count"] = segment_count
                 continue
 
             # Placeholder mismatch — retry unless this was the last attempt.
@@ -892,40 +922,40 @@ class TranslationOrchestrator:
                 f"({'; '.join(placeholder_result.issues)})"
             )
 
-        # All attempts exhausted with at least one placeholder-valid but
-        # segment-mismatched output. Two different consequences:
+        # All attempts exhausted with at least one placeholder-valid output.
         #
-        # PROSE: accept the last one — the writer's defensive mapping absorbs
-        # the mismatch and the text is still shown translated.
+        # PROSE whose only defect was the output SCRIPT (segments aligned):
+        # accept the last one, flagged passed_validation=False — every
+        # paragraph still lands in its own node.
         #
-        # SRT cue batches: a misaligned batch is USELESS to the SrtWriter (it
-        # cannot map k translations onto n cues without desynchronizing
-        # timing, so it falls back to source text — untranslated cues shipped
-        # silently). End the chunk FAILED instead: it surfaces in the CLI
+        # Anything segment-mismatched (prose or SRT), and SRT in the wrong
+        # script: end the chunk FAILED. A misaligned output cannot be placed —
+        # the EpubWriter would shift every paragraph after the divergence, the
+        # SrtWriter would desynchronize cue timing. FAILED surfaces in the CLI
         # skip summary and `resume` retries exactly these chunks. The
         # strip/reinsert fallback below exists for PLACEHOLDER failures and
         # would cost another call without fixing segmentation — skip it.
-        if best_effort is not None:
-            if segment_count is None:
-                logger.warning(
-                    "Chunk %d: segment-count mismatch persisted after %d attempts — "
-                    "accepting best effort (writer applies defensive mapping)",
-                    chunk.index,
-                    _MAX_TAG_RETRIES + 1,
-                )
-                best_unit, best_text = best_effort
-                return (
-                    best_unit,
-                    restore_tags(best_text, tag_registry),
-                    total_call_cost,
-                    False,
-                    json.dumps(validation_issues),
-                )
+        if best_effort is not None and not cue_batches:
             logger.warning(
-                "Chunk %d: translations array misaligned with the %d cues after "
-                "%d attempts — chunk FAILED (resume retries only failed chunks)",
+                "Chunk %d: output script check failed after %d attempts — "
+                "accepting best effort",
                 chunk.index,
-                segment_count,
+                _MAX_TAG_RETRIES + 1,
+            )
+            best_unit, best_text = best_effort
+            return (
+                best_unit,
+                restore_tags(best_text, tag_registry),
+                total_call_cost,
+                False,
+                json.dumps(validation_issues),
+            )
+        if best_effort is not None or segment_mismatched:
+            logger.warning(
+                "Chunk %d: no output aligned with the source %s after %d "
+                "attempts — chunk FAILED (resume retries only failed chunks)",
+                chunk.index,
+                segment_unit,
                 _MAX_TAG_RETRIES + 1,
             )
             return None, None, total_call_cost, False, json.dumps(validation_issues)
@@ -946,9 +976,18 @@ class TranslationOrchestrator:
             )
             fallback_unit = fallback_result.unit
             fallback_text = reinsert(fallback_unit.translation, tags, plain_source)
-            if validate_tags(chunk.source_text, fallback_text):
+            if not validate_tags(chunk.source_text, fallback_text):
+                validation_issues.append("fallback: tag count mismatch after strip/reinsert")
+            elif not validate_segments(chunk.source_text, fallback_text):
+                # Same positional-mapping hazard as a primary reply.
+                src_segs = len(chunk.source_text.split("\n\n"))
+                got_segs = len(fallback_text.split("\n\n"))
+                validation_issues.append(
+                    "fallback: segment count mismatch "
+                    f"(expected {src_segs}, got {got_segs})"
+                )
+            else:
                 return fallback_unit, fallback_text, total_call_cost, True, None
-            validation_issues.append("fallback: tag count mismatch after strip/reinsert")
         except (MalformedOutput, ProviderError) as exc:
             # Provider failed during the fallback call — treat as total failure
             # (chunk FAILED, job PAUSED). Any OTHER exception (a real bug in
@@ -971,6 +1010,7 @@ class TranslationOrchestrator:
         out_price: float,
         cache_price: float,
         segment_count: int | None = None,
+        segment_unit: str = "subtitle segments",
     ) -> tuple[TranslationUnit, str, float]:
         """Execute the translate → critique → revise loop.
 
@@ -1046,7 +1086,7 @@ class TranslationOrchestrator:
             if segment_count is not None:
                 revise_system = (
                     f"{_REVISE_SYSTEM}\n\n"
-                    + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count)
+                    + _SEGMENT_SYSTEM_INSTRUCTION.format(n=segment_count, unit=segment_unit)
                 )
             revised_result = self._provider.translate(
                 system=revise_system,

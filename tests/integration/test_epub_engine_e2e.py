@@ -606,3 +606,83 @@ def test_epub_engine_e2e_no_nav_doc_byte_identical_to_before_change(tmp_path):
         assert "[ES] Jumps over the lazy dog." in ch2_text
     finally:
         os.unlink(src_path)
+
+
+# ---------------------------------------------------------------------------
+# E2E: a prose chunk whose output splits one paragraph must never shift the
+# following paragraphs into the wrong nodes.
+#
+# Observed 2026-09-28 on a real chapter: the model returned 16 "\n\n" segments
+# for 15 paragraph nodes, the orchestrator accepted it as best effort, and the
+# writer mapped segments to nodes positionally — every paragraph after the
+# split held the text of the paragraph before it. The paragraph COUNT still
+# matched, so count checks could not see it.
+# ---------------------------------------------------------------------------
+
+
+_SPLIT_PARAGRAPHS = [
+    "Alpha paragraph.",
+    "Bravo one. Bravo two.",
+    "Charlie paragraph.",
+    "Delta paragraph.",
+]
+
+
+def _multi_paragraph_xhtml(paragraphs: list[str]) -> bytes:
+    body = "".join(f"<p>{p}</p>" for p in paragraphs)
+    return (
+        "<?xml version='1.0' encoding='utf-8'?>"
+        "<html xmlns='http://www.w3.org/1999/xhtml'>"
+        "<head><title>Chapter</title></head>"
+        f"<body>{body}</body>"
+        "</html>"
+    ).encode("utf-8")
+
+
+class _SplitsBravoInTextModeProvider(FakeTranslationProvider):
+    """Free-text replies split the "Bravo" paragraph in two (one extra
+    "\n\n" segment); indexed translations-array replies stay aligned —
+    the array schema pins exactly one item per source paragraph."""
+
+    def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+        self.call_log.append((system, user, model))
+        self.segment_count_log.append(segment_count)
+        if segment_count is not None:
+            blocks = user.split("\n\n")
+            items = [f"[ES] {b.split(chr(10), 1)[1]}" for b in blocks]
+            unit = TranslationUnit(translations=items, summary_update="Summary.")
+        else:
+            segs = []
+            for seg in user.split("\n\n"):
+                if seg == "Bravo one. Bravo two.":
+                    segs += ["[ES] Bravo one.", "[ES] Bravo two."]
+                else:
+                    segs.append(f"[ES] {seg}")
+            unit = TranslationUnit(translation="\n\n".join(segs), summary_update="Summary.")
+        return TranslationResult(unit=unit, usage=Usage(input_tokens=1, output_tokens=1))
+
+
+def _paragraph_texts(out_path: str, suffix: str) -> list[str]:
+    from lxml import etree
+
+    root = etree.fromstring(_read_zip_text(out_path, _find_zip_entry(out_path, suffix)).encode())
+    return ["".join(p.itertext()) for p in root.iter("{http://www.w3.org/1999/xhtml}p")]
+
+
+def test_split_paragraph_never_shifts_following_paragraphs(tmp_path):
+    src_path = _write_temp_epub(
+        _make_epub_bytes([("ch1.xhtml", _multi_paragraph_xhtml(_SPLIT_PARAGRAPHS))])
+    )
+    out_path = str(tmp_path / "translated.epub")
+    try:
+        engine, provider, _ = _make_epub_engine(provider=_SplitsBravoInTextModeProvider())
+        job = engine.create_job(src_path, JobConfig(source_type=SourceType.EPUB, model="fake"))
+        final_job = engine.run_job(job.id, out_path=out_path)
+
+        assert final_job.status == JobStatus.DONE
+        # Every node holds the translation of ITS OWN source paragraph.
+        assert _paragraph_texts(out_path, "ch1.xhtml") == [
+            f"[ES] {p}" for p in _SPLIT_PARAGRAPHS
+        ]
+    finally:
+        os.unlink(src_path)
