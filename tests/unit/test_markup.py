@@ -548,3 +548,54 @@ def test_restore_tags_unknown_id_left_verbatim() -> None:
     rather than crashing — defensive, matches the spirit of validate_placeholders
     rejecting it upstream before restore is ever called on invalid output."""
     assert restore_tags("⟦99⟧text⟦/99⟧", {}) == "⟦99⟧text⟦/99⟧"
+
+
+# --- Self-closing inline tags (EPUB pagebreak markers) ---
+#
+# Real EPUBs carry self-closing spans such as
+# <span epub:type="pagebreak" id="page3" .../>. _TAG_PATTERN matches them,
+# so they enter the placeholder round-trip, but they have no close: they must
+# become ONE standalone placeholder, never a pair and never an opener that
+# swallows a neighbouring </span>.
+
+_PAGEBREAK = '<span aria-label="3" epub:type="pagebreak" id="page3" role="doc-pagebreak"/>'
+
+
+def test_self_closing_span_source_validates_against_itself() -> None:
+    source = f'{_PAGEBREAK}I\n\n<span class="grey">FEAR</span> text'
+    placeholder_text, registry = tokenize_tags(source)
+    result = validate_placeholders(placeholder_text, placeholder_text, registry)
+    assert result.valid is True, result.issues
+    assert result.reordered is False
+
+
+def test_self_closing_span_translation_keeping_its_single_marker_is_valid() -> None:
+    source = f'{_PAGEBREAK}I\n\n<span class="grey">FEAR</span> text'
+    placeholder_text, registry = tokenize_tags(source)
+    assert registry == {1: (_PAGEBREAK, ""), 2: ('<span class="grey">', "</span>")}
+    translated = "⟦1⟧I\n\n⟦2⟧MIEDO⟦/2⟧ texto"
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is True, result.issues
+    assert restore_tags(translated, registry) == (
+        f'{_PAGEBREAK}I\n\n<span class="grey">MIEDO</span> texto'
+    )
+
+
+def test_self_closing_span_marker_dropped_or_closed_is_invalid() -> None:
+    source = f"{_PAGEBREAK}Chapter one."
+    placeholder_text, registry = tokenize_tags(source)
+    dropped = validate_placeholders(placeholder_text, "Capitulo uno.", registry)
+    assert dropped.valid is False
+    closed = validate_placeholders(placeholder_text, "⟦1⟧Capitulo uno.⟦/1⟧", registry)
+    assert closed.valid is False
+
+
+def test_self_closing_span_nested_in_span_does_not_steal_the_outer_close() -> None:
+    """The self-closing span is standalone: the outer </span> must pair with
+    the outer <span>, not with the pagebreak marker."""
+    source = f'<span class="a">before {_PAGEBREAK}after</span> tail'
+    placeholder_text, registry = tokenize_tags(source)
+    assert registry == {1: ('<span class="a">', "</span>"), 2: (_PAGEBREAK, "")}
+    assert placeholder_text == "⟦1⟧before ⟦2⟧after⟦/1⟧ tail"
+    assert validate_placeholders(placeholder_text, placeholder_text, registry).valid
+    assert restore_tags(placeholder_text, registry) == source

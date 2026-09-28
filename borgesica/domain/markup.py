@@ -35,7 +35,8 @@ Design:
 
   validate_placeholders(source_placeholder_text, translated, registry)
     Validates the placeholder SEQUENCE: every id present exactly once as an
-    open and once as a close (multiset), and properly paired/nested (no
+    open and once as a close (multiset; empty-close ids such as self-closing
+    tags: once as an open, no close), and properly paired/nested (no
     crossing). Sibling reordering (translation-driven word-order changes) is
     VALID but flagged via `reordered=True` — see PlaceholderValidation.
 """
@@ -234,13 +235,13 @@ def validate_segments(original: str, translated: str) -> bool:
 # numeric id (rather than a bare "⟦⟧" pair marker) keeps every tag's
 # identity unambiguous even when the model reorders siblings.
 #
-# Scope: only the PAIRED tags _TAG_PATTERN already recognizes (i/b/u/em/
-# strong/span/a) ever reach tokenize_tags. Void/self-closing tags (<img/>,
-# etc.) are handled exclusively by strip_all_tags for the prose guard and
-# never enter the round-trip machinery — same boundary strip()/reinsert()
-# already drew — so no self-closing placeholder form ("⟦1/⟧") is
-# needed today; the id-based registry design leaves room for one without a
-# format change if that scope ever grows.
+# Scope: only the tags _TAG_PATTERN recognizes (i/b/u/em/strong/span/a)
+# ever reach tokenize_tags. Void elements (<img/>, <br/>, ...) are not in
+# that set: they pass through the text verbatim and never enter the registry.
+# A SELF-CLOSING span/a (EPUB pagebreak markers: <span epub:type="pagebreak"
+# .../>) does match, so it becomes a single standalone "⟦N⟧" registered with
+# an empty close; validate_placeholders expects exactly one open and no close
+# for every empty-close id, and restore_tags puts the original tag back.
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_OPEN_RE = re.compile(r"⟦(\d+)⟧")
@@ -283,7 +284,14 @@ def tokenize_tags(text: str) -> tuple[str, dict[int, tuple[str, str]]]:
         cursor = end
         tag_str = match.group()
 
-        if tag_str.startswith("</"):
+        if tag_str.endswith("/>"):
+            # Self-closing (<span .../>, e.g. an EPUB pagebreak marker): one
+            # standalone placeholder with an empty close. Never pushed, so it
+            # cannot pair with a neighbouring </span>.
+            counter += 1
+            registry[counter] = (tag_str, "")
+            parts.append(_open_marker(counter))
+        elif tag_str.startswith("</"):
             if stack:
                 tag_id, open_tag = stack.pop()
                 registry[tag_id] = (open_tag, tag_str)
@@ -374,6 +382,10 @@ def validate_placeholders(
     issues: list[str] = []
     events = _placeholder_events(translated)
     expected_ids = set(registry.keys())
+    # Ids registered with an empty close (self-closing tags, or an opening
+    # tag the source never closed) are emitted by tokenize_tags as a single
+    # standalone "⟦N⟧": expect exactly one open and no close.
+    standalone_ids = {tag_id for tag_id, (_, close) in registry.items() if not close}
 
     open_counts: dict[int, int] = {}
     close_counts: dict[int, int] = {}
@@ -385,11 +397,12 @@ def validate_placeholders(
     for tag_id in sorted(expected_ids):
         opens = open_counts.get(tag_id, 0)
         closes = close_counts.get(tag_id, 0)
-        if opens != 1 or closes != 1:
+        expected_closes = 0 if tag_id in standalone_ids else 1
+        if opens != 1 or closes != expected_closes:
             multiset_ok = False
             issues.append(
-                f"placeholder {tag_id}: expected exactly 1 open + 1 close, "
-                f"got {opens} open + {closes} close"
+                f"placeholder {tag_id}: expected exactly 1 open + "
+                f"{expected_closes} close, got {opens} open + {closes} close"
             )
 
     unknown_ids = (set(open_counts) | set(close_counts)) - expected_ids
@@ -403,7 +416,8 @@ def validate_placeholders(
     stack: list[int] = []
     for tag_id, is_close in events:
         if not is_close:
-            stack.append(tag_id)
+            if tag_id not in standalone_ids:
+                stack.append(tag_id)
             continue
         if stack and stack[-1] == tag_id:
             stack.pop()
