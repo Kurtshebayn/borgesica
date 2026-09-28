@@ -33,6 +33,21 @@ def test_save_chunk_is_idempotent() -> None:
     assert chunks[0].translated_text == "Hola"
 
 
+def test_load_summary_before_returns_highest_strictly_lower_index() -> None:
+    """load_summary(before=N) skips summaries at N and above: a retried middle
+    chunk must not see the plot of chunks that come after it."""
+    from borgesica.domain.models import RollingSummary
+
+    store = InMemoryCheckpointStore()
+    for i in (0, 2, 3):
+        store.save_summary("job-1", RollingSummary(text=f"S{i}", chunk_index=i))
+
+    assert store.load_summary("job-1", before=1).text == "S0"
+    assert store.load_summary("job-1", before=3).text == "S2"
+    assert store.load_summary("job-1", before=0) == RollingSummary()
+    assert store.load_summary("job-1").text == "S3"
+
+
 def test_fake_provider_segment_count_returns_translations_array() -> None:
     """With segment_count=N (SRT contract), the default echo fake returns a
     per-segment translations array aligned with the source segments."""

@@ -386,6 +386,20 @@ class TestSQLiteCheckpointStore:
         assert loaded.chunk_index == 2
         assert loaded.text == "summary-2"
 
+    def test_load_summary_before_returns_highest_strictly_lower_index(self):
+        """load_summary(before=N) returns the latest summary BELOW chunk N, so a
+        retried middle chunk never sees the plot of the chunks after it."""
+        job = make_job()
+        self.store.save_job(job)
+        for i in (0, 2, 3):
+            self.store.save_summary(job.id, RollingSummary(text=f"S{i}", chunk_index=i))
+
+        assert self.store.load_summary(job.id, before=1).text == "S0"
+        loaded = self.store.load_summary(job.id, before=3)
+        assert (loaded.text, loaded.chunk_index) == ("S2", 2)
+        assert self.store.load_summary(job.id, before=0) == RollingSummary()
+        assert self.store.load_summary(job.id).text == "S3"
+
     # --- Config persistence: prose_segmentation / prose_chunk_tokens / continue_on_error ---
     def test_job_config_extra_fields_round_trip(self):
         """Non-default prose_segmentation, prose_chunk_tokens, and continue_on_error survive save/load."""
