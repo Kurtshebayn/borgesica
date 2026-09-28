@@ -708,7 +708,8 @@ class TranslationOrchestrator:
             prose mismatch switches the remaining attempts to the indexed
             translations-array contract (one schema-pinned item per source
             paragraph); if no attempt aligns, the chunk ends FAILED
-            (resumable) without the strip/reinsert fallback call.
+            (resumable) — without the strip/reinsert fallback call, unless
+            some attempt also failed on placeholders.
           - Retry up to _MAX_TAG_RETRIES times (3 total attempts) on mismatch.
           - On acceptance, restore_tags() puts the real tags (with their
             original attributes) back before the text is persisted.
@@ -803,6 +804,9 @@ class TranslationOrchestrator:
         # the split or merge happened, so every node after it would receive
         # another paragraph's text.
         segment_mismatched = False
+        # Any attempt that failed the placeholder check: the strip/reinsert
+        # fallback exists for exactly that, even after a segment mismatch.
+        placeholder_failed = False
 
         # --- PRIMARY: tags-in-text attempts ---
         for attempt in range(_MAX_TAG_RETRIES + 1):  # 0, 1, 2
@@ -917,6 +921,7 @@ class TranslationOrchestrator:
                 continue
 
             # Placeholder mismatch — retry unless this was the last attempt.
+            placeholder_failed = True
             validation_issues.append(
                 f"attempt {attempt + 1}: placeholder mismatch "
                 f"({'; '.join(placeholder_result.issues)})"
@@ -934,7 +939,9 @@ class TranslationOrchestrator:
         # SrtWriter would desynchronize cue timing. FAILED surfaces in the CLI
         # skip summary and `resume` retries exactly these chunks. The
         # strip/reinsert fallback below exists for PLACEHOLDER failures and
-        # would cost another call without fixing segmentation — skip it.
+        # would cost another call without fixing segmentation — skip it,
+        # unless some attempt did fail on placeholders (the fallback checks
+        # segments too, so it cannot reintroduce a misaligned reply).
         if best_effort is not None and not cue_batches:
             logger.warning(
                 "Chunk %d: output script check failed after %d attempts — "
@@ -950,7 +957,7 @@ class TranslationOrchestrator:
                 False,
                 json.dumps(validation_issues),
             )
-        if best_effort is not None or segment_mismatched:
+        if best_effort is not None or (segment_mismatched and not placeholder_failed):
             logger.warning(
                 "Chunk %d: no output aligned with the source %s after %d "
                 "attempts — chunk FAILED (resume retries only failed chunks)",

@@ -942,6 +942,45 @@ def test_fallback_output_with_segment_mismatch_fails_chunk():
     assert "fallback: segment count mismatch" in (saved[0].validation_errors or "")
 
 
+def test_mismatch_then_placeholder_failures_still_reach_fallback():
+    """A first reply that splits paragraphs, then array replies that drop the
+    placeholders: the strip/reinsert fallback exists for exactly those
+    placeholder failures and now validates segments too, so it must still
+    run — and its aligned reply is a full validation pass."""
+    store = InMemoryCheckpointStore()
+
+    class SplitThenDropTagsProvider(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+            n = len(self.call_log)
+            self.call_log.append((system, user, model))
+            self.segment_count_log.append(segment_count)
+            if n == 0:  # placeholder-valid echo with one extra segment
+                unit = TranslationUnit(translation=f"{user}\n\nExtra.", summary_update="S.")
+            elif segment_count is not None:  # aligned array, placeholders dropped
+                unit = TranslationUnit(
+                    translations=["El zorro rápido.", "Párrafo dos."], summary_update="S."
+                )
+            else:  # strip/reinsert fallback: plain text, aligned
+                unit = TranslationUnit(
+                    translation="El zorro rápido.\n\nPárrafo dos.", summary_update="S."
+                )
+            return TranslationResult(unit=unit, usage=Usage(input_tokens=1, output_tokens=1))
+
+    provider = SplitThenDropTagsProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="The <i>quick</i> fox.\n\nParagraph two.")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    assert provider.segment_count_log == [None, 2, 2, None]
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.DONE
+    assert saved.passed_validation is True
+    assert len(saved.translated_text.split("\n\n")) == 2
+
+
 # ===========================================================================
 # 17. Tag mismatch all 3 attempts → chunk FAILED; job PAUSED (strict) or
 #     CONTINUES (default) depending on JobConfig.continue_on_error.

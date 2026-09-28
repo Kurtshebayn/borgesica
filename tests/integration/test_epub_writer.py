@@ -1673,3 +1673,39 @@ def test_segment_count_mismatch_keeps_source_instead_of_shifting(translated, cap
         os.unlink(src_path)
         if os.path.exists(out_path):
             os.unlink(out_path)
+
+
+def test_translation_aligned_with_source_is_written_even_if_nodes_disagree() -> None:
+    """The guard judges the TRANSLATION against its source (what the
+    orchestrator validated), not against prose_nodes: when the source itself
+    disagrees with its nodes, that is a reader invariant violation, and
+    discarding an aligned translation for it would only lose work."""
+    paragraphs = ["Alpha.", "Bravo.", "Charlie."]
+    src_path = _write_temp_epub(
+        _make_epub_bytes([("ch1.xhtml", _multi_paragraph_xhtml(paragraphs))])
+    )
+    out_path = src_path.replace(".epub", "_out.epub")
+    try:
+        chunks = chunk_prose(EpubReader().read(src_path, _config()), _config(), _FakeProvider())
+        body = next(c for c in chunks if len(c.meta["prose_nodes"]) == 3)
+        # Source carries one segment more than its 3 nodes.
+        broken = body.model_copy(
+            update={
+                "source_text": "Alpha.\n\nBravo.\n\nCharlie.\n\nCharlie bis.",
+                "translated_text": "[ES] A.\n\n[ES] B.\n\n[ES] C.\n\n[ES] C bis.",
+                "status": ChunkStatus.DONE,
+            }
+        )
+        chunks = [broken if c.index == broken.index else c for c in chunks]
+
+        EpubWriter().write(chunks, src_path, out_path)
+
+        with zipfile.ZipFile(out_path) as zf:
+            name = next(n for n in zf.namelist() if n.endswith("ch1.xhtml"))
+            root = etree.fromstring(zf.read(name))
+        texts = ["".join(p.itertext()) for p in root.iter("{http://www.w3.org/1999/xhtml}p")]
+        assert texts[:2] == ["[ES] A.", "[ES] B."]
+    finally:
+        os.unlink(src_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
