@@ -10,6 +10,7 @@ import api.py. Domain never imports adapters or api.py.
 """
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from borgesica.domain.glossary import (
     seed_character_gender,
     settlement_counts,
 )
+from borgesica.domain.markup import segment_count
 from borgesica.domain.models import (
     ChunkStatus,
     CostEstimate,
@@ -362,6 +364,74 @@ class TranslatorEngine:
             for c in chunks
             if c.status == ChunkStatus.DONE and not c.passed_validation
         )
+
+    # ------------------------------------------------------------------
+    # requeue_misaligned_chunks
+    # ------------------------------------------------------------------
+
+    def requeue_misaligned_chunks(self, job_id: str, dry_run: bool = False) -> list[int]:
+        """Mark DONE chunks whose translation is misaligned as FAILED, for resume.
+
+        Older versions stored DONE chunks whose translation has a different
+        ``\\n\\n`` segment count than the source. Writers map segments to nodes
+        by position, so the EPUB writer exports those chunks as source text,
+        and resume never retries a DONE chunk: without this they stay
+        untranslated for good. Detection is deterministic — segment counts only.
+
+        Each selected chunk is saved FAILED; nothing else changes. The stored
+        translation is kept (it was paid for; the writers never place a
+        misaligned one, and the retry overwrites it), and so is the job status:
+        ``resume_job`` retries the FAILED chunks of a job in any non-RUNNING
+        status, DONE included — the same state a continue_on_error run ends in.
+        So a requeue interrupted between two chunk writes still leaves a job
+        that ``resume`` finishes, and running requeue again picks up the rest.
+
+        Args:
+            job_id:  ID of the job.
+            dry_run: If True, report the chunks without changing anything.
+
+        Returns:
+            Sorted (0-based) list of misaligned chunk indices. Empty if none.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+            JobStateError:    if the job is RUNNING and dry_run is False — the
+                              run holds its own chunk list and would save them
+                              back over the requeue.
+        """
+        job = self._load_job_or_raise(job_id)
+        misaligned = sorted(
+            (
+                c
+                for c in self._checkpoint.load_chunks(job_id)
+                if c.status == ChunkStatus.DONE
+                and c.translated_text is not None
+                and segment_count(c.translated_text) != segment_count(c.source_text)
+            ),
+            key=lambda c: c.index,
+        )
+        if dry_run:
+            return [c.index for c in misaligned]
+        if job.status == JobStatus.RUNNING:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+
+        for chunk in misaligned:
+            reason = (
+                f"requeued: stored translation has "
+                f"{segment_count(chunk.translated_text)} segments, "
+                f"source has {segment_count(chunk.source_text)}"
+            )
+            self._checkpoint.save_chunk(
+                job_id,
+                chunk.model_copy(
+                    update={
+                        "status": ChunkStatus.FAILED,
+                        "passed_validation": False,
+                        "validation_errors": json.dumps([reason]),
+                    }
+                ),
+            )
+        return [c.index for c in misaligned]
 
     # ------------------------------------------------------------------
     # audit_job

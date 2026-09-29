@@ -1173,3 +1173,138 @@ def test_cli_audit_unknown_job_exits_non_zero(capsys: pytest.CaptureFixture) -> 
         mock_build.return_value = _audit_engine()
 
         assert main(["audit", "no-such-job"]) != 0
+
+
+# ---------------------------------------------------------------------------
+# requeue — turn DONE chunks stored with misaligned paragraphs back into
+# FAILED chunks, so `resume` retranslates them.
+# ---------------------------------------------------------------------------
+
+
+def _requeue_engine():
+    """A fake engine holding one finished job: chunk 1 is misaligned."""
+    from datetime import UTC, datetime
+
+    from borgesica.adapters.readers.srt_reader import SrtReader
+    from borgesica.adapters.writers.srt_writer import SrtWriter
+    from borgesica.api import TranslatorEngine
+    from borgesica.domain.glossary import NullGlossaryExtractor
+    from borgesica.domain.models import (
+        Chunk,
+        ChunkStatus,
+        Job,
+        JobConfig,
+        JobStatus,
+        SourceType,
+    )
+    from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
+
+    checkpoint = InMemoryCheckpointStore()
+    now = datetime.now(UTC)
+    checkpoint.save_job(Job(
+        id="job-1",
+        config=JobConfig(source_type=SourceType.EPUB, model="fake"),
+        source_path="x.epub",
+        status=JobStatus.DONE,
+        created_at=now,
+        updated_at=now,
+    ))
+    checkpoint.save_chunk("job-1", Chunk(
+        index=0, source_text="One.\n\nTwo.",
+        translated_text="Uno.\n\nDos.", status=ChunkStatus.DONE,
+    ))
+    checkpoint.save_chunk("job-1", Chunk(
+        index=1, source_text="Three.\n\nFour.",
+        translated_text="Tres y cuatro.", status=ChunkStatus.DONE,
+    ))
+    return TranslatorEngine(
+        provider=FakeTranslationProvider(),
+        checkpoint=checkpoint,
+        readers={SourceType.SRT: SrtReader()},
+        writers={SourceType.SRT: SrtWriter()},
+        extractor=NullGlossaryExtractor(),
+    ), checkpoint
+
+
+def test_cli_requeue_marks_chunks_and_points_at_resume(capsys: pytest.CaptureFixture) -> None:
+    from borgesica.__main__ import main
+    from borgesica.domain.models import ChunkStatus, JobStatus
+
+    engine, checkpoint = _requeue_engine()
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = engine
+        exit_code = main(["requeue", "job-1"])
+
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "[1]" in out
+    assert "borgesica resume job-1" in out
+    assert checkpoint.load_chunks("job-1")[1].status == ChunkStatus.FAILED
+    assert checkpoint.load_job("job-1").status == JobStatus.DONE
+
+
+def test_cli_requeue_dry_run_changes_nothing(capsys: pytest.CaptureFixture) -> None:
+    from borgesica.__main__ import main
+    from borgesica.domain.models import JobStatus
+
+    engine, checkpoint = _requeue_engine()
+    chunks_before = checkpoint.load_chunks("job-1")
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = engine
+        exit_code = main(["requeue", "job-1", "--dry-run"])
+
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "[1]" in out
+    assert "nothing was changed" in out.lower()
+    assert checkpoint.load_chunks("job-1") == chunks_before
+    assert checkpoint.load_job("job-1").status == JobStatus.DONE
+
+
+def test_cli_requeue_reports_when_nothing_is_misaligned(capsys: pytest.CaptureFixture) -> None:
+    from borgesica.__main__ import main
+    from borgesica.domain.models import Chunk, ChunkStatus
+
+    engine, checkpoint = _requeue_engine()
+    checkpoint.save_chunk("job-1", Chunk(
+        index=1, source_text="Three.", translated_text="Tres.", status=ChunkStatus.DONE,
+    ))
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = engine
+        exit_code = main(["requeue", "job-1"])
+
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "resume" not in out
+
+
+def test_cli_requeue_unknown_job_exits_one(capsys: pytest.CaptureFixture) -> None:
+    from borgesica.__main__ import main
+
+    engine, _ = _requeue_engine()
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = engine
+        exit_code = main(["requeue", "no-such-job"])
+
+    assert exit_code == 1
+    assert "ERROR" in capsys.readouterr().err
+
+
+def test_cli_requeue_running_job_exits_one(capsys: pytest.CaptureFixture) -> None:
+    from borgesica.__main__ import main
+    from borgesica.domain.models import ChunkStatus, JobStatus
+
+    engine, checkpoint = _requeue_engine()
+    checkpoint.save_job(
+        checkpoint.load_job("job-1").model_copy(update={"status": JobStatus.RUNNING})
+    )
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = engine
+        exit_code = main(["requeue", "job-1"])
+
+    assert exit_code == 1
+    assert "ERROR" in capsys.readouterr().err
+    assert checkpoint.load_chunks("job-1")[1].status == ChunkStatus.DONE

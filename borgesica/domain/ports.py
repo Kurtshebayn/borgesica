@@ -157,7 +157,13 @@ class CheckpointStore(Protocol):
     def save_summary(self, job_id: str, s: RollingSummary) -> None:
         ...
 
-    def load_summary(self, job_id: str) -> RollingSummary:
+    def load_summary(self, job_id: str, *, before: int | None = None) -> RollingSummary:
+        """Return the summary of the highest-index chunk, or a default.
+
+        With ``before``, only chunks with index strictly below it count: a
+        retried middle chunk must get the summary of the chunk before it, not
+        the end-of-book one.
+        """
         ...
 
 

@@ -339,6 +339,32 @@ def test_resume_rebuilds_summary_from_highest_done():
     assert "Summary from chunk 2" in system_for_chunk3
 
 
+def test_resume_of_a_middle_chunk_uses_the_summary_before_it():
+    """A FAILED chunk in the middle of an otherwise finished book is retried
+    with the summary of the chunk BEFORE it, not the end-of-book summary —
+    that one describes plot the retried chunk has not reached yet."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+
+    config = make_config()
+    job = make_job(config, total=4)
+    chunks = make_chunks(4)
+    for i in (0, 2, 3):
+        chunks[i] = chunks[i].model_copy(
+            update={"status": ChunkStatus.DONE, "translated_text": f"Done {i}."}
+        )
+        store.save_summary(job.id, RollingSummary(text=f"S{i}", chunk_index=i))
+    chunks[1] = chunks[1].model_copy(update={"status": ChunkStatus.FAILED})
+
+    run_job(orch, job, chunks, store=store)
+
+    assert provider.call_count == 1
+    system_for_chunk1 = provider.call_log[0][0]
+    assert "S0" in system_for_chunk1
+    assert "S3" not in system_for_chunk1
+
+
 # ===========================================================================
 # 7. Resume with all chunks DONE → 0 provider calls, job status DONE
 # ===========================================================================

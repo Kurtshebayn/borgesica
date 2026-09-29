@@ -169,13 +169,13 @@ class InMemoryCheckpointStore:
             self._summaries[job_id] = {}
         self._summaries[job_id][s.chunk_index] = s
 
-    def load_summary(self, job_id: str) -> RollingSummary:
+    def load_summary(self, job_id: str, *, before: int | None = None) -> RollingSummary:
         bucket = self._summaries.get(job_id, {})
-        if not bucket:
+        indices = [i for i in bucket if before is None or i < before]
+        if not indices:
             return RollingSummary()
-        # Return the summary from the highest-index chunk.
-        max_index = max(bucket)
-        return bucket[max_index]
+        # Return the summary from the highest eligible index.
+        return bucket[max(indices)]
 
 
 # ---------------------------------------------------------------------------

@@ -506,11 +506,22 @@ class SQLiteCheckpointStore:
                 "text": s.text,
             })
 
-    def load_summary(self, job_id: str) -> RollingSummary:
-        """Return the summary from the highest-indexed chunk, or a default."""
-        sql = "SELECT * FROM summaries WHERE job_id = ? ORDER BY chunk_index DESC LIMIT 1"
+    def load_summary(self, job_id: str, *, before: int | None = None) -> RollingSummary:
+        """Return the summary from the highest-indexed chunk, or a default.
+
+        With ``before``, only chunks with index strictly below it are considered.
+        """
+        if before is None:
+            sql = "SELECT * FROM summaries WHERE job_id = ? ORDER BY chunk_index DESC LIMIT 1"
+            params: tuple = (job_id,)
+        else:
+            sql = (
+                "SELECT * FROM summaries WHERE job_id = ? AND chunk_index < ? "
+                "ORDER BY chunk_index DESC LIMIT 1"
+            )
+            params = (job_id, before)
         with self._connect() as conn:
-            row = conn.execute(sql, (job_id,)).fetchone()
+            row = conn.execute(sql, params).fetchone()
 
         if row is None:
             return RollingSummary()

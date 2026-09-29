@@ -35,7 +35,7 @@ Design (continue-on-error — replaces M2-0 per-chunk flow):
       8. checkpoint.save_chunk(DONE or FAILED) — idempotent.
       9. summary = unit.summary_update; checkpoint.save_summary(N) — skipped for
          a FAILED chunk (no summary_update available); the next chunk reuses the
-         current rolling summary.
+         latest summary before it.
      10. Merge glossary_additions (locked wins; new terms added as unlocked).
      11. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
     After loop: job.status = DONE — even if one or more chunks ended FAILED (only
@@ -44,7 +44,8 @@ Design (continue-on-error — replaces M2-0 per-chunk flow):
 
 Resume semantics:
   - DONE chunks are skipped (0 provider calls for them).
-  - Rolling summary rebuilt from highest-index DONE summary row.
+  - Each chunk gets the summary saved for the highest index BELOW it, so a
+    retried middle chunk never sees the end-of-book summary.
   - Continue from first non-DONE chunk.
   - CANCELLED / PAUSED / CREATED are all valid entry statuses for run().
   - RUNNING is the only invalid entry status → raises JobStateError.
@@ -308,9 +309,6 @@ class TranslationOrchestrator:
         # Sort chunks by index for deterministic ordering.
         ordered_chunks = sorted(chunks, key=lambda c: c.index)
 
-        # Rebuild rolling summary from the highest-index DONE chunk.
-        current_summary = self._rebuild_summary(job.id, ordered_chunks)
-
         # Track running cost (may already be non-zero from previous runs).
         running_cost = job.cost_usd
 
@@ -354,10 +352,15 @@ class TranslationOrchestrator:
                 self._checkpoint.save_job(updated_job)
                 return updated_job
 
+            # Rolling summary of the chunk BEFORE this one. In a sequential run
+            # that is the summary just saved; on a resume that retries a middle
+            # chunk it is NOT the highest-index one, which describes later plot.
+            summary = self._checkpoint.load_summary(job.id, before=chunk.index)
+
             # Budget check — BEFORE the provider call.
             if config.budget_usd is not None:
                 projected = self._project_chunk_cost(
-                    chunk, config, live_glossary, current_summary
+                    chunk, config, live_glossary, summary
                 )
                 if running_cost + projected > config.budget_usd:
                     paused_job = job.model_copy(
@@ -403,7 +406,7 @@ class TranslationOrchestrator:
                 continue
 
             # Build system prompt for this chunk.
-            system_prompt = self._ctx.build_system_prompt(config, live_glossary, current_summary)
+            system_prompt = self._ctx.build_system_prompt(config, live_glossary, summary)
 
             # Fetch price once per chunk (same model throughout — no need to re-fetch per call).
             in_price, out_price = self._provider.price(config.model)
@@ -455,7 +458,7 @@ class TranslationOrchestrator:
                     return paused_job
                 # continue_on_error=True: do NOT pause — proceed to the next chunk.
                 # Rolling summary is intentionally NOT updated for a FAILED chunk
-                # (no summary_update available); next chunk reuses current_summary.
+                # (no summary_update available); the next chunk reuses the latest one.
                 on_progress(
                     Progress(
                         job_id=job.id,
@@ -485,11 +488,10 @@ class TranslationOrchestrator:
             self._capture_corpus(job.id, done_chunk, config, passed_validation)
 
             # Update rolling summary (REPLACES prior summary).
-            current_summary = RollingSummary(
-                text=final_unit.summary_update,
-                chunk_index=chunk.index,
+            self._checkpoint.save_summary(
+                job.id,
+                RollingSummary(text=final_unit.summary_update, chunk_index=chunk.index),
             )
-            self._checkpoint.save_summary(job.id, current_summary)
 
             # Merge glossary additions (locked wins; new terms added as unlocked).
             # A new term is committed at once but stays provisional: repeated
@@ -532,19 +534,6 @@ class TranslationOrchestrator:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    def _rebuild_summary(self, job_id: str, ordered_chunks: list[Chunk]) -> RollingSummary:
-        """Return the rolling summary from the highest-index DONE chunk.
-
-        If no DONE chunks exist yet, return an empty RollingSummary.
-        """
-        done_indices = [c.index for c in ordered_chunks if c.status == ChunkStatus.DONE]
-        if not done_indices:
-            return RollingSummary()
-        # load_summary returns the summary from the highest-index chunk.
-        # The CheckpointStore contract guarantees this for both the in-memory
-        # and SQLite implementations (see design section 5).
-        return self._checkpoint.load_summary(job_id)
 
     def _project_chunk_cost(
         self,
