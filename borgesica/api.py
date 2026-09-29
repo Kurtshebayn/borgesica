@@ -31,7 +31,7 @@ from borgesica.domain.glossary import (
     seed_character_gender,
     settlement_counts,
 )
-from borgesica.domain.markup import validate_segments
+from borgesica.domain.markup import segment_count
 from borgesica.domain.models import (
     ChunkStatus,
     CostEstimate,
@@ -378,9 +378,13 @@ class TranslatorEngine:
         and resume never retries a DONE chunk: without this they stay
         untranslated for good. Detection is deterministic — segment counts only.
 
-        Each selected chunk is saved FAILED with its translation cleared, and a
-        DONE job is saved PAUSED so ``resume_job`` picks it up. A job in any
-        other status keeps it: resume already accepts PAUSED and CANCELLED.
+        Each selected chunk is saved FAILED; nothing else changes. The stored
+        translation is kept (it was paid for; the writers never place a
+        misaligned one, and the retry overwrites it), and so is the job status:
+        ``resume_job`` retries the FAILED chunks of a job in any non-RUNNING
+        status, DONE included — the same state a continue_on_error run ends in.
+        So a requeue interrupted between two chunk writes still leaves a job
+        that ``resume`` finishes, and running requeue again picks up the rest.
 
         Args:
             job_id:  ID of the job.
@@ -391,6 +395,9 @@ class TranslatorEngine:
 
         Raises:
             JobNotFoundError: if job_id is not found.
+            JobStateError:    if the job is RUNNING and dry_run is False — the
+                              run holds its own chunk list and would save them
+                              back over the requeue.
         """
         job = self._load_job_or_raise(job_id)
         misaligned = sorted(
@@ -399,36 +406,30 @@ class TranslatorEngine:
                 for c in self._checkpoint.load_chunks(job_id)
                 if c.status == ChunkStatus.DONE
                 and c.translated_text is not None
-                and not validate_segments(c.source_text, c.translated_text)
+                and segment_count(c.translated_text) != segment_count(c.source_text)
             ),
             key=lambda c: c.index,
         )
         if dry_run:
             return [c.index for c in misaligned]
+        if job.status == JobStatus.RUNNING:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
 
         for chunk in misaligned:
-            translated_count = len(chunk.translated_text.split("\n\n"))
-            source_count = len(chunk.source_text.split("\n\n"))
             reason = (
-                f"requeued: stored translation has {translated_count} segments, "
-                f"source has {source_count}"
+                f"requeued: stored translation has "
+                f"{segment_count(chunk.translated_text)} segments, "
+                f"source has {segment_count(chunk.source_text)}"
             )
             self._checkpoint.save_chunk(
                 job_id,
                 chunk.model_copy(
                     update={
                         "status": ChunkStatus.FAILED,
-                        "translated_text": None,
                         "passed_validation": False,
                         "validation_errors": json.dumps([reason]),
                     }
                 ),
-            )
-        if misaligned and job.status == JobStatus.DONE:
-            self._checkpoint.save_job(
-                job.model_copy(
-                    update={"status": JobStatus.PAUSED, "updated_at": datetime.now(UTC)}
-                )
             )
         return [c.index for c in misaligned]
 

@@ -40,9 +40,9 @@ Subcommands:
              the checks are structural, not semantic.
     requeue <job_id> [--dry-run]
              Marks DONE chunks whose stored translation has a different
-             paragraph count than the source as FAILED (and a DONE job as
-             PAUSED), so `resume` retranslates them. Older versions stored
-             such chunks; the EPUB writer exports them as source text.
+             paragraph count than the source as FAILED, so `resume`
+             retranslates them. Older versions stored such chunks; the EPUB
+             writer exports them as source text. Refuses a RUNNING job.
              --dry-run lists them without changing anything.
     glossary show   <job_id>
     glossary update <job_id> <term> <translation> [--lock]
@@ -597,7 +597,7 @@ def _cmd_requeue(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     """List (and unless --dry-run, requeue) chunks stored with misaligned paragraphs."""
     try:
         indices = engine.requeue_misaligned_chunks(args.job_id, dry_run=args.dry_run)
-    except JobNotFoundError as exc:
+    except BorgesicaError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     if not indices:
@@ -877,6 +877,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_provider(p_audit)
 
     # requeue — free: rewrites stored chunk status only, no provider calls.
+    # The provider options only build the engine, exactly as for `audit`.
     p_requeue = sub.add_parser(
         "requeue", help="Mark chunks stored with misaligned paragraphs for retranslation"
     )

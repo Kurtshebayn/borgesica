@@ -204,6 +204,12 @@ def strip_all_tags(text: str) -> str:
     return _ANY_TAG_PATTERN.sub("", text)
 
 
+def segment_count(text: str) -> int:
+    """Number of ``\\n\\n``-separated segments, counted exactly as the writers
+    split (raw string, no normalization)."""
+    return len(text.split("\n\n"))
+
+
 def validate_segments(original: str, translated: str) -> bool:
     """Return True iff *original* and *translated* have the same number of
     ``\\n\\n``-separated segments.
@@ -215,7 +221,7 @@ def validate_segments(original: str, translated: str) -> bool:
     taken on the raw strings — no strip()/normalization — because that is
     exactly how the writers split.
     """
-    return len(original.split("\n\n")) == len(translated.split("\n\n"))
+    return segment_count(original) == segment_count(translated)
 
 
 # ---------------------------------------------------------------------------

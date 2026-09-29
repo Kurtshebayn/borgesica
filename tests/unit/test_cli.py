@@ -1241,7 +1241,7 @@ def test_cli_requeue_marks_chunks_and_points_at_resume(capsys: pytest.CaptureFix
     assert "[1]" in out
     assert "borgesica resume job-1" in out
     assert checkpoint.load_chunks("job-1")[1].status == ChunkStatus.FAILED
-    assert checkpoint.load_job("job-1").status == JobStatus.PAUSED
+    assert checkpoint.load_job("job-1").status == JobStatus.DONE
 
 
 def test_cli_requeue_dry_run_changes_nothing(capsys: pytest.CaptureFixture) -> None:
@@ -1291,3 +1291,20 @@ def test_cli_requeue_unknown_job_exits_one(capsys: pytest.CaptureFixture) -> Non
 
     assert exit_code == 1
     assert "ERROR" in capsys.readouterr().err
+
+
+def test_cli_requeue_running_job_exits_one(capsys: pytest.CaptureFixture) -> None:
+    from borgesica.__main__ import main
+    from borgesica.domain.models import ChunkStatus, JobStatus
+
+    engine, checkpoint = _requeue_engine()
+    checkpoint.save_job(
+        checkpoint.load_job("job-1").model_copy(update={"status": JobStatus.RUNNING})
+    )
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        mock_build.return_value = engine
+        exit_code = main(["requeue", "job-1"])
+
+    assert exit_code == 1
+    assert "ERROR" in capsys.readouterr().err
+    assert checkpoint.load_chunks("job-1")[1].status == ChunkStatus.DONE

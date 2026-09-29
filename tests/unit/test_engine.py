@@ -853,7 +853,9 @@ def test_requeue_misaligned_chunks_marks_only_misaligned_done_chunks_failed() ->
     after = {c.index: c for c in checkpoint.load_chunks(job.id)}
     for i in (1, 5):
         assert after[i].status == ChunkStatus.FAILED
-        assert after[i].translated_text is None
+        # Paid output is kept: the writers never place a misaligned
+        # translation, and the retry overwrites it.
+        assert after[i].translated_text == before[i].translated_text
         assert after[i].passed_validation is False
         assert after[i].source_text == before[i].source_text
     assert json.loads(after[1].validation_errors) == [
@@ -866,36 +868,31 @@ def test_requeue_misaligned_chunks_marks_only_misaligned_done_chunks_failed() ->
         assert after[i] == before[i]
 
 
-def test_requeue_misaligned_chunks_pauses_a_done_job() -> None:
-    """resume must pick the job up, so a DONE job becomes PAUSED."""
+@pytest.mark.parametrize("status", [JobStatus.DONE, JobStatus.CANCELLED])
+def test_requeue_misaligned_chunks_leaves_the_job_status_alone(status: JobStatus) -> None:
+    """Only chunk rows change. resume_job retries the FAILED chunks of a job in
+    any non-RUNNING status, DONE included, so a requeue interrupted between
+    two chunk writes still leaves a job resume can finish."""
     engine, _, checkpoint = _make_engine()
-    job = _seed_requeue_job(checkpoint)
-
-    engine.requeue_misaligned_chunks(job.id)
-
-    assert checkpoint.load_job(job.id).status == JobStatus.PAUSED
-
-
-def test_requeue_misaligned_chunks_leaves_a_non_done_job_status_alone() -> None:
-    engine, _, checkpoint = _make_engine()
-    job = _seed_requeue_job(checkpoint, status=JobStatus.CANCELLED)
+    job = _seed_requeue_job(checkpoint, status=status)
 
     assert engine.requeue_misaligned_chunks(job.id) == [1, 5]
 
-    assert checkpoint.load_job(job.id).status == JobStatus.CANCELLED
+    assert checkpoint.load_job(job.id) == job
 
 
-def test_requeue_misaligned_chunks_keeps_a_done_job_done_when_nothing_to_requeue() -> None:
+def test_requeue_misaligned_chunks_refuses_a_running_job() -> None:
+    """A run in progress holds its own chunk list and would save the job DONE
+    over the requeue; a dry run only reads, so it is still allowed."""
     engine, _, checkpoint = _make_engine()
-    job = _seed_requeue_job(checkpoint)
-    for i in (1, 5):
-        checkpoint.save_chunk(
-            job.id, Chunk(index=i, source_text="x", status=ChunkStatus.DONE, translated_text="y")
-        )
+    job = _seed_requeue_job(checkpoint, status=JobStatus.RUNNING)
+    chunks_before = checkpoint.load_chunks(job.id)
 
-    assert engine.requeue_misaligned_chunks(job.id) == []
+    with pytest.raises(JobStateError):
+        engine.requeue_misaligned_chunks(job.id)
 
-    assert checkpoint.load_job(job.id).status == JobStatus.DONE
+    assert checkpoint.load_chunks(job.id) == chunks_before
+    assert engine.requeue_misaligned_chunks(job.id, dry_run=True) == [1, 5]
 
 
 def test_requeue_misaligned_chunks_dry_run_changes_nothing() -> None:
