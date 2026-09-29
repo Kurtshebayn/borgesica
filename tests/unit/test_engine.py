@@ -5,6 +5,7 @@ No network, no real SRT files (we build Chunks directly in fixtures).
 """
 from __future__ import annotations
 
+import json
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -795,6 +796,153 @@ def test_best_effort_chunk_indices_raises_for_unknown_job_id() -> None:
     engine, _, _ = _make_engine()
     with pytest.raises(JobNotFoundError):
         engine.best_effort_chunk_indices("unknown-id")
+
+
+# ---------------------------------------------------------------------------
+# TranslatorEngine.requeue_misaligned_chunks(job_id, dry_run)
+# Older versions stored DONE chunks whose translation has a different "\n\n"
+# segment count than the source. Writers cannot place those paragraphs, and
+# resume never retries a DONE chunk, so requeue turns them back into FAILED.
+# ---------------------------------------------------------------------------
+
+
+def _seed_requeue_job(
+    checkpoint: InMemoryCheckpointStore, status: JobStatus = JobStatus.DONE
+) -> Job:
+    """A job with one chunk of every kind requeue must tell apart:
+
+    0 DONE aligned, 1 DONE misaligned (2 segments -> 1), 2 PENDING,
+    3 FAILED, 4 DONE passthrough (translated == source), 5 DONE misaligned
+    (1 segment -> 2).
+    """
+    now = datetime.now(UTC)
+    job = Job(
+        id="job-requeue",
+        config=_make_config(source_type=SourceType.EPUB),
+        source_path="book.epub",
+        status=status,
+        total_chunks=6,
+        created_at=now,
+        updated_at=now,
+    )
+    checkpoint.save_job(job)
+    two = "First paragraph.\n\nSecond paragraph."
+    chunks = [
+        Chunk(index=0, source_text=two, status=ChunkStatus.DONE,
+              translated_text="Primer párrafo.\n\nSegundo párrafo."),
+        Chunk(index=1, source_text=two, status=ChunkStatus.DONE,
+              translated_text="Primer y segundo párrafo."),
+        Chunk(index=2, source_text=two),
+        Chunk(index=3, source_text=two, status=ChunkStatus.FAILED),
+        Chunk(index=4, source_text="IV", status=ChunkStatus.DONE, translated_text="IV"),
+        Chunk(index=5, source_text="One paragraph.", status=ChunkStatus.DONE,
+              translated_text="Un párrafo.\n\nPartido en dos."),
+    ]
+    for c in chunks:
+        checkpoint.save_chunk(job.id, c)
+    return job
+
+
+def test_requeue_misaligned_chunks_marks_only_misaligned_done_chunks_failed() -> None:
+    engine, _, checkpoint = _make_engine()
+    job = _seed_requeue_job(checkpoint)
+    before = {c.index: c for c in checkpoint.load_chunks(job.id)}
+
+    assert engine.requeue_misaligned_chunks(job.id) == [1, 5]
+
+    after = {c.index: c for c in checkpoint.load_chunks(job.id)}
+    for i in (1, 5):
+        assert after[i].status == ChunkStatus.FAILED
+        assert after[i].translated_text is None
+        assert after[i].passed_validation is False
+        assert after[i].source_text == before[i].source_text
+    assert json.loads(after[1].validation_errors) == [
+        "requeued: stored translation has 1 segments, source has 2"
+    ]
+    assert json.loads(after[5].validation_errors) == [
+        "requeued: stored translation has 2 segments, source has 1"
+    ]
+    for i in (0, 2, 3, 4):
+        assert after[i] == before[i]
+
+
+def test_requeue_misaligned_chunks_pauses_a_done_job() -> None:
+    """resume must pick the job up, so a DONE job becomes PAUSED."""
+    engine, _, checkpoint = _make_engine()
+    job = _seed_requeue_job(checkpoint)
+
+    engine.requeue_misaligned_chunks(job.id)
+
+    assert checkpoint.load_job(job.id).status == JobStatus.PAUSED
+
+
+def test_requeue_misaligned_chunks_leaves_a_non_done_job_status_alone() -> None:
+    engine, _, checkpoint = _make_engine()
+    job = _seed_requeue_job(checkpoint, status=JobStatus.CANCELLED)
+
+    assert engine.requeue_misaligned_chunks(job.id) == [1, 5]
+
+    assert checkpoint.load_job(job.id).status == JobStatus.CANCELLED
+
+
+def test_requeue_misaligned_chunks_keeps_a_done_job_done_when_nothing_to_requeue() -> None:
+    engine, _, checkpoint = _make_engine()
+    job = _seed_requeue_job(checkpoint)
+    for i in (1, 5):
+        checkpoint.save_chunk(
+            job.id, Chunk(index=i, source_text="x", status=ChunkStatus.DONE, translated_text="y")
+        )
+
+    assert engine.requeue_misaligned_chunks(job.id) == []
+
+    assert checkpoint.load_job(job.id).status == JobStatus.DONE
+
+
+def test_requeue_misaligned_chunks_dry_run_changes_nothing() -> None:
+    engine, _, checkpoint = _make_engine()
+    job = _seed_requeue_job(checkpoint)
+    chunks_before = checkpoint.load_chunks(job.id)
+
+    assert engine.requeue_misaligned_chunks(job.id, dry_run=True) == [1, 5]
+
+    assert checkpoint.load_chunks(job.id) == chunks_before
+    assert checkpoint.load_job(job.id) == job
+
+
+def test_requeue_misaligned_chunks_raises_for_unknown_job_id() -> None:
+    engine, _, _ = _make_engine()
+    with pytest.raises(JobNotFoundError):
+        engine.requeue_misaligned_chunks("unknown-id")
+
+
+def test_resume_after_requeue_retranslates_exactly_the_requeued_chunks(
+    tmp_path: Path,
+) -> None:
+    """End to end: a finished job with a chunk whose stored translation merged
+    two cues is requeued, and resume retranslates that chunk and nothing else."""
+    srt_path = _make_srt_fixture(tmp_path, num_cues=6)
+    engine, provider, checkpoint = _make_engine()
+    job = engine.create_job(srt_path, _make_config(chunk_size=2))
+    out_path = str(tmp_path / "out.srt")
+    engine.run_job(job.id, out_path=out_path)
+    assert checkpoint.load_job(job.id).status == JobStatus.DONE
+
+    chunk1 = {c.index: c for c in checkpoint.load_chunks(job.id)}[1]
+    assert chunk1.source_text.count("\n\n") == 1
+    checkpoint.save_chunk(
+        job.id, chunk1.model_copy(update={"translated_text": "Both cues merged."})
+    )
+    provider.reset()
+
+    assert engine.requeue_misaligned_chunks(job.id) == [1]
+    result = engine.resume_job(job.id, out_path=out_path)
+
+    assert result.status == JobStatus.DONE
+    assert len(provider.call_log) == 1
+    assert "Cue 3 text." in provider.call_log[0][1]
+    done = {c.index: c for c in checkpoint.load_chunks(job.id)}
+    assert all(c.status == ChunkStatus.DONE for c in done.values())
+    assert done[1].translated_text.count("\n\n") == 1
 
 
 # ---------------------------------------------------------------------------

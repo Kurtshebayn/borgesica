@@ -10,6 +10,7 @@ import api.py. Domain never imports adapters or api.py.
 """
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from borgesica.domain.glossary import (
     seed_character_gender,
     settlement_counts,
 )
+from borgesica.domain.markup import validate_segments
 from borgesica.domain.models import (
     ChunkStatus,
     CostEstimate,
@@ -362,6 +364,73 @@ class TranslatorEngine:
             for c in chunks
             if c.status == ChunkStatus.DONE and not c.passed_validation
         )
+
+    # ------------------------------------------------------------------
+    # requeue_misaligned_chunks
+    # ------------------------------------------------------------------
+
+    def requeue_misaligned_chunks(self, job_id: str, dry_run: bool = False) -> list[int]:
+        """Mark DONE chunks whose translation is misaligned as FAILED, for resume.
+
+        Older versions stored DONE chunks whose translation has a different
+        ``\\n\\n`` segment count than the source. Writers map segments to nodes
+        by position, so the EPUB writer exports those chunks as source text,
+        and resume never retries a DONE chunk: without this they stay
+        untranslated for good. Detection is deterministic — segment counts only.
+
+        Each selected chunk is saved FAILED with its translation cleared, and a
+        DONE job is saved PAUSED so ``resume_job`` picks it up. A job in any
+        other status keeps it: resume already accepts PAUSED and CANCELLED.
+
+        Args:
+            job_id:  ID of the job.
+            dry_run: If True, report the chunks without changing anything.
+
+        Returns:
+            Sorted (0-based) list of misaligned chunk indices. Empty if none.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        job = self._load_job_or_raise(job_id)
+        misaligned = sorted(
+            (
+                c
+                for c in self._checkpoint.load_chunks(job_id)
+                if c.status == ChunkStatus.DONE
+                and c.translated_text is not None
+                and not validate_segments(c.source_text, c.translated_text)
+            ),
+            key=lambda c: c.index,
+        )
+        if dry_run:
+            return [c.index for c in misaligned]
+
+        for chunk in misaligned:
+            translated_count = len(chunk.translated_text.split("\n\n"))
+            source_count = len(chunk.source_text.split("\n\n"))
+            reason = (
+                f"requeued: stored translation has {translated_count} segments, "
+                f"source has {source_count}"
+            )
+            self._checkpoint.save_chunk(
+                job_id,
+                chunk.model_copy(
+                    update={
+                        "status": ChunkStatus.FAILED,
+                        "translated_text": None,
+                        "passed_validation": False,
+                        "validation_errors": json.dumps([reason]),
+                    }
+                ),
+            )
+        if misaligned and job.status == JobStatus.DONE:
+            self._checkpoint.save_job(
+                job.model_copy(
+                    update={"status": JobStatus.PAUSED, "updated_at": datetime.now(UTC)}
+                )
+            )
+        return [c.index for c in misaligned]
 
     # ------------------------------------------------------------------
     # audit_job

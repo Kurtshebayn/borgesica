@@ -38,6 +38,12 @@ Subcommands:
              their excerpt shows both entries. Advisory: exits 0 even with
              findings, and a zero result is not a clean bill of health —
              the checks are structural, not semantic.
+    requeue <job_id> [--dry-run]
+             Marks DONE chunks whose stored translation has a different
+             paragraph count than the source as FAILED (and a DONE job as
+             PAUSED), so `resume` retranslates them. Older versions stored
+             such chunks; the EPUB writer exports them as source text.
+             --dry-run lists them without changing anything.
     glossary show   <job_id>
     glossary update <job_id> <term> <translation> [--lock]
 
@@ -587,6 +593,25 @@ def _cmd_audit(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         return 1
 
 
+def _cmd_requeue(args: argparse.Namespace, engine: TranslatorEngine) -> int:
+    """List (and unless --dry-run, requeue) chunks stored with misaligned paragraphs."""
+    try:
+        indices = engine.requeue_misaligned_chunks(args.job_id, dry_run=args.dry_run)
+    except JobNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if not indices:
+        print("No misaligned chunks.")
+        return 0
+    if args.dry_run:
+        print(f"Misaligned chunks ({len(indices)}): {indices}")
+        print("Dry run: nothing was changed.")
+    else:
+        print(f"Requeued chunks ({len(indices)}): {indices}")
+        print(f"Next: run `borgesica resume {args.job_id}` to retranslate them.")
+    return 0
+
+
 def _cmd_glossary_show(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         glossary = engine.get_glossary(args.job_id)
@@ -851,6 +876,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_audit.add_argument("job_id", help="Job ID")
     _add_provider(p_audit)
 
+    # requeue — free: rewrites stored chunk status only, no provider calls.
+    p_requeue = sub.add_parser(
+        "requeue", help="Mark chunks stored with misaligned paragraphs for retranslation"
+    )
+    p_requeue.add_argument("job_id", help="Job ID")
+    p_requeue.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        dest="dry_run",
+        help="List the misaligned chunks without changing anything.",
+    )
+    _add_provider(p_requeue)
+
     # glossary (sub-sub-commands)
     p_glossary = sub.add_parser("glossary", help="Inspect or edit the job glossary")
     gsub = p_glossary.add_subparsers(dest="glossary_command", metavar="<action>")
@@ -948,6 +987,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": _cmd_status,
         "cancel": _cmd_cancel,
         "audit": _cmd_audit,
+        "requeue": _cmd_requeue,
         "serve": _cmd_serve,
     }
 
