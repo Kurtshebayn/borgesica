@@ -768,6 +768,22 @@ class TestOpenAIPreset:
         provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
         assert provider.price("gpt-5.6-luna") == (1.00, 6.00)
 
+    # gpt-6 family, Standard tier, short context, read 2026-10-01 from
+    # https://developers.openai.com/api/docs/pricing. Before this they fell back
+    # to _FALLBACK_PRICE ($3/$15), over-estimating gpt-6-luna 30x on output.
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("gpt-6-astra", (10.00, 50.00)),
+            ("gpt-6-sol", (2.00, 10.00)),
+            ("gpt-6.1-sol", (2.00, 10.00)),
+            ("gpt-6-luna", (0.10, 0.50)),
+        ],
+    )
+    def test_openai_preset_prices_gpt6_family(self, model, expected):
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
+        assert provider.price(model) == expected
+
     def test_openai_preset_unknown_model_falls_back_to_default_price(self):
         """A model string not in the OpenAI price table falls back to _FALLBACK_PRICE,
         not an error (spec: 'Unrecognized model falls back')."""
@@ -957,6 +973,97 @@ class TestReasoningEffort:
             provider.translate("system", "Hello world", "deepseek-v4-flash")
 
         assert "reasoning_effort" not in fake_client.call_log[0]
+
+
+# ---------------------------------------------------------------------------
+# Per-model reasoning default for the .openai() preset (measured 2026-09-30).
+#
+# gpt-6.1-sol rejects reasoning_effort='none' with HTTP 400 ("Supported values
+# are: 'low', 'medium', 'high', and 'xhigh'"). Tier-1/2 fall through on a 4xx
+# but tier-3's 4xx is fatal, so with the class-wide 'none' EVERY chunk raised
+# ProviderError on that model. The same call with 'low' succeeds; gpt-6-luna
+# accepts 'none'.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RejectsNoReasoningClient(FakeOpenAIClient):
+    """Fake that reproduces the measured gpt-6.1-sol 400 on reasoning_effort='none'."""
+
+    def _next_response(self, kwargs: dict):
+        if kwargs.get("model") == "gpt-6.1-sol" and kwargs.get("reasoning_effort") == "none":
+            self.call_log.append(kwargs)
+            raise _make_http_error(400)
+        return super()._next_response(kwargs)
+
+
+class TestOpenAIPerModelReasoning:
+    def test_gpt61_sol_translates_instead_of_failing_every_chunk(self):
+        fake_client = _RejectsNoReasoningClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            result = provider.translate("system", "Hello world", "gpt-6.1-sol")
+
+        assert result.unit.translation == "Hola mundo"
+        assert [c.get("reasoning_effort") for c in fake_client.call_log] == ["low"]
+
+    def test_gpt61_sol_sends_low_on_every_tier(self):
+        fake_client = FakeOpenAIClient(
+            responses=[_NO_TOOL_CALL_RESPONSE, _EMPTY_CONTENT_RESPONSE, _TIER3_VALID_JSON_RESPONSE]
+        )
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "gpt-6.1-sol")
+
+        assert [c.get("reasoning_effort") for c in fake_client.call_log] == ["low"] * 3
+
+    def test_gpt61_sol_gets_the_reasoning_output_cap(self):
+        """'low' still produces a billed trace drawn from the output budget."""
+        from borgesica.adapters.providers.openai_compatible_provider import (
+            _REASONING_OUTPUT_TOKENS,
+        )
+
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "gpt-6.1-sol")
+
+        assert fake_client.call_log[0]["max_completion_tokens"] == _REASONING_OUTPUT_TOKENS
+
+    @pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-5.6-luna"])
+    def test_models_that_accept_none_keep_it(self, model):
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", model)
+
+        assert fake_client.call_log[0]["reasoning_effort"] == "none"
+        assert fake_client.call_log[0]["max_completion_tokens"] == _MAX_OUTPUT_TOKENS
+
+    def test_an_explicit_reasoning_effort_wins_over_the_model_default(self):
+        """--reasoning sets the attribute after construction; the caller decides."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.openai(api_key="sk-fake", _client=fake_client)
+        provider.reasoning_effort = "high"
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "gpt-6.1-sol")
+
+        assert fake_client.call_log[0]["reasoning_effort"] == "high"
+
+    def test_the_model_default_is_scoped_to_the_openai_preset(self):
+        """DeepSeek (or any non-OpenAI endpoint) never inherits OpenAI's table."""
+        fake_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        provider = OpenAICompatibleProvider.deepseek(api_key="sk-fake", _client=fake_client)
+
+        with patch("borgesica.adapters.providers.openai_compatible_provider.time.sleep"):
+            provider.translate("system", "Hello world", "gpt-6.1-sol")
+
+        assert fake_client.call_log[0]["reasoning_effort"] == "none"
 
 
 class TestMaxOutputTokensOverride:
