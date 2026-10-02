@@ -154,10 +154,34 @@ _DEEPSEEK_CACHE_PRICE: dict[str, float] = {
 # (o1/o3/o4-mini) models are intentionally NOT listed — they remain out of
 # scope for other, unverified API differences (unrelated to the
 # max_completion_tokens handling .openai() already covers for gpt-5.6).
+#
+# gpt-6 rows: Standard tier, short-context input/output, read 2026-10-01 from
+# https://developers.openai.com/api/docs/pricing (cached input, cache writes,
+# long context and the Batch/Flex/Fast tiers are not modelled here). These four
+# are what client.models.list() exposed on the live account; before they were
+# listed they fell back to _FALLBACK_PRICE, over-estimating gpt-6-luna output 30x.
 _OPENAI_PRICE_TABLE: dict[str, tuple[float, float]] = {
     "gpt-5.6-sol": (5.00, 30.00),
     "gpt-5.6-terra": (2.50, 15.00),
     "gpt-5.6-luna": (1.00, 6.00),
+    "gpt-6-astra": (10.00, 50.00),
+    "gpt-6-sol": (2.00, 10.00),
+    "gpt-6.1-sol": (2.00, 10.00),
+    "gpt-6-luna": (0.10, 0.50),
+}
+
+# Per-model reasoning_effort defaults for the .openai() preset, for models that
+# reject the class-wide 'none'. Models not listed keep the class default.
+#
+# MEASURED 2026-09-30: gpt-6.1-sol answers reasoning_effort='none' with HTTP
+# 400 "does not support 'none' with this model. Supported values are: 'low',
+# 'medium', 'high', and 'xhigh'". Tier-1/2 fall through on that 4xx but tier-3
+# raises, so every chunk failed. The same call with 'low' succeeds; 'low' is the
+# cheapest accepted value. It is a real trace, so _output_kwargs gives it
+# _REASONING_OUTPUT_TOKENS. gpt-6-luna was measured accepting 'none'.
+# gpt-6-sol and gpt-6-astra are UNMEASURED and deliberately absent.
+_OPENAI_REASONING_EFFORT: dict[str, str | None] = {
+    "gpt-6.1-sol": "low",
 }
 
 
@@ -213,6 +237,12 @@ class OpenAICompatibleProvider:
     # None means "do not send the parameter at all", for endpoints that reject
     # unknown kwargs — Ollama's local shim 400s instead of ignoring them.
     reasoning_effort: str | None = "none"
+
+    # Per-model overrides of the reasoning_effort CLASS default, consulted only
+    # while no caller has set reasoning_effort on the instance. Empty here, so
+    # DeepSeek/Ollama/plain instances are unaffected; .openai() fills it from
+    # _OPENAI_REASONING_EFFORT.
+    _reasoning_effort_by_model: dict[str, str | None] = {}
 
     # Characters per token, MEASURED against the live DeepSeek tokenizer on real
     # book text (2026-08-06): mean 3.853, CV 13.6% across English prose, Spanish
@@ -332,6 +362,11 @@ class OpenAICompatibleProvider:
         o-series (o1/o3/o4-mini) models remain out of scope for OTHER,
         unverified API differences — this override does not enable them;
         selecting one surfaces the raw OpenAI API error.
+
+        _reasoning_effort_by_model is set from _OPENAI_REASONING_EFFORT as an
+        INSTANCE attribute: gpt-6.1-sol rejects reasoning_effort='none', so it
+        gets its lowest accepted value instead. An explicit reasoning_effort
+        (e.g. --reasoning) still wins.
         """
         table = dict(_OPENAI_PRICE_TABLE)
         if extra_price_table:
@@ -345,13 +380,27 @@ class OpenAICompatibleProvider:
         )
         provider.retry_waste_factor = 1.5  # instance attr; GPT is Tier-1-reliable
         provider._completion_tokens_param_name = "max_completion_tokens"  # instance attr
+        provider._reasoning_effort_by_model = dict(_OPENAI_REASONING_EFFORT)  # instance attr
         return provider
 
     # ------------------------------------------------------------------
     # TranslationProvider Protocol
     # ------------------------------------------------------------------
 
-    def _output_kwargs(self, max_output_tokens: int | None = None) -> dict[str, Any]:
+    def _reasoning_effort_for(self, model: str | None) -> str | None:
+        """The reasoning_effort to send for `model`.
+
+        A value a caller assigned on the instance (--reasoning) always wins.
+        Otherwise a per-model default replaces the class default, for models
+        that reject it.
+        """
+        if "reasoning_effort" in vars(self) or model not in self._reasoning_effort_by_model:
+            return self.reasoning_effort
+        return self._reasoning_effort_by_model[model]
+
+    def _output_kwargs(
+        self, max_output_tokens: int | None = None, model: str | None = None
+    ) -> dict[str, Any]:
         """Per-call output controls shared by all three tiers.
 
         Carries the output-length cap under whichever parameter name the
@@ -359,15 +408,16 @@ class OpenAICompatibleProvider:
         understands it. Built once here so a tier can never silently drop one
         of the two — dropping the reasoning knob is what made every tier fail.
         """
-        reasoning = self.reasoning_effort not in _NO_REASONING
+        effort = self._reasoning_effort_for(model)
+        reasoning = effort not in _NO_REASONING
         default_cap = _REASONING_OUTPUT_TOKENS if reasoning else _MAX_OUTPUT_TOKENS
         kwargs: dict[str, Any] = {
             self._completion_tokens_param_name: (
                 max_output_tokens if max_output_tokens is not None else default_cap
             )
         }
-        if self.reasoning_effort is not None:
-            kwargs["reasoning_effort"] = self.reasoning_effort
+        if effort is not None:
+            kwargs["reasoning_effort"] = effort
         return kwargs
 
     def translate(
@@ -629,7 +679,7 @@ class OpenAICompatibleProvider:
             ],
             tools=_translation_tools(segment_count),
             tool_choice="auto",
-            **self._output_kwargs(max_output_tokens),
+            **self._output_kwargs(max_output_tokens, model),
         )
         choice = response.choices[0]
         message = choice.message
@@ -669,7 +719,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             response_format={"type": "json_object"},
-            **self._output_kwargs(max_output_tokens),
+            **self._output_kwargs(max_output_tokens, model),
         )
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""
@@ -710,7 +760,7 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user + json_instruction},
             ],
-            **self._output_kwargs(max_output_tokens),
+            **self._output_kwargs(max_output_tokens, model),
         )
         choice = response.choices[0]
         content = getattr(choice.message, "content", None) or ""
