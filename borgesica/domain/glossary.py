@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left, bisect_right
+from collections.abc import Callable
 
 from borgesica.domain.models import (
     CharacterGender,
+    ExtractionBatch,
     Glossary,
     GlossaryEntry,
     GlossarySettlements,
@@ -35,7 +37,9 @@ from borgesica.domain.models import (
 from borgesica.domain.ports import TranslationProvider
 
 __all__ = [
+    "EXTRACTION_BATCH_TOKENS",
     "QUORUM",
+    "ExtractionBatch",
     "GlossarySettlements",
     "GlossaryVotes",
     "LlmGlossaryExtractor",
@@ -46,6 +50,8 @@ __all__ = [
     "drop_reversed_entries",
     "get_extractor",
     "merge_additions",
+    "merge_extraction_batches",
+    "plan_extraction_batches",
     "normalize_term",
     "sanitize_glossary",
     "seed_character_gender",
@@ -85,6 +91,11 @@ everywhere it appears.
 - If no notable terms are found, return an empty glossary_additions list.
 - The "translation" field must be an empty string for this extraction task."""
 
+# Prepended to the source text to form the user message of every extraction
+# call. One constant so the batched pass and the cost estimate price the same
+# prompt the extractor actually sends.
+_EXTRACTION_USER_PREFIX = "Extract terminology from the following text:\n\n"
+
 
 # ---------------------------------------------------------------------------
 # LlmGlossaryExtractor
@@ -108,6 +119,28 @@ class LlmGlossaryExtractor:
     def __init__(self, provider: TranslationProvider) -> None:  # type: ignore[type-arg]
         self._provider = provider
 
+    def extract_batch(self, text: str, config: JobConfig) -> ExtractionBatch:
+        """Run ONE extraction call over ``text`` and return what it produced.
+
+        The unit of the whole-book pass: a book cannot be one call (see
+        ``EXTRACTION_BATCH_TOKENS``), and the caller has to check the budget
+        BEFORE each call and report progress AFTER it, so the loop over
+        batches belongs to the caller and this method makes exactly one call.
+
+        Returns the call's raw ``glossary_additions`` — reconciling batches is
+        ``merge_extraction_batches``'s job and needs every batch's own
+        proposal — together with the call's real ``usage``, which ``extract``
+        discards.
+        """
+        result = self._provider.translate(
+            system=_EXTRACTION_SYSTEM_PROMPT,
+            user=_EXTRACTION_USER_PREFIX + text,
+            model=config.model,
+        )
+        return ExtractionBatch(
+            entries=list(result.unit.glossary_additions), usage=result.usage
+        )
+
     def extract(self, text: str, config: JobConfig) -> Glossary:
         """Extract terminology from source text via LLM.
 
@@ -119,15 +152,8 @@ class LlmGlossaryExtractor:
         Returns:
             Glossary populated with entries from the LLM response.
         """
-        user_prompt = f"Extract terminology from the following text:\n\n{text}"
-        result = self._provider.translate(
-            system=_EXTRACTION_SYSTEM_PROMPT,
-            user=user_prompt,
-            model=config.model,
-        )
-        seeded, _duplicates = dedupe_glossary(
-            Glossary(entries=list(result.unit.glossary_additions))
-        )
+        batch = self.extract_batch(text, config)
+        seeded, _duplicates = dedupe_glossary(Glossary(entries=batch.entries))
         return seeded
 
 
@@ -621,6 +647,130 @@ def settlement_counts(
         else:
             changed += 1
     return GlossarySettlements(changed=changed, confirmed=confirmed)
+
+
+# ---------------------------------------------------------------------------
+# Whole-book extraction pass — batch planning and reconciliation
+# ---------------------------------------------------------------------------
+
+EXTRACTION_BATCH_TOKENS = 8000
+"""Source tokens one extraction call may carry.
+
+Bounded by OUTPUT, not input: the adapters cap a call at 8192 output tokens,
+and every extracted term costs output. On job 9be143da ("The Strength of the
+Few", 569 prose chunks of ~800 tokens) the worst 10-chunk batch (~8000 tokens)
+carries 167 attested glossary terms, which at the measured mean of 38.8 tokens
+per extracted entry is ~6.5k output tokens — under the cap. 20-chunk batches
+reach ~7.8k, leaving no headroom. A single chunk carried up to 59 terms, so
+the cap is NOT guaranteed on a denser book; this is a measured margin, not a
+proof.
+"""
+
+
+def plan_extraction_batches(
+    texts: list[str],
+    count_tokens: Callable[[str], int],
+    budget: int = EXTRACTION_BATCH_TOKENS,
+) -> list[list[int]]:
+    """Group CONSECUTIVE chunk indices into extraction batches.
+
+    Greedy: a chunk joins the current batch while the batch's summed token
+    count stays within ``budget``; otherwise it opens the next batch. A single
+    chunk over budget forms a batch of its own — it cannot be split here, and
+    dropping it would leave its terms unextracted. No batch is ever empty.
+
+    Consecutive, because a term is easiest to recognise next to the passage
+    that introduces it, and because the caller reports progress in book order.
+
+    ``count_tokens`` is a plain callable so the caller can bind the provider
+    and model (``lambda text: provider.count_tokens(text, model)``) without
+    this module knowing about either.
+    """
+    batches: list[list[int]] = []
+    current: list[int] = []
+    current_tokens = 0
+    for index, text in enumerate(texts):
+        tokens = count_tokens(text)
+        if current and current_tokens + tokens > budget:
+            batches.append(current)
+            current, current_tokens = [], 0
+        current.append(index)
+        current_tokens += tokens
+    if current:
+        batches.append(current)
+    return batches
+
+
+def merge_extraction_batches(
+    batches: list[list[GlossaryEntry]],
+) -> tuple[Glossary, dict[str, tuple[str, ...]]]:
+    """Reconcile per-batch extraction output into one glossary, keeping dissent.
+
+    Returns the merged glossary and, for EVERY term, the renderings each batch
+    proposed — keyed by ``_dedupe_key``, normalised, one per batch that
+    proposed the term, in batch order.
+
+    Why a plurality and not the first batch's answer: a single unreplicated
+    draw is a lottery. Measured over 422 real calls, "Birthright" drew ten
+    distinct renderings and the dominant one won only 79% of first draws —
+    roughly one draw in five lands on a minority rendering, and whichever one
+    is committed first fixes the term for the whole book. Batches of one
+    pre-pass are independent draws over different passages, so their
+    plurality (``_plurality``: casefold grouping, earliest proposal breaking
+    ties) is the better estimate.
+
+    Why the proposals are returned rather than discarded: a plurality still
+    hides disagreement, and a term proposed by one batch is weaker evidence
+    than one proposed by twenty. The caller persists them so a reviewer can be
+    shown every term whose batches disagreed.
+
+    Per entry:
+      - within ONE batch a term votes once (its first occurrence there), so a
+        batch that repeats a term cannot outvote the others;
+      - ``term`` is the first-seen spelling, ``note`` the first non-empty note
+        across batches;
+      - ``locked=False`` and ``gender=None`` whatever the model sent — locking
+        is a human decision and gender is seeded from the source, never
+        proposed by the model;
+      - ``first_draw`` stays None: these are not quorum draws, and
+        ``settlement_counts`` must not count them as quorum's work.
+
+    Entries come out in order of first appearance; nothing should depend on
+    it, since the store returns glossaries sorted by term. Blank terms are
+    dropped. Reversed entries are NOT resolved here: that needs the source
+    text, so the caller runs ``sanitize_glossary(..., source_text=...)``.
+    """
+    proposals: dict[str, list[str]] = {}
+    spellings: dict[str, str] = {}
+    notes: dict[str, str] = {}
+
+    for batch in batches:
+        voted: set[str] = set()
+        for addition in batch:
+            term = normalize_term(addition.term)
+            if not term:
+                # A blank term can never match source text.
+                continue
+            key = term.casefold()
+            if addition.note and key not in notes:
+                notes[key] = addition.note
+            if key in voted:
+                continue
+            voted.add(key)
+            proposals.setdefault(key, []).append(normalize_term(addition.translation))
+            spellings.setdefault(key, term)
+
+    entries = [
+        GlossaryEntry(
+            term=spellings[key],
+            translation=_plurality(tuple(renderings)),
+            locked=False,
+            note=notes.get(key),
+        )
+        for key, renderings in proposals.items()
+    ]
+    merged, _duplicates = dedupe_glossary(Glossary(entries=entries))
+    return merged, {key: tuple(renderings) for key, renderings in proposals.items()}
 
 
 # ---------------------------------------------------------------------------
