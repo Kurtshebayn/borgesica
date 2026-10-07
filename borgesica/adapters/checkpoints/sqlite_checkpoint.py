@@ -5,11 +5,14 @@ Schema from design section 5:
   - jobs(id PK, source_type, source_path, target_lang, model, status,
          budget_usd, chunk_size, line_length, glossary_strategy, quality_mode,
          total_chunks, completed_chunks, cost_usd, created_at, updated_at,
-         prose_chunk_tokens, prose_segmentation, continue_on_error)
+         prose_chunk_tokens, prose_segmentation, continue_on_error,
+         glossary_extracted)
   - chunks(job_id, chunk_index, source_text, translated_text, status, meta_json,
            PRIMARY KEY(job_id, chunk_index))
   - glossary(job_id, term, translation, locked, note, first_draw,
              PRIMARY KEY(job_id, term))
+  - glossary_proposals(job_id, term, proposal_order, translation,
+                       PRIMARY KEY(job_id, term, proposal_order))
   - summaries(job_id, chunk_index, text, PRIMARY KEY(job_id, chunk_index))
 
 save_chunk uses INSERT … ON CONFLICT(job_id, chunk_index) DO UPDATE — idempotent.
@@ -63,7 +66,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     prose_segmentation TEXT NOT NULL DEFAULT 'batch',
     continue_on_error INTEGER NOT NULL DEFAULT 1,
     glossary_budget_tokens INTEGER NOT NULL DEFAULT {DEFAULT_GLOSSARY_BUDGET_TOKENS},
-    max_output_tokens INTEGER
+    max_output_tokens INTEGER,
+    glossary_extracted INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -84,6 +88,9 @@ _JOBS_MIGRATIONS = {
     # Nullable on purpose: NULL means "the adapter picks its own cap".
     # Also read at RUN time, so it must survive resume for the same reason.
     "max_output_tokens": "INTEGER",
+    # Default 0: a job written before the extraction pass existed never ran
+    # it, so the honest state is "not extracted" — the pass stays available.
+    "glossary_extracted": "INTEGER NOT NULL DEFAULT 0",
 }
 
 _CREATE_CHUNKS = """
@@ -146,6 +153,20 @@ CREATE TABLE IF NOT EXISTS glossary_votes (
     vote_order      INTEGER NOT NULL,
     translation     TEXT NOT NULL,
     PRIMARY KEY (job_id, term, vote_order)
+)
+"""
+
+# Every rendering each extraction batch proposed for a term, in batch order —
+# the same shape as glossary_votes, kept apart because the two have different
+# lifetimes: votes leave as their term settles, proposals are the pre-pass's
+# evidence and stay for review.
+_CREATE_GLOSSARY_PROPOSALS = """
+CREATE TABLE IF NOT EXISTS glossary_proposals (
+    job_id          TEXT NOT NULL,
+    term            TEXT NOT NULL,
+    proposal_order  INTEGER NOT NULL,
+    translation     TEXT NOT NULL,
+    PRIMARY KEY (job_id, term, proposal_order)
 )
 """
 
@@ -223,6 +244,7 @@ class SQLiteCheckpointStore:
             conn.execute(_CREATE_CHUNKS)
             conn.execute(_CREATE_GLOSSARY)
             conn.execute(_CREATE_GLOSSARY_VOTES)
+            conn.execute(_CREATE_GLOSSARY_PROPOSALS)
             conn.execute(_CREATE_SUMMARIES)
             existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
             for column, ddl in _JOBS_MIGRATIONS.items():
@@ -284,21 +306,22 @@ class SQLiteCheckpointStore:
             total_chunks, completed_chunks, cost_usd, created_at, updated_at,
             prose_chunk_tokens, prose_segmentation, continue_on_error,
             glossary_budget_tokens,
-            max_output_tokens
+            max_output_tokens, glossary_extracted
         ) VALUES (
             :id, :source_type, :source_path, :target_lang, :model, :status,
             :budget_usd, :chunk_size, :line_length, :glossary_strategy, :quality_mode,
             :total_chunks, :completed_chunks, :cost_usd, :created_at, :updated_at,
             :prose_chunk_tokens, :prose_segmentation, :continue_on_error,
             :glossary_budget_tokens,
-            :max_output_tokens
+            :max_output_tokens, :glossary_extracted
         )
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             total_chunks=excluded.total_chunks,
             completed_chunks=excluded.completed_chunks,
             cost_usd=excluded.cost_usd,
-            updated_at=excluded.updated_at
+            updated_at=excluded.updated_at,
+            glossary_extracted=excluded.glossary_extracted
         """
         with self._connect() as conn:
             conn.execute(sql, {
@@ -323,6 +346,7 @@ class SQLiteCheckpointStore:
                 "continue_on_error": 1 if job.config.continue_on_error else 0,
                 "glossary_budget_tokens": job.config.glossary_budget_tokens,
                 "max_output_tokens": job.config.max_output_tokens,
+                "glossary_extracted": 1 if job.glossary_extracted else 0,
             })
 
     def load_job(self, job_id: str) -> Job | None:
@@ -358,6 +382,7 @@ class SQLiteCheckpointStore:
             cost_usd=row["cost_usd"],
             created_at=_iso_to_dt(row["created_at"]),
             updated_at=_iso_to_dt(row["updated_at"]),
+            glossary_extracted=bool(row["glossary_extracted"]),
         )
 
     # --- CheckpointStore Protocol: Chunk ---
@@ -472,6 +497,36 @@ class SQLiteCheckpointStore:
         return GlossaryVotes(
             by_term={term: tuple(proposals) for term, proposals in by_term.items()}
         )
+
+    def save_glossary_proposals(
+        self, job_id: str, proposals: dict[str, tuple[str, ...]]
+    ) -> None:
+        """Replace the extraction pass's per-term proposals (full overwrite)."""
+        delete_sql = "DELETE FROM glossary_proposals WHERE job_id = ?"
+        insert_sql = """
+        INSERT INTO glossary_proposals (job_id, term, proposal_order, translation)
+        VALUES (?, ?, ?, ?)
+        """
+        with self._connect() as conn:
+            conn.execute(delete_sql, (job_id,))
+            for term, renderings in proposals.items():
+                for order, translation in enumerate(renderings):
+                    conn.execute(insert_sql, (job_id, term, order, translation))
+
+    def load_glossary_proposals(self, job_id: str) -> dict[str, tuple[str, ...]]:
+        # Ordered by proposal_order: it is the batch order, which is evidence
+        # (which passage proposed what), not presentation.
+        sql = (
+            "SELECT term, translation FROM glossary_proposals "
+            "WHERE job_id = ? ORDER BY term, proposal_order"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql, (job_id,)).fetchall()
+
+        by_term: dict[str, list[str]] = {}
+        for row in rows:
+            by_term.setdefault(row["term"], []).append(row["translation"])
+        return {term: tuple(renderings) for term, renderings in by_term.items()}
 
     def load_glossary(self, job_id: str) -> Glossary:
         sql = "SELECT * FROM glossary WHERE job_id = ? ORDER BY term"

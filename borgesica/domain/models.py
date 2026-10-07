@@ -609,6 +609,11 @@ class Job(BaseModel):
     cost_usd: float = 0.0
     created_at: datetime
     updated_at: datetime
+    # True once the whole-book glossary extraction pass has completed for this
+    # job. The pass is an explicit paid action, and a second run would bill the
+    # whole book again, so the flag is what refuses it — and what removes the
+    # extraction line from the estimate once there is nothing left to spend.
+    glossary_extracted: bool = False
 
 
 class Progress(BaseModel):
