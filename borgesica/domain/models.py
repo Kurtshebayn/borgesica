@@ -501,6 +501,24 @@ class ExtractionBatch(BaseModel):
     usage: Usage = Field(default_factory=Usage)
 
 
+class GlossaryExtractionEstimate(BaseModel):
+    """Projected cost of the whole-book glossary extraction pass.
+
+    Separate from ``CostEstimate`` because extraction is a separate, explicit
+    paid action: it covers every chunk once, in batches, before translation,
+    and the user decides whether to run it. ``output_tokens`` is the expected
+    figure and ``output_tokens_high`` the worst measured batch ratio applied to
+    the whole book; ``usd`` and ``usd_high`` price them respectively.
+    """
+
+    batches: int
+    input_tokens: int
+    output_tokens: int
+    output_tokens_high: int
+    usd: float
+    usd_high: float
+
+
 class CostEstimate(BaseModel):
     input_tokens: int
     output_tokens: int

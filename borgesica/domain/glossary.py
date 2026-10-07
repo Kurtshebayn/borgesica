@@ -10,6 +10,9 @@ Design (M1-7):
       prompt; returns a Glossary built from TranslationUnit.glossary_additions.
     - NullGlossaryExtractor: always returns Glossary() (strategy="none").
     - get_extractor(strategy, provider) -> GlossaryExtractor: factory function.
+    - plan_extraction_batches / LlmGlossaryExtractor.extract_batch /
+      merge_extraction_batches: the domain half of the whole-book
+      pre-translation pass; the caller owns the loop over batches.
 
 Mid-run addition staging logic:
   The orchestrator is responsible for merging mid-run glossary_additions into
@@ -48,6 +51,7 @@ __all__ = [
     "character_gender_evidence",
     "dedupe_glossary",
     "drop_reversed_entries",
+    "extraction_prompts",
     "get_extractor",
     "merge_additions",
     "merge_extraction_batches",
@@ -97,6 +101,16 @@ everywhere it appears.
 _EXTRACTION_USER_PREFIX = "Extract terminology from the following text:\n\n"
 
 
+def extraction_prompts(text: str) -> tuple[str, str]:
+    """Return the (system, user) prompts of one extraction call over ``text``.
+
+    Public so the cost estimate measures the prompts the extractor really
+    sends instead of restating their size: ``extraction_prompts("")`` is the
+    per-call overhead every batch pays on top of its source text.
+    """
+    return _EXTRACTION_SYSTEM_PROMPT, _EXTRACTION_USER_PREFIX + text
+
+
 # ---------------------------------------------------------------------------
 # LlmGlossaryExtractor
 # ---------------------------------------------------------------------------
@@ -132,11 +146,8 @@ class LlmGlossaryExtractor:
         proposal — together with the call's real ``usage``, which ``extract``
         discards.
         """
-        result = self._provider.translate(
-            system=_EXTRACTION_SYSTEM_PROMPT,
-            user=_EXTRACTION_USER_PREFIX + text,
-            model=config.model,
-        )
+        system, user = extraction_prompts(text)
+        result = self._provider.translate(system=system, user=user, model=config.model)
         return ExtractionBatch(
             entries=list(result.unit.glossary_additions), usage=result.usage
         )
