@@ -402,3 +402,40 @@ def test_renderings_differing_only_in_case_or_spacing_do_not_conflict() -> None:
     proposals = {"will cage": ("Jaula de Voluntad", "jaula de  voluntad ")}
 
     assert count_proposal_conflicts(proposals) == 0
+
+
+# ---------------------------------------------------------------------------
+# The extraction prompt must ask for a unit TranslationUnit accepts
+# ---------------------------------------------------------------------------
+
+
+def test_extraction_prompt_does_not_ask_for_an_empty_top_level_translation() -> None:
+    from borgesica.domain.glossary import _EXTRACTION_SYSTEM_PROMPT
+
+    # TranslationUnit rejects an empty translation, so an obedient model
+    # following these instructions failed every extraction call.
+    assert '"translation": ""' not in _EXTRACTION_SYSTEM_PROMPT
+    assert "must be an empty string" not in _EXTRACTION_SYSTEM_PROMPT
+
+
+def test_extraction_prompt_asks_for_the_placeholder() -> None:
+    from borgesica.domain.glossary import _EXTRACTION_PLACEHOLDER, _EXTRACTION_SYSTEM_PROMPT
+
+    assert _EXTRACTION_PLACEHOLDER.strip()
+    assert f'"translation": "{_EXTRACTION_PLACEHOLDER}"' in _EXTRACTION_SYSTEM_PROMPT
+
+
+def test_a_unit_obeying_the_extraction_prompt_validates() -> None:
+    from borgesica.domain.glossary import _EXTRACTION_PLACEHOLDER
+
+    unit = TranslationUnit.model_validate(
+        {
+            "translation": _EXTRACTION_PLACEHOLDER,
+            "summary_update": "Terminology extraction complete.",
+            "glossary_additions": [
+                {"term": "Leathfhear", "translation": "Leathfhear", "note": "half-man"}
+            ],
+        }
+    )
+
+    assert [e.term for e in unit.glossary_additions] == ["Leathfhear"]

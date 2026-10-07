@@ -67,6 +67,14 @@ __all__ = [
 # Glossary-extraction system prompt
 # ---------------------------------------------------------------------------
 
+# What the extractor must put in the unit's top-level "translation" field.
+# Extraction translates nothing, but the provider contract is TranslationUnit,
+# which rejects an empty translation when there is no translations array
+# (models.py): the prompt used to ask for "" and so made every obedient
+# response fail validation, burning each adapter's retries. A fixed non-empty
+# placeholder satisfies the contract; the extractor never reads the field.
+_EXTRACTION_PLACEHOLDER = "-"
+
 _EXTRACTION_SYSTEM_PROMPT = """\
 You are a literary terminology extractor. Given a passage of English text, \
 identify proper nouns, invented terms, character names, place names, and \
@@ -75,7 +83,7 @@ across a long document.
 
 Return your response as a JSON object with EXACTLY the following fields:
   {
-    "translation": "",
+    "translation": \"""" + _EXTRACTION_PLACEHOLDER + """\",
     "summary_update": "Terminology extraction complete.",
     "glossary_additions": [
       {"term": "<source term>", "translation": "<Spanish rendering, or the \
@@ -94,7 +102,8 @@ character. Its literal meaning is EXPLANATION: put that in "note", NEVER in \
 everywhere it appears.
 - Do NOT include common English or Spanish vocabulary.
 - If no notable terms are found, return an empty glossary_additions list.
-- The "translation" field must be an empty string for this extraction task."""
+- The top-level "translation" field (outside glossary_additions) must be \
+exactly \"""" + _EXTRACTION_PLACEHOLDER + """\": this task translates nothing."""
 
 # Prepended to the source text to form the user message of every extraction
 # call. One constant so the batched pass and the cost estimate price the same
