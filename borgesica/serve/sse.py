@@ -4,13 +4,15 @@
 `on_progress` (worker thread) -> queue.Queue (JobRunner) -> this sync
 generator -> StreamingResponse (SSE). Heartbeat via `get(timeout=15)` keeps
 idle connections alive without emitting noise events; a terminal event
-`{type, status, error}` closes the stream.
+(`terminal` for a translation run, `glossary_terminal` for the glossary
+extraction pass — shapes in runner.py) closes the stream.
 
 Reconnection (spec: "Reconnection after drop"): if the job is not currently
 RUNNING when a client connects (already finished, or never started), a
 single terminal event reflecting the persisted status is emitted
 immediately — equivalent to a status poll, without restarting the job or
-hanging on an empty queue.
+hanging on an empty queue. When the job's latest execution was a finished
+glossary extraction, that pass's own `glossary_terminal` is emitted instead.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from collections.abc import Iterator
 
 from borgesica.api import TranslatorEngine
 from borgesica.domain.models import JobStatus
-from borgesica.serve.runner import JobRunner
+from borgesica.serve.runner import TERMINAL_EVENT_TYPES, JobRunner
 
 _HEARTBEAT_TIMEOUT = 15.0
 
@@ -49,6 +51,14 @@ def sse_event_stream(engine: TranslatorEngine, runner: JobRunner, job_id: str) -
         events = runner.queue_for(job_id)
     else:
         job = engine.status(job_id)
+        # A glossary extraction leaves the job CREATED however it ended, so
+        # its stored status cannot answer a late subscriber; the runner kept
+        # the pass's own terminal event for exactly that. Once the job has
+        # moved on (e.g. cancelled), the stored status is the answer again.
+        glossary_terminal = runner.finished_glossary_terminal(job_id)
+        if glossary_terminal is not None and job.status == JobStatus.CREATED:
+            yield format_sse(glossary_terminal)
+            return
         if job.status != JobStatus.RUNNING:
             yield format_sse({"type": "terminal", "status": str(job.status), "error": None})
             return
@@ -60,5 +70,5 @@ def sse_event_stream(engine: TranslatorEngine, runner: JobRunner, job_id: str) -
             yield ": heartbeat\n\n"
             continue
         yield format_sse(item)
-        if item["type"] == "terminal":
+        if item["type"] in TERMINAL_EVENT_TYPES:
             break
