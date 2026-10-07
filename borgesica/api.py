@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from borgesica.domain.chunking import SrtChunker, chunk_prose
 from borgesica.domain.context import ContextManager
-from borgesica.domain.cost import CostEstimator
+from borgesica.domain.cost import CostEstimator, usage_cost
 from borgesica.domain.errors import (
     BudgetExceeded,
     GlossaryEntryRejectedError,
@@ -354,9 +354,7 @@ class TranslatorEngine:
         def accrue(current: Job, usage: Usage) -> Job:
             # The orchestrator's own usage pricing, so a dollar spent here is
             # the same dollar its budget guard counts during translation.
-            cost = TranslationOrchestrator._usage_cost(
-                usage, in_price, out_price, cache_price
-            )
+            cost = usage_cost(usage, in_price, out_price, cache_price)
             updated = current.model_copy(
                 update={
                     "cost_usd": current.cost_usd + cost,

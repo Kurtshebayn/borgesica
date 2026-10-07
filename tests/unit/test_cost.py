@@ -707,11 +707,11 @@ def test_cached_input_tokens_are_a_subset_of_input_tokens():
 def test_usage_cost_prices_cached_tokens_at_the_cache_rate():
     """The whole point: 850 of 1000 input tokens must not cost the miss rate."""
     from borgesica.domain.models import Usage
-    from borgesica.domain.orchestrator import TranslationOrchestrator
+    from borgesica.domain.cost import usage_cost
 
     usage = Usage(input_tokens=1000, output_tokens=100, cached_input_tokens=850)
 
-    cost = TranslationOrchestrator._usage_cost(
+    cost = usage_cost(
         usage, in_price=0.14, out_price=0.28, cache_price=0.00225
     )
 
@@ -722,11 +722,11 @@ def test_usage_cost_prices_cached_tokens_at_the_cache_rate():
 def test_usage_cost_without_cached_tokens_is_unchanged():
     """A provider reporting no cache hits must price exactly as it always did."""
     from borgesica.domain.models import Usage
-    from borgesica.domain.orchestrator import TranslationOrchestrator
+    from borgesica.domain.cost import usage_cost
 
     usage = Usage(input_tokens=1000, output_tokens=100)
 
-    cost = TranslationOrchestrator._usage_cost(
+    cost = usage_cost(
         usage, in_price=0.14, out_price=0.28, cache_price=0.00225
     )
 
@@ -736,7 +736,7 @@ def test_usage_cost_without_cached_tokens_is_unchanged():
 def test_usage_cost_reproduces_the_measured_dashboard_bill():
     """The real 1,114-request workload must price to what DeepSeek charged."""
     from borgesica.domain.models import Usage
-    from borgesica.domain.orchestrator import TranslationOrchestrator
+    from borgesica.domain.cost import usage_cost
 
     usage = Usage(
         input_tokens=5_115_392 + 892_787,
@@ -744,7 +744,7 @@ def test_usage_cost_reproduces_the_measured_dashboard_bill():
         cached_input_tokens=5_115_392,
     )
 
-    cost = TranslationOrchestrator._usage_cost(
+    cost = usage_cost(
         usage, in_price=0.14, out_price=0.28, cache_price=0.00225
     )
 
@@ -756,7 +756,7 @@ def test_usage_cost_reproduces_the_measured_dashboard_bill():
 def test_naive_pricing_would_have_doubled_the_measured_bill():
     """Guards the regression: ignoring the cache overstates by ~2x, not a little."""
     from borgesica.domain.models import Usage
-    from borgesica.domain.orchestrator import TranslationOrchestrator
+    from borgesica.domain.cost import usage_cost
 
     usage = Usage(
         input_tokens=5_115_392 + 892_787,
@@ -764,10 +764,10 @@ def test_naive_pricing_would_have_doubled_the_measured_bill():
         cached_input_tokens=5_115_392,
     )
 
-    cache_aware = TranslationOrchestrator._usage_cost(
+    cache_aware = usage_cost(
         usage, in_price=0.14, out_price=0.28, cache_price=0.00225
     )
-    naive = TranslationOrchestrator._usage_cost(
+    naive = usage_cost(
         usage.model_copy(update={"cached_input_tokens": 0}),
         in_price=0.14,
         out_price=0.28,
@@ -1224,3 +1224,14 @@ def test_extraction_estimate_counts_each_chunk_once():
     # One provider count per chunk: on a real provider each count can be an
     # API round trip, and a 569-chunk book should not pay for 1138.
     assert [provider.counted.count(text) for text in texts] == [1] * 5
+
+
+def test_run_and_extraction_share_one_usage_cost_formula():
+    """The budget guard and the extraction pass must count the same dollar."""
+    import borgesica.api as api
+    import borgesica.domain.orchestrator as orchestrator
+    from borgesica.domain.cost import usage_cost
+
+    assert orchestrator.usage_cost is usage_cost
+    assert api.usage_cost is usage_cost
+    assert not hasattr(orchestrator.TranslationOrchestrator, "_usage_cost")

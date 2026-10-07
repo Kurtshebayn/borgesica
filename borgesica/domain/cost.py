@@ -35,6 +35,7 @@ from borgesica.domain.models import (
     JobConfig,
     RollingSummary,
     SourceType,
+    Usage,
     translation_tool_schema,
 )
 from borgesica.domain.ports import TranslationProvider
@@ -163,6 +164,32 @@ def output_model(source_type: SourceType) -> _OutputModel:
     segmented `translations` array, and only SRT was measured separately.
     """
     return _SRT_OUTPUT_MODEL if source_type == SourceType.SRT else _PROSE_OUTPUT_MODEL
+
+
+def usage_cost(
+    usage: Usage, in_price: float, out_price: float, cache_price: float
+) -> float:
+    """Compute the USD cost of one provider call from its REAL Usage.
+
+    The one formula for money actually spent — the translation run's budget
+    guard and the glossary extraction pass both accrue with it, so a dollar
+    counted by one is the same dollar counted by the other.
+
+    ``cached_input_tokens`` is the subset of ``input_tokens`` the provider
+    served from its prompt cache, and it is billed at ``cache_price``, not at
+    ``in_price``. Pricing all input at the miss rate overstated a real
+    DeepSeek bill 2.04x, and because this figure is what the budget guard
+    accrues, a job with ``budget_usd`` set would raise BudgetExceeded at
+    roughly half the budget it had actually spent.
+    """
+    cached = min(usage.cached_input_tokens, usage.input_tokens)
+    missed = usage.input_tokens - cached
+    return (
+        missed / 1_000_000 * in_price
+        + cached / 1_000_000 * cache_price
+        + usage.output_tokens / 1_000_000 * out_price
+    )
+
 
 # Output tokens per SOURCE token of one glossary-extraction call. Measured on
 # job 9be143da split into 10-chunk batches: each batch's glossary entries,
