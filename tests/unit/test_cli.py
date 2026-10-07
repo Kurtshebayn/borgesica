@@ -282,6 +282,7 @@ def test_estimate_resolves_provider_from_env_not_hardcoded_anthropic(
     ):
         engine = MagicMock()
         engine.estimate_cost.return_value = MagicMock(model_dump_json=lambda **k: "{}")
+        engine.estimate_glossary_extraction.return_value = None
         mock_build.return_value = engine
         code = main(["estimate", "job-1"])
 
@@ -1308,3 +1309,118 @@ def test_cli_requeue_running_job_exits_one(capsys: pytest.CaptureFixture) -> Non
     assert exit_code == 1
     assert "ERROR" in capsys.readouterr().err
     assert checkpoint.load_chunks("job-1")[1].status == ChunkStatus.DONE
+
+
+# ---------------------------------------------------------------------------
+# Glossary pre-pass: `glossary extract` and the estimate's extraction line.
+# The pass is an explicit paid action, so it gets its own command, and its
+# cost appears in `estimate` before anything is spent.
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_glossary_extract_prints_the_outcome_and_progress(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Outcome as JSON on stdout; one progress line per batch on stderr."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import GlossaryExtractionOutcome
+
+    def fake_extract(job_id, on_progress=None):
+        on_progress(1, 2, 0.01)
+        on_progress(2, 2, 0.02)
+        return GlossaryExtractionOutcome(batches=2, entries=7, conflicts=1, cost_usd=0.02)
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.extract_glossary.side_effect = fake_extract
+        mock_build.return_value = engine
+
+        code = main(["glossary", "extract", "job-1"])
+
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert engine.extract_glossary.call_args.args[0] == "job-1"
+    assert json.loads(out) == {"batches": 2, "entries": 7, "conflicts": 1, "cost_usd": 0.02}
+    progress = [line for line in err.splitlines() if "batch" in line]
+    assert len(progress) == 2
+    assert "1/2" in progress[0] and "2/2" in progress[1]
+
+
+def test_cmd_glossary_extract_reports_a_refusal_without_a_traceback(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.errors import BudgetExceeded
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.extract_glossary.side_effect = BudgetExceeded(
+            job_id="job-1", cost_so_far=0.5
+        )
+        mock_build.return_value = engine
+
+        code = main(["glossary", "extract", "job-1"])
+
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert out == ""
+    assert "ERROR" in err and "Budget exceeded" in err
+
+
+def test_cmd_estimate_adds_the_glossary_extraction_line(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Existing keys are unchanged; the extraction line is one more key."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import CostEstimate, GlossaryExtractionEstimate
+
+    translation = CostEstimate(
+        input_tokens=100, output_tokens=120, usd=0.5, model="fake-model"
+    )
+    extraction = GlossaryExtractionEstimate(
+        batches=3, input_tokens=18000, output_tokens=5800,
+        output_tokens_high=17900, usd=0.05, usd_high=0.11,
+    )
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.estimate_cost.return_value = translation
+        engine.estimate_glossary_extraction.return_value = extraction
+        mock_build.return_value = engine
+
+        code = main(["estimate", "job-1"])
+
+    out, _ = capsys.readouterr()
+    data = json.loads(out)
+    assert code == 0
+    expected = json.loads(translation.model_dump_json())
+    assert {k: data[k] for k in expected} == expected
+    assert data["glossary_extraction"] == extraction.model_dump()
+
+
+def test_cmd_estimate_extraction_line_is_null_once_extracted(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import CostEstimate
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.estimate_cost.return_value = CostEstimate(
+            input_tokens=1, output_tokens=1, usd=0.0, model="fake-model"
+        )
+        engine.estimate_glossary_extraction.return_value = None
+        mock_build.return_value = engine
+
+        code = main(["estimate", "job-1"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert json.loads(out)["glossary_extraction"] is None

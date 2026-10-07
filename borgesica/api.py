@@ -13,36 +13,49 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from borgesica.domain.chunking import SrtChunker, chunk_prose
 from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import CostEstimator
 from borgesica.domain.errors import (
+    BudgetExceeded,
     GlossaryEntryRejectedError,
     JobNotFoundError,
     JobStateError,
+    MalformedOutput,
+    ProviderError,
 )
 from borgesica.domain.glossary import (
+    LlmGlossaryExtractor,
     NullGlossaryExtractor,
     character_gender_evidence,
+    count_proposal_conflicts,
+    merge_additions,
+    merge_extraction_batches,
     normalize_term,
+    plan_extraction_batches,
     sanitize_glossary,
     seed_character_gender,
     settlement_counts,
 )
 from borgesica.domain.markup import segment_count
 from borgesica.domain.models import (
+    Chunk,
     ChunkStatus,
     CostEstimate,
     Glossary,
     GlossaryEntry,
+    GlossaryExtractionEstimate,
+    GlossaryExtractionOutcome,
     GlossarySettlements,
     GlossaryVotes,
     Job,
     JobConfig,
     JobStatus,
     SourceType,
+    Usage,
 )
 from borgesica.domain.orchestrator import TranslationOrchestrator
 from borgesica.domain.ports import (
@@ -69,6 +82,12 @@ class TranslatorEngine:
         readers:    Map from SourceType → DocumentReader.
         writers:    Map from SourceType → DocumentWriter.
         extractor:  GlossaryExtractor for seeding; None → NullGlossaryExtractor.
+            Used by ``create_job``, which must never spend — keep it Null
+            unless a caller deliberately wants a paid seed at creation.
+        batch_extractor: Extractor for the explicit whole-book glossary pass
+            (``extract_glossary``); None → ``LlmGlossaryExtractor(provider)``.
+            Only ``extract_glossary`` calls it, so wiring it costs nothing
+            until the user chooses to run the pass.
         corpus_store:  Optional CorpusStore for engine-wide corpus capture
             (design decision #6); default None → zero behavior change.
         provider_name: Provenance label passed through to the orchestrator
@@ -85,12 +104,18 @@ class TranslatorEngine:
         extractor: GlossaryExtractor | None = None,
         corpus_store: CorpusStore | None = None,  # type: ignore[type-arg]
         provider_name: str = "unknown",
+        batch_extractor: LlmGlossaryExtractor | None = None,
     ) -> None:
         self._provider = provider
         self._checkpoint = checkpoint
         self._readers = readers
         self._writers = writers
         self._extractor = extractor if extractor is not None else NullGlossaryExtractor()
+        self._batch_extractor = (
+            batch_extractor
+            if batch_extractor is not None
+            else LlmGlossaryExtractor(provider)
+        )
         self._corpus_store = corpus_store
         self._provider_name = provider_name
 
@@ -219,6 +244,171 @@ class TranslatorEngine:
             job.config,
             glossary=self._clean_glossary(job_id),
             summary=self._checkpoint.load_summary(job_id),
+        )
+
+    # ------------------------------------------------------------------
+    # Whole-book glossary extraction (explicit, paid pre-translation pass)
+    # ------------------------------------------------------------------
+
+    def estimate_glossary_extraction(
+        self, job_id: str
+    ) -> GlossaryExtractionEstimate | None:
+        """Project the cost of ``extract_glossary`` for this job, or None.
+
+        A line of its own beside ``estimate_cost``, which it leaves unchanged:
+        extraction is a separate action the user decides on. None once the
+        pass has completed — there is nothing left to spend, and showing the
+        line again would invite paying for the same glossary twice.
+
+        No provider translation call is made.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        job = self._load_job_or_raise(job_id)
+        if job.glossary_extracted:
+            return None
+        return self._cost_est.estimate_glossary_extraction(
+            self._chunks_in_order(job_id), job.config
+        )
+
+    def extract_glossary(
+        self,
+        job_id: str,
+        on_progress: Callable[[int, int, float], None] | None = None,
+    ) -> GlossaryExtractionOutcome:
+        """Extract the glossary from every stored chunk before translation.
+
+        The explicit, paid pre-translation pass: ``create_job`` never runs it.
+        Chunks are grouped in index order into batches
+        (``plan_extraction_batches`` over the provider's own token count), one
+        provider call per batch, the batch text being its chunks joined by
+        blank lines.
+
+        Money first, per batch:
+          - BEFORE each call, the batch's worst-case cost (the ``usd_high`` of
+            its own extraction estimate) is checked against ``budget_usd`` the
+            way the translation run checks a chunk, and a call that could
+            break the budget is not made: ``BudgetExceeded`` is raised. Unlike
+            a translation run the job stays CREATED — no chunk was touched,
+            and CREATED is the only status this pass accepts.
+          - AFTER each call, its real usage is priced exactly as the
+            orchestrator prices translation calls (cache hits at the cache
+            rate) and added to ``job.cost_usd``, which is persisted at once:
+            money spent is real even if a later batch fails. Only then is
+            ``on_progress(done, total, cost_usd)`` called, with the job's
+            running cost.
+
+        At the end the batches are reconciled by plurality
+        (``merge_extraction_batches``), cleaned against the job's own source
+        text (``sanitize_glossary``) and added to the glossary already stored
+        with ``merge_additions``, so existing entries — locked or hand-edited —
+        win over the pass. Every per-batch rendering is persisted with
+        ``save_glossary_proposals``, and ``glossary_extracted`` is set so the
+        pass cannot be billed twice.
+
+        Limitation: if a batch call raises, the error propagates. The cost of
+        the batches already done — and the billed usage the failed call's
+        exception carries — stays persisted, but nothing the pass extracted is
+        kept: the glossary, the proposals and the flag are written only at the
+        end, so a retry starts over and pays for every batch again.
+
+        Args:
+            job_id:      ID of a CREATED job whose glossary was not extracted.
+            on_progress: Optional callback ``(done, total, cost_usd)`` after
+                         each batch.
+
+        Returns:
+            GlossaryExtractionOutcome for this pass.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+            JobStateError:    if the job is not CREATED, or the pass already
+                              ran for it.
+            BudgetExceeded:   if the next batch could exceed ``budget_usd``.
+            MalformedOutput / ProviderError: if a batch call fails.
+        """
+        job = self._load_job_or_raise(job_id)
+        if job.status != JobStatus.CREATED:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        if job.glossary_extracted:
+            raise JobStateError(
+                job_id=job_id,
+                current_status=str(job.status),
+                reason=(
+                    "glossary already extracted; a second pass would bill the "
+                    "whole book again"
+                ),
+            )
+
+        config = job.config
+        model = config.model
+        chunks = self._chunks_in_order(job_id)
+        texts = [c.source_text for c in chunks]
+        batches = plan_extraction_batches(
+            texts, lambda text: self._provider.count_tokens(text, model)
+        )
+        in_price, out_price = self._provider.price(model)
+        cache_price = self._provider.cache_price(model)
+
+        def accrue(current: Job, usage: Usage) -> Job:
+            # The orchestrator's own usage pricing, so a dollar spent here is
+            # the same dollar its budget guard counts during translation.
+            cost = TranslationOrchestrator._usage_cost(
+                usage, in_price, out_price, cache_price
+            )
+            updated = current.model_copy(
+                update={
+                    "cost_usd": current.cost_usd + cost,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            self._checkpoint.save_job(updated)
+            return updated
+
+        cost_before = job.cost_usd
+        per_batch: list[list[GlossaryEntry]] = []
+        for done, indices in enumerate(batches, start=1):
+            batch_chunks = [chunks[i] for i in indices]
+            if config.budget_usd is not None:
+                projected = self._cost_est.estimate_glossary_extraction(
+                    batch_chunks, config
+                ).usd_high
+                if job.cost_usd + projected > config.budget_usd:
+                    raise BudgetExceeded(job_id=job_id, cost_so_far=job.cost_usd)
+            try:
+                batch = self._batch_extractor.extract_batch(
+                    "\n\n".join(c.source_text for c in batch_chunks), config
+                )
+            except (MalformedOutput, ProviderError) as exc:
+                # The adapter's billed-but-failed attempts are real spend.
+                accrue(job, exc.usage)
+                raise
+            job = accrue(job, batch.usage)
+            per_batch.append(batch.entries)
+            if on_progress is not None:
+                on_progress(done, len(batches), job.cost_usd)
+
+        merged, proposals = merge_extraction_batches(per_batch)
+        source_text = "\n\n".join(texts)
+        cleaned, _dropped = sanitize_glossary(merged, source_text=source_text)
+        combined = merge_additions(self._clean_glossary(job_id), cleaned.entries)
+        # merge_additions re-sanitizes WITHOUT the source; an inverse pair
+        # spanning old and new entries must be decided by the text instead.
+        final, _dropped = sanitize_glossary(combined, source_text=source_text)
+
+        self._checkpoint.save_glossary(job_id, final)
+        self._checkpoint.save_glossary_proposals(job_id, proposals)
+        self._checkpoint.save_job(
+            job.model_copy(
+                update={"glossary_extracted": True, "updated_at": datetime.now(UTC)}
+            )
+        )
+        return GlossaryExtractionOutcome(
+            batches=len(batches),
+            entries=len(cleaned.entries),
+            conflicts=count_proposal_conflicts(proposals),
+            cost_usd=job.cost_usd - cost_before,
         )
 
     # ------------------------------------------------------------------
@@ -731,6 +921,10 @@ class TranslatorEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _chunks_in_order(self, job_id: str) -> list[Chunk]:
+        """Load a job's chunks sorted by index (store order is not a contract)."""
+        return sorted(self._checkpoint.load_chunks(job_id), key=lambda c: c.index)
 
     def _load_job_or_raise(self, job_id: str) -> Job:
         """Load job from checkpoint or raise JobNotFoundError."""

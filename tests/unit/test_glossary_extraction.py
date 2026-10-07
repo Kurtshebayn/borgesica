@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from borgesica.domain.glossary import (
     EXTRACTION_BATCH_TOKENS,
     LlmGlossaryExtractor,
+    count_proposal_conflicts,
     merge_extraction_batches,
     plan_extraction_batches,
     settlement_counts,
@@ -375,3 +376,29 @@ def test_merge_leaves_direction_decisions_to_the_caller() -> None:
     glossary, _proposals = merge_extraction_batches(batches)
 
     assert [e.term for e in glossary.entries] == ["Will", "Voluntad"]
+
+
+# ---------------------------------------------------------------------------
+# count_proposal_conflicts
+# ---------------------------------------------------------------------------
+
+
+def test_no_proposals_have_no_conflicts() -> None:
+    assert count_proposal_conflicts({}) == 0
+
+
+def test_a_conflict_is_a_term_whose_batches_proposed_different_renderings() -> None:
+    proposals = {
+        "birthright": ("Primogenitura", "Derecho de nacimiento"),
+        "vis": ("Vis", "Vis", "Vis"),
+        "will": ("Voluntad",),
+    }
+
+    assert count_proposal_conflicts(proposals) == 1
+
+
+def test_renderings_differing_only_in_case_or_spacing_do_not_conflict() -> None:
+    # Same grouping as the plurality: these are one rendering, not two.
+    proposals = {"will cage": ("Jaula de Voluntad", "jaula de  voluntad ")}
+
+    assert count_proposal_conflicts(proposals) == 0

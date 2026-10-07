@@ -519,6 +519,23 @@ class GlossaryExtractionEstimate(BaseModel):
     usd_high: float
 
 
+class GlossaryExtractionOutcome(BaseModel):
+    """What one run of the whole-book glossary extraction pass did.
+
+    ``entries`` counts the terms the pass extracted (after merging batches and
+    the hygiene rules), not the size of the stored glossary: entries already
+    there win over the pass, so the two differ. ``conflicts`` counts the terms
+    whose batches proposed more than one distinct rendering — the ones a
+    reviewer should look at first. ``cost_usd`` is what THIS pass spent; the
+    job's running ``cost_usd`` includes it.
+    """
+
+    batches: int
+    entries: int
+    conflicts: int
+    cost_usd: float
+
+
 class CostEstimate(BaseModel):
     input_tokens: int
     output_tokens: int

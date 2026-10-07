@@ -49,6 +49,7 @@ __all__ = [
     "NullGlossaryExtractor",
     "apply_additions",
     "character_gender_evidence",
+    "count_proposal_conflicts",
     "dedupe_glossary",
     "drop_reversed_entries",
     "extraction_prompts",
@@ -792,6 +793,20 @@ def merge_extraction_batches(
     ]
     merged, _duplicates = dedupe_glossary(Glossary(entries=entries))
     return merged, {key: tuple(renderings) for key, renderings in proposals.items()}
+
+
+def count_proposal_conflicts(proposals: dict[str, tuple[str, ...]]) -> int:
+    """Count the terms whose batches proposed more than one distinct rendering.
+
+    Renderings are compared the way ``_plurality`` groups them
+    (``_rendering_key``: normalised, casefolded), so a case or spacing variant
+    is the same rendering and not a disagreement worth a reviewer's time.
+    """
+    return sum(
+        1
+        for renderings in proposals.values()
+        if len({_rendering_key(rendering) for rendering in renderings}) > 1
+    )
 
 
 # ---------------------------------------------------------------------------
