@@ -1105,7 +1105,7 @@ def test_extraction_estimate_prices_every_batch_with_its_prompt_overhead():
 
     provider = FakeTranslationProvider()
     config = make_config(source_type=SourceType.EPUB)
-    # 3000 + 3000 fit one 8000-token batch; the third chunk opens a second.
+    # 3000 + 3000 fill one 6000-token batch; the third chunk opens a second.
     chunks = [make_chunk(i, text="w " * 3000) for i in range(3)]
 
     estimate = CostEstimator(provider=provider).estimate_glossary_extraction(
@@ -1118,8 +1118,9 @@ def test_extraction_estimate_prices_every_batch_with_its_prompt_overhead():
     assert isinstance(estimate, GlossaryExtractionEstimate)
     assert estimate.batches == 2
     assert estimate.input_tokens == expected_input
-    assert estimate.output_tokens == round(expected_input * 0.326)
-    assert estimate.output_tokens_high == round(expected_input * 0.997)
+    # The output ratios were calibrated on batch SOURCE tokens.
+    assert estimate.output_tokens == round(9000 * 0.326)
+    assert estimate.output_tokens_high == round(9000 * 0.997)
     in_price, out_price = provider.price(config.model)
     assert estimate.usd == pytest.approx(
         (expected_input * in_price + estimate.output_tokens * out_price) / 1_000_000
@@ -1176,3 +1177,50 @@ def test_extraction_estimate_leaves_the_translation_estimate_unchanged():
     estimator.estimate_glossary_extraction(chunks, config)
 
     assert estimator.estimate(make_job(config, total=3), chunks, config) == before
+
+
+def test_extraction_output_ratios_apply_to_source_tokens_only():
+    from borgesica.domain.cost import CostEstimator
+
+    provider = FakeTranslationProvider()
+    config = make_config(source_type=SourceType.EPUB)
+    # Ten oversized chunks: ten batches, so the prompt overhead is paid ten
+    # times — the output projection must not grow with it.
+    chunks = [make_chunk(i, text="w " * 7000) for i in range(10)]
+
+    estimate = CostEstimator(provider=provider).estimate_glossary_extraction(
+        chunks, config
+    )
+
+    overhead = _extraction_overhead_tokens(provider, config)
+    assert estimate.batches == 10
+    assert estimate.input_tokens == 70_000 + 10 * overhead
+    assert estimate.output_tokens == round(70_000 * 0.326)
+    assert estimate.output_tokens_high == round(70_000 * 0.997)
+
+
+class _CountingProvider(FakeTranslationProvider):
+    """Records every text ``count_tokens`` is asked to measure."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.counted: list[str] = []
+
+    def count_tokens(self, text: str, model: str) -> int:
+        self.counted.append(text)
+        return super().count_tokens(text, model)
+
+
+def test_extraction_estimate_counts_each_chunk_once():
+    from borgesica.domain.cost import CostEstimator
+
+    provider = _CountingProvider()
+    config = make_config(source_type=SourceType.EPUB)
+    texts = [f"chunk{i} " + "w " * 500 for i in range(5)]
+    chunks = [make_chunk(i, text=text) for i, text in enumerate(texts)]
+
+    CostEstimator(provider=provider).estimate_glossary_extraction(chunks, config)
+
+    # One provider count per chunk: on a real provider each count can be an
+    # API round trip, and a 569-chunk book should not pay for 1138.
+    assert [provider.counted.count(text) for text in texts] == [1] * 5

@@ -93,8 +93,8 @@ class ScriptedExtractionProvider:
 # ---------------------------------------------------------------------------
 
 
-def test_batch_budget_is_eight_thousand_tokens() -> None:
-    assert EXTRACTION_BATCH_TOKENS == 8000
+def test_batch_budget_is_six_thousand_tokens() -> None:
+    assert EXTRACTION_BATCH_TOKENS == 6000
 
 
 def test_plan_of_no_chunks_is_no_batches() -> None:
@@ -135,12 +135,12 @@ def test_plan_keeps_every_chunk_exactly_once_in_order() -> None:
     assert all(batch for batch in batches)
 
 
-def test_plan_default_budget_holds_ten_prose_chunks_of_800_tokens() -> None:
-    ten = [words(800)] * 10
-    eleven = [words(800)] * 11
+def test_plan_default_budget_holds_seven_prose_chunks_of_800_tokens() -> None:
+    seven = [words(800)] * 7
+    eight = [words(800)] * 8
 
-    assert plan_extraction_batches(ten, count_words) == [list(range(10))]
-    assert plan_extraction_batches(eleven, count_words) == [list(range(10)), [10]]
+    assert plan_extraction_batches(seven, count_words) == [list(range(7))]
+    assert plan_extraction_batches(eight, count_words) == [list(range(7)), [7]]
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +315,44 @@ def test_merge_drops_blank_terms() -> None:
 
     assert [e.term for e in glossary.entries] == ["Vis"]
     assert proposals == {"vis": ("Vis",)}
+
+
+def test_merge_does_not_count_a_blank_rendering_as_a_vote() -> None:
+    batches = [
+        [entry("Birthright", "")],
+        [entry("Birthright", "   ")],
+        [entry("Birthright", "Primogenitura")],
+    ]
+
+    glossary, proposals = merge_extraction_batches(batches)
+
+    # Two blanks would otherwise outvote the one real rendering, and an entry
+    # "Birthright -> ''" orders the translator to delete the word.
+    assert glossary.entries[0].translation == "Primogenitura"
+    assert proposals == {"birthright": ("Primogenitura",)}
+
+
+def test_merge_drops_a_term_with_no_non_blank_rendering() -> None:
+    glossary, proposals = merge_extraction_batches(
+        [[entry("Vis", "Vis"), entry("Hierarchy", "")], [entry("Hierarchy", "  ")]]
+    )
+
+    assert [e.term for e in glossary.entries] == ["Vis"]
+    assert proposals == {"vis": ("Vis",)}
+
+
+def test_merge_lets_a_batch_vote_after_a_blank_occurrence() -> None:
+    # A blank occurrence is not the batch's vote, so a later non-blank one is.
+    batches = [
+        [entry("Will", ""), entry("Will", "Voluntad")],
+        [entry("Will", "Albedrío")],
+        [entry("Will", "Voluntad")],
+    ]
+
+    glossary, proposals = merge_extraction_batches(batches)
+
+    assert proposals == {"will": ("Voluntad", "Albedrío", "Voluntad")}
+    assert glossary.entries[0].translation == "Voluntad"
 
 
 def test_merge_orders_entries_by_first_appearance_across_batches() -> None:

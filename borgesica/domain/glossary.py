@@ -664,17 +664,20 @@ def settlement_counts(
 # Whole-book extraction pass — batch planning and reconciliation
 # ---------------------------------------------------------------------------
 
-EXTRACTION_BATCH_TOKENS = 8000
+EXTRACTION_BATCH_TOKENS = 6000
 """Source tokens one extraction call may carry.
 
 Bounded by OUTPUT, not input: the adapters cap a call at 8192 output tokens,
 and every extracted term costs output. On job 9be143da ("The Strength of the
-Few", 569 prose chunks of ~800 tokens) the worst 10-chunk batch (~8000 tokens)
-carries 167 attested glossary terms, which at the measured mean of 38.8 tokens
-per extracted entry is ~6.5k output tokens — under the cap. 20-chunk batches
-reach ~7.8k, leaving no headroom. A single chunk carried up to 59 terms, so
-the cap is NOT guaranteed on a denser book; this is a measured margin, not a
-proof.
+Few", 569 prose chunks of ~800 tokens) the densest 10-chunk batch (chunks
+550-559, an end-of-book list of names) emitted 6044 output tokens from 6063
+input tokens — a ratio of 0.997, so an 8000-token batch of that density would
+reach the cap and be truncated. At 6000 tokens the worst measured density
+(~1 output token per input token) projects ~6k output, ~26% headroom under
+8192. Typical batches are far lighter (mean ratio 0.326). This is a measured
+margin, not a proof: a denser book can still exceed it, which is why a
+truncated extraction response must fail loudly rather than return a partial
+list.
 """
 
 
@@ -746,6 +749,12 @@ def merge_extraction_batches(
       - ``first_draw`` stays None: these are not quorum draws, and
         ``settlement_counts`` must not count them as quorum's work.
 
+    Blank renderings are not votes: an entry "term -> ''" would order the
+    translator to delete the word, so a blank never wins a plurality, is not
+    recorded as a proposal, and does not use up its batch's vote (a later
+    non-blank occurrence in the same batch still votes). A term with no
+    non-blank rendering in any batch is dropped.
+
     Entries come out in order of first appearance; nothing should depend on
     it, since the store returns glossaries sorted by term. Blank terms are
     dropped. Reversed entries are NOT resolved here: that needs the source
@@ -765,10 +774,11 @@ def merge_extraction_batches(
             key = term.casefold()
             if addition.note and key not in notes:
                 notes[key] = addition.note
-            if key in voted:
+            rendering = normalize_term(addition.translation)
+            if not rendering or key in voted:
                 continue
             voted.add(key)
-            proposals.setdefault(key, []).append(normalize_term(addition.translation))
+            proposals.setdefault(key, []).append(rendering)
             spellings.setdefault(key, term)
 
     entries = [
