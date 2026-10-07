@@ -687,3 +687,63 @@ class TestAnthropicCountTokensCalibration:
 
     def test_empty_text_is_zero(self):
         assert AnthropicProvider(api_key="fake-key").count_tokens("", "claude-haiku-4-5") == 0
+
+
+# ---------------------------------------------------------------------------
+# A max_tokens stop is a truncated response, whatever its tool input says.
+# Regression: the adapter validated the tool_use input of a truncated
+# response as-is. A glossary extraction cut off inside glossary_additions —
+# the LAST field of the unit — can still validate, and would silently return
+# a partial term list as if it were the whole batch.
+# ---------------------------------------------------------------------------
+
+
+def _truncated_tool_use_response(input_tokens: int, output_tokens: int) -> object:
+    """A tool_use response stopped by max_tokens whose partial input validates."""
+    content_block = MagicMock()
+    content_block.type = "tool_use"
+    content_block.input = {
+        "translation": "-",
+        "summary_update": "Terminology extraction complete.",
+        # Cut off mid-list: only the terms emitted before the cap.
+        "glossary_additions": [{"term": "Vis", "translation": "Vis"}],
+    }
+    msg = MagicMock()
+    msg.content = [content_block]
+    msg.stop_reason = "max_tokens"
+    msg.usage = MagicMock(input_tokens=input_tokens, output_tokens=output_tokens)
+    return msg
+
+
+class TestMaxTokensTruncation:
+    def test_truncated_responses_raise_malformed_output_with_billed_usage(self):
+        responses = [
+            _truncated_tool_use_response(6000, 8192),
+            _truncated_tool_use_response(6000, 8192),
+            _truncated_tool_use_response(6000, 8192),
+        ]
+        client = make_fake_client(responses)
+        provider = AnthropicProvider(client=client)
+
+        with pytest.raises(MalformedOutput) as exc_info:
+            provider.translate("system", "Hello world", "claude-haiku-4-5")
+
+        assert client.messages.create.call_count == 3
+        # Every truncated attempt was billed in full.
+        assert exc_info.value.usage.input_tokens == 18000
+        assert exc_info.value.usage.output_tokens == 3 * 8192
+
+    def test_a_truncated_attempt_is_retried_and_its_usage_kept(self):
+        client = make_fake_client(
+            [
+                _truncated_tool_use_response(6000, 8192),
+                _valid_tool_use_response(input_tokens=6000, output_tokens=900),
+            ]
+        )
+        provider = AnthropicProvider(client=client)
+
+        result = provider.translate("system", "Hello world", "claude-haiku-4-5")
+
+        assert result.unit.translation == "Hola mundo"
+        assert result.usage.input_tokens == 12000
+        assert result.usage.output_tokens == 8192 + 900
