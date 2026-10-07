@@ -258,7 +258,9 @@ class TranslatorEngine:
         A line of its own beside ``estimate_cost``, which it leaves unchanged:
         extraction is a separate action the user decides on. None once the
         pass has completed — there is nothing left to spend, and showing the
-        line again would invite paying for the same glossary twice.
+        line again would invite paying for the same glossary twice. None too
+        for a job that is not CREATED: ``extract_glossary`` refuses it, so the
+        line would advertise a paid action that can only fail.
 
         No provider translation call is made.
 
@@ -266,7 +268,7 @@ class TranslatorEngine:
             JobNotFoundError: if job_id is not found.
         """
         job = self._load_job_or_raise(job_id)
-        if job.glossary_extracted:
+        if job.status != JobStatus.CREATED or job.glossary_extracted:
             return None
         return self._cost_est.estimate_glossary_extraction(
             self._chunks_in_order(job_id), job.config
@@ -324,7 +326,11 @@ class TranslatorEngine:
         Raises:
             JobNotFoundError: if job_id is not found.
             JobStateError:    if the job is not CREATED, or the pass already
-                              ran for it.
+                              ran for it, or the job left CREATED while the
+                              pass was running (a run or cancel started
+                              meanwhile). In that last case the spend so far
+                              is recorded on the job as it now stands and no
+                              glossary is written.
             BudgetExceeded:   if the next batch could exceed ``budget_usd``.
             MalformedOutput / ProviderError: if a batch call fails.
         """
@@ -351,10 +357,29 @@ class TranslatorEngine:
         in_price, out_price = self._provider.price(model)
         cache_price = self._provider.cache_price(model)
 
-        def accrue(current: Job, usage: Usage) -> Job:
+        # The pass owns two fields of the job, ``cost_usd`` and
+        # ``glossary_extracted``, and nothing else. Every save re-loads the
+        # job and changes only those: saving the copy loaded at the start
+        # would put a run or cancel that began meanwhile back to CREATED and
+        # erase its completed_chunks and cost. The store has no compare-and-
+        # set, so a write landing between a load and its save can still be
+        # lost; the serve API removes that window by running the pass in the
+        # same single slot as translation runs.
+        def still_created() -> Job:
+            current = self._load_job_or_raise(job_id)
+            if current.status != JobStatus.CREATED:
+                raise JobStateError(
+                    job_id=job_id,
+                    current_status=str(current.status),
+                    reason="the job left CREATED during the glossary pass",
+                )
+            return current
+
+        def accrue(usage: Usage) -> tuple[Job, float]:
             # The orchestrator's own usage pricing, so a dollar spent here is
             # the same dollar its budget guard counts during translation.
             cost = usage_cost(usage, in_price, out_price, cache_price)
+            current = self._load_job_or_raise(job_id)
             updated = current.model_copy(
                 update={
                     "cost_usd": current.cost_usd + cost,
@@ -362,17 +387,20 @@ class TranslatorEngine:
                 }
             )
             self._checkpoint.save_job(updated)
-            return updated
+            return updated, cost
 
-        cost_before = job.cost_usd
+        spent = 0.0
         per_batch: list[list[GlossaryEntry]] = []
         for done, indices in enumerate(batches, start=1):
+            # No call is made for a job the pass no longer owns.
+            job = still_created()
             batch_chunks = [chunks[i] for i in indices]
-            if config.budget_usd is not None:
+            budget = job.config.budget_usd
+            if budget is not None:
                 projected = self._cost_est.estimate_glossary_extraction(
                     batch_chunks, config
                 ).usd_high
-                if job.cost_usd + projected > config.budget_usd:
+                if job.cost_usd + projected > budget:
                     raise BudgetExceeded(job_id=job_id, cost_so_far=job.cost_usd)
             try:
                 batch = self._batch_extractor.extract_batch(
@@ -380,9 +408,12 @@ class TranslatorEngine:
                 )
             except (MalformedOutput, ProviderError) as exc:
                 # The adapter's billed-but-failed attempts are real spend.
-                accrue(job, exc.usage)
+                accrue(exc.usage)
                 raise
-            job = accrue(job, batch.usage)
+            job, cost = accrue(batch.usage)
+            spent += cost
+            # Spend is recorded first: the call was paid for either way.
+            still_created()
             per_batch.append(batch.entries)
             if on_progress is not None:
                 on_progress(done, len(batches), job.cost_usd)
@@ -395,10 +426,14 @@ class TranslatorEngine:
         # spanning old and new entries must be decided by the text instead.
         final, _dropped = sanitize_glossary(combined, source_text=source_text)
 
+        # A run that started after the last batch would translate with the
+        # glossary as it was; writing under it would change terms mid-book.
+        still_created()
         self._checkpoint.save_glossary(job_id, final)
         self._checkpoint.save_glossary_proposals(job_id, proposals)
+        current = self._load_job_or_raise(job_id)
         self._checkpoint.save_job(
-            job.model_copy(
+            current.model_copy(
                 update={"glossary_extracted": True, "updated_at": datetime.now(UTC)}
             )
         )
@@ -406,7 +441,7 @@ class TranslatorEngine:
             batches=len(batches),
             entries=len(cleaned.entries),
             conflicts=count_proposal_conflicts(proposals),
-            cost_usd=job.cost_usd - cost_before,
+            cost_usd=spent,
         )
 
     # ------------------------------------------------------------------

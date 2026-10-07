@@ -17,7 +17,12 @@ from datetime import UTC, datetime
 import pytest
 
 from borgesica.api import TranslatorEngine
-from borgesica.domain.errors import BudgetExceeded, JobStateError, MalformedOutput
+from borgesica.domain.errors import (
+    BudgetExceeded,
+    JobStateError,
+    MalformedOutput,
+    ProviderError,
+)
 from borgesica.domain.glossary import LlmGlossaryExtractor
 from borgesica.domain.models import (
     Chunk,
@@ -161,6 +166,18 @@ def test_estimate_is_the_domain_estimate_over_every_stored_chunk() -> None:
 def test_estimate_is_none_once_the_glossary_was_extracted() -> None:
     store = InMemoryCheckpointStore()
     job = setup_job(store, THREE_CHUNKS, glossary_extracted=True)
+
+    assert make_engine(ScriptedProvider(), store).estimate_glossary_extraction(job.id) is None
+
+
+@pytest.mark.parametrize(
+    "status", [JobStatus.RUNNING, JobStatus.PAUSED, JobStatus.DONE, JobStatus.CANCELLED]
+)
+def test_estimate_is_none_for_a_job_the_pass_would_refuse(status: JobStatus) -> None:
+    # The line advertises a paid action; offering one that extract_glossary
+    # would refuse invites a click that can only fail.
+    store = InMemoryCheckpointStore()
+    job = setup_job(store, THREE_CHUNKS, status=status)
 
     assert make_engine(ScriptedProvider(), store).estimate_glossary_extraction(job.id) is None
 
@@ -434,3 +451,130 @@ def test_a_failed_batch_keeps_the_spend_and_writes_no_glossary() -> None:
     assert final.glossary_extracted is False
     assert store.load_glossary(job.id) == Glossary()
     assert store.load_glossary_proposals(job.id) == {}
+
+
+def test_a_provider_error_charges_its_billed_usage_and_propagates() -> None:
+    store = InMemoryCheckpointStore()
+    wasted = Usage(input_tokens=300_000, output_tokens=100_000)
+    provider = ScriptedProvider(
+        [[entry("Vis", "Vis")], []],
+        fail_on={1: ProviderError(status_code=500, usage=wasted)},
+    )
+    job = setup_job(store, THREE_CHUNKS)
+
+    with pytest.raises(ProviderError):
+        make_engine(provider, store).extract_glossary(job.id)
+
+    final = store.load_job(job.id)
+    assert final.cost_usd == pytest.approx(
+        CALL_COST + 0.3 * IN_PRICE + 0.1 * OUT_PRICE
+    )
+    assert final.status == JobStatus.CREATED
+    assert final.glossary_extracted is False
+    assert store.load_glossary(job.id) == Glossary()
+    assert store.load_glossary_proposals(job.id) == {}
+
+
+# ---------------------------------------------------------------------------
+# extract_glossary — a concurrent change to the job is never reverted
+# ---------------------------------------------------------------------------
+
+
+def concurrent_run(store: InMemoryCheckpointStore, job_id: str) -> Job:
+    """What a translation run started meanwhile would persist: RUNNING, one
+    chunk done and its own spend on top of what it loaded."""
+    current = store.load_job(job_id)
+    started = current.model_copy(
+        update={
+            "status": JobStatus.RUNNING,
+            "completed_chunks": 1,
+            "cost_usd": current.cost_usd + 7.0,
+        }
+    )
+    store.save_job(started)
+    return started
+
+
+def test_a_job_that_leaves_created_between_batches_stops_the_pass() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[entry("Vis", "Vis")], []])
+    job = setup_job(store, THREE_CHUNKS)
+
+    def on_progress(done: int, total: int, cost: float) -> None:  # noqa: ARG001
+        if done == 1:
+            concurrent_run(store, job.id)
+
+    with pytest.raises(JobStateError):
+        make_engine(provider, store).extract_glossary(job.id, on_progress=on_progress)
+
+    # No call is made for a job the pass no longer owns.
+    assert len(provider.call_log) == 1
+    final = store.load_job(job.id)
+    assert final.status == JobStatus.RUNNING
+    assert final.completed_chunks == 1
+    assert final.cost_usd == pytest.approx(CALL_COST + 7.0)
+    assert final.glossary_extracted is False
+    assert store.load_glossary(job.id) == Glossary()
+    assert store.load_glossary_proposals(job.id) == {}
+
+
+@dataclass
+class RacingProvider(ScriptedProvider):
+    """Scripted provider that lets a concurrent run start during call ``race_on``."""
+
+    store: InMemoryCheckpointStore | None = None
+    job_id: str = ""
+    race_on: int = 0
+
+    def translate(
+        self, system: str, user: str, model: str, segment_count: int | None = None
+    ) -> TranslationResult:
+        if len(self.call_log) == self.race_on:
+            concurrent_run(self.store, self.job_id)
+        return super().translate(system, user, model, segment_count)
+
+
+@pytest.mark.parametrize("race_on", [0, 1])
+def test_spend_lands_on_the_current_job_without_reverting_a_concurrent_run(
+    race_on: int,
+) -> None:
+    # Saving the job loaded at the start would put it back to CREATED and
+    # erase the run's progress and cost. The call's spend is still real, so
+    # it is added to the CURRENT job before the pass stops.
+    store = InMemoryCheckpointStore()
+    job = setup_job(store, THREE_CHUNKS, cost_usd=0.5)
+    provider = RacingProvider(
+        [[entry("Vis", "Vis")], []], store=store, job_id=job.id, race_on=race_on
+    )
+
+    with pytest.raises(JobStateError):
+        make_engine(provider, store).extract_glossary(job.id)
+
+    assert len(provider.call_log) == race_on + 1
+    final = store.load_job(job.id)
+    assert final.status == JobStatus.RUNNING
+    assert final.completed_chunks == 1
+    assert final.cost_usd == pytest.approx(0.5 + 7.0 + (race_on + 1) * CALL_COST)
+    assert final.glossary_extracted is False
+    assert store.load_glossary(job.id) == Glossary()
+    assert store.load_glossary_proposals(job.id) == {}
+
+
+def test_the_final_save_keeps_fields_changed_during_the_pass() -> None:
+    # Only cost_usd and glossary_extracted belong to the pass; anything else
+    # written meanwhile (here, a budget edit) survives the final save.
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[entry("Vis", "Vis")], []])
+    job = setup_job(store, THREE_CHUNKS)
+    edited = job.config.model_copy(update={"budget_usd": 99.0})
+
+    def on_progress(done: int, total: int, cost: float) -> None:  # noqa: ARG001
+        if done == total:
+            store.save_job(store.load_job(job.id).model_copy(update={"config": edited}))
+
+    make_engine(provider, store).extract_glossary(job.id, on_progress=on_progress)
+
+    final = store.load_job(job.id)
+    assert final.config.budget_usd == 99.0
+    assert final.glossary_extracted is True
+    assert final.cost_usd == pytest.approx(2 * CALL_COST)
