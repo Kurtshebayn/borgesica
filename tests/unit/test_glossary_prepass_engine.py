@@ -19,6 +19,7 @@ import pytest
 from borgesica.api import TranslatorEngine
 from borgesica.domain.errors import (
     BudgetExceeded,
+    ExtractionStopped,
     JobStateError,
     MalformedOutput,
     ProviderError,
@@ -473,6 +474,82 @@ def test_a_provider_error_charges_its_billed_usage_and_propagates() -> None:
     assert final.glossary_extracted is False
     assert store.load_glossary(job.id) == Glossary()
     assert store.load_glossary_proposals(job.id) == {}
+
+
+# ---------------------------------------------------------------------------
+# extract_glossary — a cooperative stop keeps the job CREATED
+# ---------------------------------------------------------------------------
+
+
+def test_a_stop_request_ends_the_pass_before_the_next_call() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[entry("Vis", "Vis")], []])
+    job = setup_job(store, THREE_CHUNKS, cost_usd=0.5)
+    stop = {"requested": False}
+
+    def on_progress(done: int, total: int, cost: float) -> None:  # noqa: ARG001
+        stop["requested"] = True
+
+    with pytest.raises(ExtractionStopped) as excinfo:
+        make_engine(provider, store).extract_glossary(
+            job.id, on_progress=on_progress, should_stop=lambda: stop["requested"]
+        )
+
+    assert (excinfo.value.batches_done, excinfo.value.total_batches) == (1, 2)
+    assert len(provider.call_log) == 1
+    final = store.load_job(job.id)
+    # The batch already paid for stays on the job; nothing else is written.
+    assert final.cost_usd == pytest.approx(0.5 + CALL_COST)
+    assert final.status == JobStatus.CREATED
+    assert final.glossary_extracted is False
+    assert store.load_glossary(job.id) == Glossary()
+    assert store.load_glossary_proposals(job.id) == {}
+
+
+def test_a_stop_requested_before_the_first_batch_makes_no_call() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[entry("Vis", "Vis")], []])
+    job = setup_job(store, THREE_CHUNKS)
+
+    with pytest.raises(ExtractionStopped):
+        make_engine(provider, store).extract_glossary(job.id, should_stop=lambda: True)
+
+    assert provider.call_log == []
+    assert store.load_job(job.id).cost_usd == 0.0
+
+
+def test_a_stopped_pass_can_be_started_again() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[entry("Vis", "Vis")], [], [entry("Vis", "Vis")], []])
+    job = setup_job(store, THREE_CHUNKS)
+    engine = make_engine(provider, store)
+    with pytest.raises(ExtractionStopped):
+        engine.extract_glossary(
+            job.id, should_stop=lambda: len(provider.call_log) == 1
+        )
+
+    outcome = engine.extract_glossary(job.id)
+
+    assert outcome.batches == 2
+    final = store.load_job(job.id)
+    assert final.glossary_extracted is True
+    # The stopped pass's batch and both batches of the retry were paid for.
+    assert final.cost_usd == pytest.approx(3 * CALL_COST)
+
+
+def test_a_stop_after_the_last_call_keeps_the_paid_result() -> None:
+    # Every batch is already paid for; writing the glossary costs nothing,
+    # so a stop that arrives during the last call does not throw it away.
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[entry("Vis", "Vis")], []])
+    job = setup_job(store, THREE_CHUNKS)
+
+    outcome = make_engine(provider, store).extract_glossary(
+        job.id, should_stop=lambda: len(provider.call_log) == 2
+    )
+
+    assert outcome.batches == 2
+    assert store.load_job(job.id).glossary_extracted is True
 
 
 # ---------------------------------------------------------------------------

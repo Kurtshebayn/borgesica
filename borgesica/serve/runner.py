@@ -25,23 +25,28 @@ Glossary extraction (a different terminal type, so a client can tell the
 end of the pre-translation pass from the end of a translation run):
     {"type": "glossary_progress", "job_id": ..., "batch": int,
      "total_batches": int, "cost_usd": float}
-    {"type": "glossary_terminal", "status": "done" | "failed" | "budget_exceeded",
+    {"type": "glossary_terminal",
+     "status": "done" | "failed" | "budget_exceeded" | "stopped",
      "error": str | None, "entries": int | None, "conflicts": int | None,
      "cost_usd": float | None}
 "cost_usd" in glossary_progress is the job's running total; in
 glossary_terminal it is what the pass spent. The outcome fields are null
-unless status is "done"; after a failure the job's own cost_usd (GET
-/jobs/{id}) still includes every batch already paid for.
+unless status is "done"; after a failure or a stop the job's own cost_usd
+(GET /jobs/{id}) still includes every batch already paid for.
+
+An extraction is stopped cooperatively (``request_extraction_stop``, used by
+POST /jobs/{id}/cancel and by shutdown): the pass checks a stop flag before
+each batch call and ends with status "stopped", leaving the job CREATED.
 """
 from __future__ import annotations
 
 import queue
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from borgesica.api import TranslatorEngine
-from borgesica.domain.errors import BudgetExceeded, JobStateError
+from borgesica.domain.errors import BudgetExceeded, ExtractionStopped, JobStateError
 from borgesica.domain.models import Progress
 
 # RunHandle.kind values.
@@ -62,6 +67,8 @@ class RunHandle:
     # The terminal event once the worker has finished, kept so a client that
     # subscribes after the end can still be told how it ended.
     terminal: dict | None = None
+    # Set to ask a glossary extraction to stop before its next batch call.
+    stop: threading.Event = field(default_factory=threading.Event)
 
 
 class JobRunner:
@@ -73,38 +80,48 @@ class JobRunner:
         self._lock = threading.Lock()
         self._active_job_id: str | None = None
 
-    def _claim(self, job_id: str) -> None:
-        """Take the single active slot for *job_id* or raise if it is taken."""
-        with self._lock:
-            if self._active_job_id is not None:
-                raise JobStateError(job_id=job_id, current_status="RUNNING")
-            self._active_job_id = job_id
-
     def _spawn(
-        self, job_id: str, kind: str, work: Callable[["queue.Queue[dict]"], dict]
+        self, job_id: str, kind: str, work: Callable[[RunHandle], dict]
     ) -> None:
-        """Run *work* on a thread; it returns the terminal event to emit.
+        """Take the single active slot for *job_id* and run *work* on a thread;
+        *work* returns the terminal event to emit.
+
+        Claiming the slot, registering the new handle and starting its thread
+        happen under one lock hold, so whoever reads the slot (shutdown, the
+        stop request) always finds the handle of THIS execution — never the
+        job's previous one — and a thread that has started.
 
         The slot is released in the worker's finally-block, AFTER the terminal
         event is queued and recorded on the handle.
+
+        Raises:
+            JobStateError: if the slot is already taken, whichever job holds it.
         """
-        events: "queue.Queue[dict]" = queue.Queue()
         handle: RunHandle
 
         def _worker() -> None:
             try:
-                terminal = work(events)
+                terminal = work(handle)
                 handle.terminal = terminal
-                events.put(terminal)
+                handle.events.put(terminal)
             finally:
                 with self._lock:
                     if self._active_job_id == job_id:
                         self._active_job_id = None
 
-        thread = threading.Thread(target=_worker, daemon=True)
-        handle = RunHandle(thread=thread, events=events, kind=kind)
-        self._handles[job_id] = handle
-        thread.start()
+        handle = RunHandle(
+            thread=threading.Thread(target=_worker, daemon=True),
+            events=queue.Queue(),
+            kind=kind,
+        )
+        with self._lock:
+            if self._active_job_id is not None:
+                raise JobStateError(job_id=job_id, current_status="RUNNING")
+            self._active_job_id = job_id
+            self._handles[job_id] = handle
+            # Starting under the lock is safe: the worker takes the lock only
+            # in its finally-block, which simply waits for this to return.
+            handle.thread.start()
 
     def start(self, job_id: str, out_path: str, *, resume: bool = False) -> None:
         """Spawn a background thread running (or resuming) *job_id*.
@@ -114,11 +131,10 @@ class JobRunner:
                 (design decision #3: single active slot), regardless of which
                 job_id.
         """
-        self._claim(job_id)
 
-        def _work(events: "queue.Queue[dict]") -> dict:
+        def _work(handle: RunHandle) -> dict:
             def _on_progress(progress: Progress) -> None:
-                events.put({"type": "progress", **progress.model_dump()})
+                handle.events.put({"type": "progress", **progress.model_dump()})
 
             try:
                 method = self._engine.resume_job if resume else self._engine.run_job
@@ -135,16 +151,16 @@ class JobRunner:
         Shares the single active slot with translation runs, so the two can
         never overlap. The caller validates the job's state first (app.py
         maps a refusal to 409 before any thread exists); a refusal the engine
-        still raises here ends as a "failed" glossary_terminal.
+        still raises here ends as a "failed" glossary_terminal. A stop asked
+        for with ``request_extraction_stop`` ends it as "stopped".
 
         Raises:
             JobStateError: if a run or another extraction is already active.
         """
-        self._claim(job_id)
 
-        def _work(events: "queue.Queue[dict]") -> dict:
+        def _work(handle: RunHandle) -> dict:
             def _on_progress(done: int, total: int, cost_usd: float) -> None:
-                events.put(
+                handle.events.put(
                     {
                         "type": "glossary_progress",
                         "job_id": job_id,
@@ -165,9 +181,13 @@ class JobRunner:
                 }
 
             try:
-                outcome = self._engine.extract_glossary(job_id, on_progress=_on_progress)
+                outcome = self._engine.extract_glossary(
+                    job_id, on_progress=_on_progress, should_stop=handle.stop.is_set
+                )
             except BudgetExceeded as exc:
                 return _ended("budget_exceeded", str(exc))
+            except ExtractionStopped as exc:
+                return _ended("stopped", str(exc))
             except Exception as exc:  # noqa: BLE001 — surface any failure as a terminal event
                 return _ended("failed", str(exc))
             return {
@@ -180,6 +200,25 @@ class JobRunner:
             }
 
         self._spawn(job_id, GLOSSARY_EXTRACTION, _work)
+
+    def request_extraction_stop(self, job_id: str) -> bool:
+        """Ask job_id's glossary extraction to stop before its next batch call.
+
+        Returns:
+            True if a glossary extraction of job_id holds the active slot (the
+            stop is then on its way; the pass ends with a "stopped"
+            glossary_terminal, or "done" if its last call was already made).
+            False if it does not — nothing is touched, and the caller decides
+            what a cancel means for that job.
+        """
+        with self._lock:
+            if self._active_job_id != job_id:
+                return False
+            handle = self._handles[job_id]
+            if handle.kind != GLOSSARY_EXTRACTION:
+                return False
+            handle.stop.set()
+            return True
 
     def is_active(self, job_id: str) -> bool:
         """True while job_id's background run is registered as active.
@@ -223,25 +262,28 @@ class JobRunner:
         thread"). Cancellation only takes effect between chunks, so a run
         blocked mid-chunk may not finish within the timeout.
 
-        An active glossary extraction is NOT cancelled, only joined:
-        ``cancel_job`` on a job that is not RUNNING marks it CANCELLED, which
-        would take a CREATED job out of the wizard for good. Batches already
-        paid for are persisted as they finish, so the sidecar's own kill
-        fallback loses at most the call in flight.
+        An active glossary extraction is NOT cancelled but stopped (the same
+        flag as ``request_extraction_stop``): ``cancel_job`` on a job that is
+        not RUNNING marks it CANCELLED, which would take a CREATED job out of
+        the wizard for good. The stop keeps the pass from starting a batch
+        the sidecar's own kill fallback would then lose after paying for it;
+        batches already paid for are persisted as they finish.
 
         Returns:
             True if no run was active, or it finished within the timeout.
             False if it is still finishing (caller/Tauri falls back to its
             own 5s force-kill).
         """
+        # The slot and its handle are read together: _spawn registers both
+        # under the same lock, so this handle is the active execution's own.
         with self._lock:
             job_id = self._active_job_id
-        if job_id is None:
-            return True
-        handle = self._handles.get(job_id)
-        if handle is None or handle.kind == TRANSLATION:
+            if job_id is None:
+                return True
+            handle = self._handles[job_id]
+            if handle.kind == GLOSSARY_EXTRACTION:
+                handle.stop.set()
+        if handle.kind == TRANSLATION:
             self._engine.cancel_job(job_id)
-        if handle is None:
-            return True
         handle.thread.join(timeout=join_timeout)
         return not handle.thread.is_alive()

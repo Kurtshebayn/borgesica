@@ -233,7 +233,8 @@ def create_app(
     def start_glossary_extraction(job_id: str) -> JobResponse:
         """Run the explicit, paid pre-translation glossary pass in the
         background; progress arrives on GET /jobs/{id}/events as
-        glossary_progress events and one glossary_terminal.
+        glossary_progress events and one glossary_terminal. POST
+        /jobs/{id}/cancel stops it before its next batch call.
 
         Shares the runner's single active slot with run/resume, so a busy
         runner answers 409 here exactly as it does for a second run. The
@@ -255,8 +256,16 @@ def create_app(
 
     @app.post("/jobs/{job_id}/cancel", response_model=JobResponse, status_code=202)
     def cancel_run(job_id: str) -> JobResponse:
-        """Cooperative cancel — takes effect between chunks (chunk-granular)."""
-        engine.cancel_job(job_id)
+        """Cooperative cancel — takes effect between chunks (chunk-granular).
+
+        While a glossary extraction of this job holds the runner's slot, the
+        pass is STOPPED instead, before its next batch call: the job stays
+        CREATED (so the wizard keeps it and the pass may be started again)
+        and the stream ends with a glossary_terminal of status "stopped".
+        ``cancel_job`` would mark the CREATED job CANCELLED for good.
+        """
+        if not runner.request_extraction_stop(job_id):
+            engine.cancel_job(job_id)
         return _status_response(job_id)
 
     @app.get("/jobs/{job_id}/events")
