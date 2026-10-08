@@ -113,6 +113,22 @@ export function resumeJob(
   }).then(asJson<JobResponse>);
 }
 
+/** Starts the explicit, PAID pre-translation glossary pass (202; progress
+ * arrives on the job's event stream). A 409 — runner busy, job not CREATED,
+ * or glossary already extracted — rejects like every other call here. */
+export function extractGlossary(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+): Promise<JobResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}/glossary/extract`, {
+    method: "POST",
+    headers: authHeaders(token),
+  }).then(asJson<JobResponse>);
+}
+
+/** Cancels a translation run; during a glossary preparation it stops the
+ * pass instead, before its next batch, and the job stays CREATED. */
 export function cancelJob(
   baseUrl: string,
   token: string,
