@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { extractGlossary } from "./apiClient";
+import { extractGlossary, stopGlossaryExtraction } from "./apiClient";
 
 const BASE = "http://127.0.0.1:8765";
 
@@ -43,5 +43,29 @@ describe("extractGlossary", () => {
     await expect(extractGlossary(BASE, "secret", "job-1")).rejects.toThrow(
       /HTTP 409: .*already extracted/,
     );
+  });
+});
+
+describe("stopGlossaryExtraction", () => {
+  it("POSTs the job's stop route (never /cancel) with the session token", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(JOB), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const job = await stopGlossaryExtraction(BASE, "secret", "job-1");
+
+    expect(job).toEqual(JOB);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1/glossary/extract/stop`, {
+      method: "POST",
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+
+  it("rejects on a 409 (no active extraction; the job was left untouched)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"detail":"no active glossary extraction"}', { status: 409 })),
+    );
+
+    await expect(stopGlossaryExtraction(BASE, "secret", "job-1")).rejects.toThrow(/HTTP 409/);
   });
 });

@@ -35,8 +35,9 @@ unless status is "done"; after a failure or a stop the job's own cost_usd
 (GET /jobs/{id}) still includes every batch already paid for.
 
 An extraction is stopped cooperatively (``request_extraction_stop``, used by
-POST /jobs/{id}/cancel and by shutdown): the pass checks a stop flag before
-each batch call and ends with status "stopped", leaving the job CREATED.
+POST /jobs/{id}/glossary/extract/stop and by shutdown): the pass checks a
+stop flag before each batch call and ends with status "stopped", leaving the
+job CREATED.
 """
 from __future__ import annotations
 
@@ -208,8 +209,8 @@ class JobRunner:
             True if a glossary extraction of job_id holds the active slot (the
             stop is then on its way; the pass ends with a "stopped"
             glossary_terminal, or "done" if its last call was already made).
-            False if it does not — nothing is touched, and the caller decides
-            what a cancel means for that job.
+            False if it does not (no execution, a translation run, or a pass
+            that already released the slot) — nothing is touched.
         """
         with self._lock:
             if self._active_job_id != job_id:

@@ -9,6 +9,7 @@ import {
   putGlossary,
   resumeJob,
   runJob,
+  stopGlossaryExtraction,
 } from "./apiClient";
 import {
   subscribeToGlossaryExtraction,
@@ -130,11 +131,12 @@ export default function WizardScreen({
     if (!state.jobId) return;
     dispatch({ type: "GLOSSARY_STOP_REQUESTED" });
     try {
-      // During a preparation the cancel route stops the pass before its next
-      // batch and keeps the job CREATED; the stream reports the end.
-      await cancelJob(baseUrl, token, state.jobId);
+      // The stop route never cancels the job (unlike /cancel): the pass stops
+      // before its next batch, the job stays CREATED, and the stream reports
+      // the end.
+      await stopGlossaryExtraction(baseUrl, token, state.jobId);
     } catch {
-      // As with a run's cancel: the stream reflects the real end.
+      // The stream reflects the real end.
     }
   }
 

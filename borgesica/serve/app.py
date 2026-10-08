@@ -234,7 +234,7 @@ def create_app(
         """Run the explicit, paid pre-translation glossary pass in the
         background; progress arrives on GET /jobs/{id}/events as
         glossary_progress events and one glossary_terminal. POST
-        /jobs/{id}/cancel stops it before its next batch call.
+        /jobs/{id}/glossary/extract/stop stops it before its next batch call.
 
         Shares the runner's single active slot with run/resume, so a busy
         runner answers 409 here exactly as it does for a second run. The
@@ -258,15 +258,37 @@ def create_app(
     def cancel_run(job_id: str) -> JobResponse:
         """Cooperative cancel — takes effect between chunks (chunk-granular).
 
-        While a glossary extraction of this job holds the runner's slot, the
-        pass is STOPPED instead, before its next batch call: the job stays
-        CREATED (so the wizard keeps it and the pass may be started again)
-        and the stream ends with a glossary_terminal of status "stopped".
-        ``cancel_job`` would mark the CREATED job CANCELLED for good.
+        Always cancels the job. To stop a glossary extraction and keep the
+        job, use POST /jobs/{id}/glossary/extract/stop.
         """
-        if not runner.request_extraction_stop(job_id):
-            engine.cancel_job(job_id)
+        engine.cancel_job(job_id)
         return _status_response(job_id)
+
+    @app.post(
+        "/jobs/{job_id}/glossary/extract/stop",
+        response_model=JobResponse,
+        status_code=202,
+    )
+    def stop_glossary_extraction(job_id: str) -> JobResponse:
+        """Stop this job's glossary extraction before its next batch call.
+
+        Only ever requests the cooperative stop — it NEVER cancels the job:
+        the job stays CREATED (the wizard keeps it, the pass may be started
+        again) and the stream ends with a glossary_terminal of status
+        "stopped" ("done" if the last call was already made). Kept apart from
+        /cancel so a stop that arrives just after the pass released the
+        runner's slot cannot fall back to cancelling the job and strand the
+        glossary that was just paid for: with no active extraction of this
+        job it answers 409 and touches nothing.
+        """
+        job = engine.status(job_id)  # JobNotFoundError -> 404
+        if not runner.request_extraction_stop(job_id):
+            raise JobStateError(
+                job_id=job_id,
+                current_status=str(job.status),
+                reason="no active glossary extraction",
+            )
+        return job_to_response(job, best_effort_indices=[])
 
     @app.get("/jobs/{job_id}/events")
     def stream_events(job_id: str) -> StreamingResponse:

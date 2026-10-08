@@ -127,8 +127,23 @@ export function extractGlossary(
   }).then(asJson<JobResponse>);
 }
 
-/** Cancels a translation run; during a glossary preparation it stops the
- * pass instead, before its next batch, and the job stays CREATED. */
+/** Stops the job's glossary preparation before its next batch; the job stays
+ * CREATED and the event stream reports the end. Never cancels the job: with
+ * no active preparation (e.g. it just ended) the server answers 409 and
+ * touches nothing, which rejects here. */
+export function stopGlossaryExtraction(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+): Promise<JobResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}/glossary/extract/stop`, {
+    method: "POST",
+    headers: authHeaders(token),
+  }).then(asJson<JobResponse>);
+}
+
+/** Cancels the job (a run stops between chunks). Not for a glossary
+ * preparation: that is `stopGlossaryExtraction`, which keeps the job. */
 export function cancelJob(
   baseUrl: string,
   token: string,
