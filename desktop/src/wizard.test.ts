@@ -4,11 +4,17 @@ import {
   extractSseData,
   formatBestEffortSummary,
   formatFailureSummary,
+  formatGlossaryExtractionEnd,
+  formatGlossaryExtractionLine,
+  formatGlossaryExtractionSummary,
+  formatGlossaryProgress,
   formatProgress,
+  glossaryResultFromEvent,
   initialWizardState,
   isPersistentConnectionFailure,
   isRunningStatus,
   MAX_CONSECUTIVE_CONNECTION_FAILURES,
+  parseGlossarySseData,
   parseSseData,
   providerRequiresKey,
   PROVIDERS,
@@ -19,7 +25,11 @@ import {
   wizardReducer,
   type WizardState,
 } from "./wizard";
-import type { JobResponse } from "./apiTypes";
+import type {
+  EstimateResponse,
+  GlossaryExtractionEstimate,
+  JobResponse,
+} from "./apiTypes";
 
 describe("validateFilePath", () => {
   it("rejects .pdf with a clear message (spec: PDF rejected in picker)", () => {
@@ -279,6 +289,7 @@ describe("wizardReducer", () => {
         model: "m",
         cached: false,
         within_budget: true,
+        glossary_extraction: null,
       },
     };
     const next = wizardReducer(withEstimate, { type: "PROCEED_TO_GLOSSARY" });
@@ -298,6 +309,7 @@ describe("wizardReducer", () => {
         best_effort_indices: [],
         failed_count: 0,
         failed_indices: [],
+        glossary_extracted: false,
       },
     });
     expect(next.screen).toBe("pick");
@@ -327,6 +339,7 @@ describe("wizardReducer", () => {
         best_effort_indices: [],
         failed_count: 0,
         failed_indices: [],
+        glossary_extracted: false,
       },
     };
     const next = wizardReducer(running, {
@@ -353,6 +366,7 @@ describe("wizardReducer", () => {
         best_effort_indices: [],
         failed_count: 0,
         failed_indices: [],
+        glossary_extracted: false,
       },
     };
     const refreshed: JobResponse = {
@@ -365,6 +379,7 @@ describe("wizardReducer", () => {
       best_effort_indices: [],
       failed_count: 5,
       failed_indices: [0, 1, 2, 3, 4],
+      glossary_extracted: false,
     };
     const next = wizardReducer(running, {
       type: "RUN_TERMINAL",
@@ -498,5 +513,280 @@ describe("runRecoveryAction", () => {
     });
 
     expect(restartSidecar).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-translation glossary preparation (the explicit, paid extraction pass)
+// ---------------------------------------------------------------------------
+
+const EXTRACTION_LINE: GlossaryExtractionEstimate = {
+  batches: 57,
+  input_tokens: 400_000,
+  output_tokens: 130_000,
+  output_tokens_high: 160_000,
+  usd: 0.1234,
+  usd_high: 0.5678,
+};
+
+function estimateWith(
+  glossary_extraction: GlossaryExtractionEstimate | null,
+): EstimateResponse {
+  return {
+    input_tokens: 1,
+    output_tokens: 1,
+    usd: 1,
+    usd_low: 0.5,
+    usd_high: 1.5,
+    model: "m",
+    cached: false,
+    within_budget: true,
+    glossary_extraction,
+  };
+}
+
+const onEstimate: WizardState = {
+  ...initialWizardState,
+  screen: "estimate",
+  jobId: "job-1",
+  estimate: estimateWith(EXTRACTION_LINE),
+};
+
+const preparing: WizardState = {
+  ...onEstimate,
+  screen: "preparing",
+  glossaryProgress: { batch: 3, totalBatches: 57, costUsd: 0.0421 },
+};
+
+describe("formatGlossaryExtractionLine", () => {
+  it("shows the cost range and the number of calls, apart from the translation", () => {
+    expect(formatGlossaryExtractionLine(EXTRACTION_LINE)).toBe(
+      "Preparación del glosario: $0.12 – $0.57, 57 llamadas",
+    );
+  });
+
+  it("uses the singular for a single call", () => {
+    expect(formatGlossaryExtractionLine({ ...EXTRACTION_LINE, batches: 1 })).toMatch(
+      /, 1 llamada$/,
+    );
+  });
+});
+
+describe("formatGlossaryProgress", () => {
+  it("renders the batch counter and the job's cost so far", () => {
+    expect(formatGlossaryProgress({ batch: 3, totalBatches: 57, costUsd: 0.0421 })).toBe(
+      "Lote 3/57 — $0.0421",
+    );
+  });
+});
+
+describe("formatGlossaryExtractionSummary", () => {
+  it("counts the extracted terms and the conflicting ones", () => {
+    expect(formatGlossaryExtractionSummary(120, 7)).toBe(
+      "120 términos extraídos, 7 con traducciones distintas a lo largo del libro",
+    );
+  });
+
+  it("leaves the conflicts out when there are none", () => {
+    expect(formatGlossaryExtractionSummary(1, 0)).toBe("1 término extraído");
+  });
+});
+
+describe("formatGlossaryExtractionEnd", () => {
+  it("says the preparation was stopped and what the job already spent", () => {
+    const message = formatGlossaryExtractionEnd("stopped", null, 0.0421);
+    expect(message).toMatch(/se detuvo/i);
+    expect(message).toContain("$0.0421");
+  });
+
+  it("shows the error of a failed preparation", () => {
+    expect(formatGlossaryExtractionEnd("failed", "Provider error (HTTP 500)", null)).toContain(
+      "Provider error (HTTP 500)",
+    );
+  });
+
+  it("names the budget when the next batch could exceed it", () => {
+    expect(formatGlossaryExtractionEnd("budget_exceeded", "Budget exceeded", null)).toMatch(
+      /presupuesto/i,
+    );
+  });
+
+  it("omits the spend when no batch reported one", () => {
+    expect(formatGlossaryExtractionEnd("stopped", null, null)).not.toContain("$");
+  });
+});
+
+describe("parseGlossarySseData", () => {
+  it("parses a glossary_progress event", () => {
+    const raw = JSON.stringify({
+      type: "glossary_progress",
+      job_id: "job-1",
+      batch: 2,
+      total_batches: 5,
+      cost_usd: 0.01,
+    });
+    expect(parseGlossarySseData(raw)).toEqual(JSON.parse(raw));
+  });
+
+  it("parses a glossary_terminal event", () => {
+    const raw = JSON.stringify({
+      type: "glossary_terminal",
+      status: "stopped",
+      error: "Glossary extraction stopped",
+      entries: null,
+      conflicts: null,
+      cost_usd: null,
+    });
+    expect(parseGlossarySseData(raw)).toEqual(JSON.parse(raw));
+  });
+
+  it("parses a plain terminal event (the stream knows of no extraction)", () => {
+    const raw = JSON.stringify({ type: "terminal", status: "CREATED", error: null });
+    expect(parseGlossarySseData(raw)).toEqual(JSON.parse(raw));
+  });
+
+  it("returns null for translation progress and malformed payloads", () => {
+    expect(parseGlossarySseData(JSON.stringify({ type: "progress" }))).toBeNull();
+    expect(parseGlossarySseData("{not json")).toBeNull();
+  });
+});
+
+describe("glossaryResultFromEvent", () => {
+  it("carries a glossary_terminal's outcome as is", () => {
+    expect(
+      glossaryResultFromEvent({
+        type: "glossary_terminal",
+        status: "done",
+        error: null,
+        entries: 12,
+        conflicts: 2,
+        cost_usd: 0.3,
+      }),
+    ).toEqual({ status: "done", error: null, entries: 12, conflicts: 2 });
+  });
+
+  it("turns a plain terminal into a failed preparation naming the job status", () => {
+    const result = glossaryResultFromEvent({
+      type: "terminal",
+      status: "CANCELLED",
+      error: null,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("CANCELLED");
+    expect(result.entries).toBeNull();
+    expect(result.conflicts).toBeNull();
+  });
+});
+
+describe("wizardReducer — glossary preparation", () => {
+  it("GLOSSARY_EXTRACTION_STARTED moves the estimate screen to preparing", () => {
+    const next = wizardReducer(
+      { ...onEstimate, preparationMessage: "old message" },
+      { type: "GLOSSARY_EXTRACTION_STARTED" },
+    );
+    expect(next.screen).toBe("preparing");
+    expect(next.glossaryProgress).toBeNull();
+    expect(next.stopRequested).toBe(false);
+    expect(next.preparationMessage).toBeNull();
+  });
+
+  it("GLOSSARY_EXTRACTION_STARTED is a no-op guard when no extraction line was shown", () => {
+    const extracted = { ...onEstimate, estimate: estimateWith(null) };
+    expect(wizardReducer(extracted, { type: "GLOSSARY_EXTRACTION_STARTED" })).toBe(extracted);
+  });
+
+  it("GLOSSARY_EXTRACTION_STARTED is a no-op guard outside the estimate screen", () => {
+    const onGlossary: WizardState = { ...onEstimate, screen: "glossary" };
+    expect(wizardReducer(onGlossary, { type: "GLOSSARY_EXTRACTION_STARTED" })).toBe(onGlossary);
+  });
+
+  it("GLOSSARY_EXTRACTION_START_FAILED returns to the estimate screen with the error", () => {
+    const next = wizardReducer(
+      { ...preparing, glossaryProgress: null },
+      { type: "GLOSSARY_EXTRACTION_START_FAILED", message: "HTTP 409: busy" },
+    );
+    expect(next.screen).toBe("estimate");
+    expect(next.preparationMessage).toContain("HTTP 409: busy");
+  });
+
+  it("GLOSSARY_PROGRESS_RECEIVED records the batch counter while preparing", () => {
+    const progress = { batch: 4, totalBatches: 57, costUsd: 0.05 };
+    const next = wizardReducer(preparing, { type: "GLOSSARY_PROGRESS_RECEIVED", progress });
+    expect(next.glossaryProgress).toEqual(progress);
+  });
+
+  it("GLOSSARY_PROGRESS_RECEIVED is ignored outside the preparing screen", () => {
+    const next = wizardReducer(onEstimate, {
+      type: "GLOSSARY_PROGRESS_RECEIVED",
+      progress: { batch: 1, totalBatches: 2, costUsd: 0 },
+    });
+    expect(next).toBe(onEstimate);
+  });
+
+  it("GLOSSARY_STOP_REQUESTED marks the stop while preparing", () => {
+    expect(wizardReducer(preparing, { type: "GLOSSARY_STOP_REQUESTED" }).stopRequested).toBe(
+      true,
+    );
+  });
+
+  it("PROCEED_TO_GLOSSARY is a no-op guard while preparing (no skipping a pass in flight)", () => {
+    expect(wizardReducer(preparing, { type: "PROCEED_TO_GLOSSARY" })).toBe(preparing);
+  });
+
+  it("GLOSSARY_EXTRACTION_ENDED done shows the glossary screen with the fetched entries", () => {
+    const entries = [{ term: "Vis", translation: "Vis", locked: false }];
+    const next = wizardReducer(preparing, {
+      type: "GLOSSARY_EXTRACTION_ENDED",
+      result: { status: "done", error: null, entries: 12, conflicts: 2 },
+      glossary: entries,
+    });
+    expect(next.screen).toBe("glossary");
+    expect(next.glossary).toEqual(entries);
+    expect(next.glossaryNotice).toBe(formatGlossaryExtractionSummary(12, 2));
+    // The pass cannot be offered again: the job's glossary is extracted.
+    expect(next.estimate?.glossary_extraction).toBeNull();
+    expect(next.glossaryProgress).toBeNull();
+  });
+
+  it.each(["stopped", "failed", "budget_exceeded"] as const)(
+    "GLOSSARY_EXTRACTION_ENDED %s returns to the estimate screen with the re-fetched estimate",
+    (status) => {
+      const refreshed = estimateWith({ ...EXTRACTION_LINE, usd: 0.2 });
+      const next = wizardReducer(
+        { ...preparing, stopRequested: status === "stopped" },
+        {
+          type: "GLOSSARY_EXTRACTION_ENDED",
+          result: { status, error: "boom", entries: null, conflicts: null },
+          estimate: refreshed,
+        },
+      );
+      expect(next.screen).toBe("estimate");
+      expect(next.estimate).toEqual(refreshed);
+      expect(next.preparationMessage).toBe(formatGlossaryExtractionEnd(status, "boom", 0.0421));
+      expect(next.stopRequested).toBe(false);
+      expect(next.glossaryProgress).toBeNull();
+    },
+  );
+
+  it("GLOSSARY_EXTRACTION_ENDED keeps the shown estimate when the re-fetch failed", () => {
+    const next = wizardReducer(preparing, {
+      type: "GLOSSARY_EXTRACTION_ENDED",
+      result: { status: "failed", error: "boom", entries: null, conflicts: null },
+    });
+    expect(next.estimate).toBe(preparing.estimate);
+  });
+
+  it("GLOSSARY_EXTRACTION_ENDED is a no-op guard outside the preparing screen", () => {
+    const next = wizardReducer(onEstimate, {
+      type: "GLOSSARY_EXTRACTION_ENDED",
+      result: { status: "done", error: null, entries: 1, conflicts: 0 },
+    });
+    expect(next).toBe(onEstimate);
+  });
+
+  it("CONNECTION_LOST moves the preparing screen to the error screen", () => {
+    const next = wizardReducer(preparing, { type: "CONNECTION_LOST", message: "gone" });
+    expect(next.screen).toBe("error");
+    expect(next.connectionError).toBe("gone");
   });
 });
