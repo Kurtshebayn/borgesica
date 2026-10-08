@@ -95,6 +95,9 @@ export interface WizardState {
   glossaryProgress: GlossaryProgressInfo | null;
   /** The user asked to stop the glossary preparation in flight. */
   stopRequested: boolean;
+  /** Why the last stop request failed (the pass goes on; the stop button is
+   * enabled again so the user can retry). */
+  stopError: string | null;
   /** Why the estimate screen was returned to from a preparation that did not
    * finish (stopped, failed, over budget, or could not start). */
   preparationMessage: string | null;
@@ -123,6 +126,7 @@ export const initialWizardState: WizardState = {
   estimateError: null,
   glossaryProgress: null,
   stopRequested: false,
+  stopError: null,
   preparationMessage: null,
   glossaryNotice: null,
   glossary: [],
@@ -439,6 +443,9 @@ export type WizardAction =
   | { type: "GLOSSARY_EXTRACTION_START_FAILED"; message: string }
   | { type: "GLOSSARY_PROGRESS_RECEIVED"; progress: GlossaryProgressInfo }
   | { type: "GLOSSARY_STOP_REQUESTED" }
+  /** The stop request itself failed (network error, or the server refused
+   * it); the pass may still be running. */
+  | { type: "GLOSSARY_STOP_FAILED"; message: string }
   | {
       type: "GLOSSARY_EXTRACTION_ENDED";
       result: GlossaryExtractionResult;
@@ -502,6 +509,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
         screen: "preparing",
         glossaryProgress: null,
         stopRequested: false,
+        stopError: null,
         preparationMessage: null,
       };
     case "GLOSSARY_EXTRACTION_START_FAILED":
@@ -511,6 +519,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
         screen: "estimate",
         glossaryProgress: null,
         stopRequested: false,
+        stopError: null,
         preparationMessage: `No se pudo iniciar la preparación del glosario: ${action.message}`,
       };
     case "GLOSSARY_PROGRESS_RECEIVED":
@@ -518,11 +527,25 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       return { ...state, glossaryProgress: action.progress };
     case "GLOSSARY_STOP_REQUESTED":
       if (state.screen !== "preparing") return state;
-      return { ...state, stopRequested: true };
+      return { ...state, stopRequested: true, stopError: null };
+    case "GLOSSARY_STOP_FAILED":
+      // Re-enable the stop button: otherwise it stays disabled while the
+      // paid pass keeps going.
+      if (state.screen !== "preparing") return state;
+      return {
+        ...state,
+        stopRequested: false,
+        stopError: `No se pudo detener la preparación: ${action.message}`,
+      };
     case "GLOSSARY_EXTRACTION_ENDED": {
       if (state.screen !== "preparing") return state;
       const { result } = action;
-      const cleared = { ...state, glossaryProgress: null, stopRequested: false };
+      const cleared = {
+        ...state,
+        glossaryProgress: null,
+        stopRequested: false,
+        stopError: null,
+      };
       if (result.status === "done") {
         return {
           ...cleared,

@@ -784,6 +784,39 @@ describe("wizardReducer — glossary preparation", () => {
     expect(next).toBe(onEstimate);
   });
 
+  it("GLOSSARY_STOP_FAILED re-enables the stop button and says why, while preparing", () => {
+    const stopping: WizardState = { ...preparing, stopRequested: true };
+    const next = wizardReducer(stopping, {
+      type: "GLOSSARY_STOP_FAILED",
+      message: "Error: HTTP 500",
+    });
+    expect(next.screen).toBe("preparing");
+    expect(next.stopRequested).toBe(false);
+    expect(next.stopError).toBe("No se pudo detener la preparación: Error: HTTP 500");
+  });
+
+  it("GLOSSARY_STOP_FAILED is ignored outside the preparing screen", () => {
+    expect(
+      wizardReducer(onEstimate, { type: "GLOSSARY_STOP_FAILED", message: "late" }),
+    ).toBe(onEstimate);
+  });
+
+  it("GLOSSARY_STOP_REQUESTED clears the message of an earlier failed stop", () => {
+    const failedStop: WizardState = { ...preparing, stopError: "No se pudo detener" };
+    expect(wizardReducer(failedStop, { type: "GLOSSARY_STOP_REQUESTED" }).stopError).toBeNull();
+  });
+
+  it("GLOSSARY_EXTRACTION_ENDED clears the message of a failed stop", () => {
+    const next = wizardReducer(
+      { ...preparing, stopError: "No se pudo detener" },
+      {
+        type: "GLOSSARY_EXTRACTION_ENDED",
+        result: { status: "done", error: null, entries: 1, conflicts: 0 },
+      },
+    );
+    expect(next.stopError).toBeNull();
+  });
+
   it("CONNECTION_LOST moves the preparing screen to the error screen", () => {
     const next = wizardReducer(preparing, { type: "CONNECTION_LOST", message: "gone" });
     expect(next.screen).toBe("error");

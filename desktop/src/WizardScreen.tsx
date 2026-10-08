@@ -135,8 +135,10 @@ export default function WizardScreen({
       // before its next batch, the job stays CREATED, and the stream reports
       // the end.
       await stopGlossaryExtraction(baseUrl, token, state.jobId);
-    } catch {
-      // The stream reflects the real end.
+    } catch (err) {
+      // The pass may still be running (or just ended — the stream then
+      // reports it): re-enable the button instead of leaving it disabled.
+      dispatch({ type: "GLOSSARY_STOP_FAILED", message: String(err) });
     }
   }
 
@@ -309,6 +311,7 @@ export default function WizardScreen({
           <button onClick={() => void handleStopPreparation()} disabled={state.stopRequested}>
             {state.stopRequested ? "Deteniendo… (se aplica entre lotes)" : "Detener"}
           </button>
+          {state.stopError && <p role="alert">{state.stopError}</p>}
         </div>
       )}
 
