@@ -106,6 +106,11 @@ it a special in-world sense (an institution, a rank, a group, a power, a \
 concept). Give its Spanish rendering and keep the capitalisation, e.g. \
 "the Wardens" -> "los Guardianes", "Gift" -> "Don", "Weave" -> "Trama". \
 Capitalisation alone never makes an English word foreign.
+- ADAPT DEMONYMS IN LOWERCASE: a word naming the people, language or things \
+of an invented place (a demonym or place adjective) is adapted to Spanish \
+and written in LOWERCASE, as Spanish writes demonyms, e.g. "Ardanian" -> \
+"ardaniano", "the Velorans" -> "los veloranos". The place name itself stays \
+verbatim.
 - Do NOT include common English or Spanish vocabulary.
 - If no notable terms are found, return an empty glossary_additions list.
 - The top-level "translation" field (outside glossary_additions) must be \

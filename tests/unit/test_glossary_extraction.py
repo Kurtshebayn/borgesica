@@ -441,11 +441,35 @@ def test_extraction_prompt_translates_english_words_with_an_in_world_sense() -> 
     assert "proper noun with no established spanish form" not in prompt
 
 
+def test_extraction_prompt_adapts_invented_demonyms_in_lowercase() -> None:
+    """Spanish writes demonyms lowercase and inflects them.
+
+    Measured 2026-10-09 on gpt-6-luna after the capitalised-English rule:
+    the model adapted invented demonyms but kept the capital ("Vetusian" ->
+    "Vetusiano" in 21 of 26 batches, "Catenans" -> "Catenanos"). User decision
+    the same day: adapt them, in lowercase.
+    """
+    from borgesica.domain.glossary import _EXTRACTION_SYSTEM_PROMPT
+
+    prompt = _EXTRACTION_SYSTEM_PROMPT.lower()
+
+    assert "demonym" in prompt
+    assert "lowercase" in prompt
+
+
 def test_extraction_prompt_examples_are_not_taken_from_the_measured_book() -> None:
     """Teaching with the evaluation book's own terms would measure nothing."""
     from borgesica.domain.glossary import _EXTRACTION_SYSTEM_PROMPT
 
-    for term in ("Will", "Voluntad", "Concurrence", "Academy", "Governance"):
+    for term in (
+        "Will",
+        "Voluntad",
+        "Concurrence",
+        "Academy",
+        "Governance",
+        "Vetusian",
+        "Catenans",
+    ):
         assert f'"{term}"' not in _EXTRACTION_SYSTEM_PROMPT
 
 
