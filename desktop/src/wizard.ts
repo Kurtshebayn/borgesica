@@ -9,11 +9,22 @@
 import type {
   EstimateResponse,
   GlossaryEntry,
+  GlossaryExtractionEstimate,
   JobResponse,
   JobStatus,
 } from "./apiTypes";
 
-export type WizardScreen = "pick" | "estimate" | "glossary" | "run" | "done" | "error";
+/** "preparing" is the explicit, paid glossary extraction pass, entered only
+ * from the estimate screen by a user click and left only by its end (back to
+ * the estimate screen, or on to the glossary screen) or a lost connection. */
+export type WizardScreen =
+  | "pick"
+  | "estimate"
+  | "preparing"
+  | "glossary"
+  | "run"
+  | "done"
+  | "error";
 
 /** Translation backends the engine's `serve --provider` accepts. The provider
  * is chosen before the sidecar spawns (it is bound to that process); changing
@@ -55,6 +66,23 @@ export interface ProgressInfo {
   costUsd: number;
 }
 
+export interface GlossaryProgressInfo {
+  batch: number;
+  totalBatches: number;
+  /** The job's running cost, every batch paid so far included. */
+  costUsd: number;
+}
+
+export type GlossaryExtractionStatus = "done" | "failed" | "budget_exceeded" | "stopped";
+
+/** How a glossary preparation ended; entries/conflicts only when "done". */
+export interface GlossaryExtractionResult {
+  status: GlossaryExtractionStatus;
+  error: string | null;
+  entries: number | null;
+  conflicts: number | null;
+}
+
 export interface WizardState {
   screen: WizardScreen;
   filePath: string;
@@ -63,6 +91,18 @@ export interface WizardState {
   createError: string | null;
   estimate: EstimateResponse | null;
   estimateError: string | null;
+  /** Progress of the glossary preparation in flight. */
+  glossaryProgress: GlossaryProgressInfo | null;
+  /** The user asked to stop the glossary preparation in flight. */
+  stopRequested: boolean;
+  /** Why the last stop request failed (the pass goes on; the stop button is
+   * enabled again so the user can retry). */
+  stopError: string | null;
+  /** Why the estimate screen was returned to from a preparation that did not
+   * finish (stopped, failed, over budget, or could not start). */
+  preparationMessage: string | null;
+  /** What the finished preparation extracted, shown on the glossary screen. */
+  glossaryNotice: string | null;
   glossary: GlossaryEntry[];
   glossaryLocked: boolean;
   progress: ProgressInfo | null;
@@ -84,6 +124,11 @@ export const initialWizardState: WizardState = {
   createError: null,
   estimate: null,
   estimateError: null,
+  glossaryProgress: null,
+  stopRequested: false,
+  stopError: null,
+  preparationMessage: null,
+  glossaryNotice: null,
   glossary: [],
   glossaryLocked: false,
   progress: null,
@@ -190,6 +235,54 @@ export function formatProgress(progress: ProgressInfo): string {
   return `Fragmento ${progress.chunkIndex}/${progress.totalChunks} — $${progress.costUsd.toFixed(4)}`;
 }
 
+/** The estimate screen's glossary preparation line, shown apart from the
+ * translation estimate: it is a separate paid step the user must start. */
+export function formatGlossaryExtractionLine(estimate: GlossaryExtractionEstimate): string {
+  const calls = estimate.batches === 1 ? "1 llamada" : `${estimate.batches} llamadas`;
+  return (
+    `Preparación del glosario: $${estimate.usd.toFixed(2)} – ` +
+    `$${estimate.usd_high.toFixed(2)}, ${calls}`
+  );
+}
+
+export function formatGlossaryProgress(progress: GlossaryProgressInfo): string {
+  return `Lote ${progress.batch}/${progress.totalBatches} — $${progress.costUsd.toFixed(4)}`;
+}
+
+/** What a finished preparation extracted. Conflicts are terms whose batches
+ * proposed different renderings; only their count is shown for now. */
+export function formatGlossaryExtractionSummary(entries: number, conflicts: number): string {
+  const extracted = entries === 1 ? "1 término extraído" : `${entries} términos extraídos`;
+  if (conflicts <= 0) return extracted;
+  return `${extracted}, ${conflicts} con traducciones distintas a lo largo del libro`;
+}
+
+/** Why the estimate screen is shown again after a preparation that did not
+ * finish. *spentUsd* is the job's running cost from the last progress event
+ * (null when no batch reported one): batches already paid for stay paid. */
+export function formatGlossaryExtractionEnd(
+  status: Exclude<GlossaryExtractionStatus, "done">,
+  error: string | null,
+  spentUsd: number | null,
+): string {
+  let headline: string;
+  switch (status) {
+    case "stopped":
+      headline = "La preparación del glosario se detuvo.";
+      break;
+    case "budget_exceeded":
+      headline =
+        "La preparación del glosario se detuvo: el siguiente lote podía superar el presupuesto.";
+      break;
+    case "failed":
+      headline = `La preparación del glosario falló: ${error ?? "error desconocido"}`;
+      break;
+  }
+  const spent =
+    spentUsd === null ? "" : ` Costo acumulado del trabajo: $${spentUsd.toFixed(4)}.`;
+  return `${headline}${spent} Volver a prepararlo procesa el libro completo de nuevo.`;
+}
+
 /** True only while the job is actively RUNNING (used to decide whether SSE
  * polling fallback should keep going). */
 export function isRunningStatus(status: JobStatus): boolean {
@@ -252,6 +345,73 @@ export function parseSseData(raw: string): SseParsedEvent | null {
   return null;
 }
 
+export interface SseGlossaryProgressEvent {
+  type: "glossary_progress";
+  job_id: string;
+  batch: number;
+  total_batches: number;
+  cost_usd: number;
+}
+
+export interface SseGlossaryTerminalEvent {
+  type: "glossary_terminal";
+  status: GlossaryExtractionStatus;
+  error: string | null;
+  entries: number | null;
+  conflicts: number | null;
+  cost_usd: number | null;
+}
+
+/** What the event stream can carry while a glossary preparation is watched.
+ * A plain `terminal` arrives when the server knows of no extraction for the
+ * job (e.g. the sidecar restarted, or the job left CREATED). */
+export type SseGlossaryParsedEvent =
+  | SseGlossaryProgressEvent
+  | SseGlossaryTerminalEvent
+  | SseTerminalEvent;
+
+/** `parseSseData`'s counterpart for a glossary preparation stream. Never
+ * throws; translation progress and malformed payloads become `null`. */
+export function parseGlossarySseData(raw: string): SseGlossaryParsedEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const candidate = parsed as { type?: unknown };
+  if (
+    candidate.type === "glossary_progress" ||
+    candidate.type === "glossary_terminal" ||
+    candidate.type === "terminal"
+  ) {
+    return parsed as SseGlossaryParsedEvent;
+  }
+  return null;
+}
+
+/** How the watched preparation ended. A plain `terminal` means the stream
+ * has no extraction outcome to give, which the wizard treats as a failure. */
+export function glossaryResultFromEvent(
+  event: SseGlossaryTerminalEvent | SseTerminalEvent,
+): GlossaryExtractionResult {
+  if (event.type === "glossary_terminal") {
+    return {
+      status: event.status,
+      error: event.error,
+      entries: event.entries,
+      conflicts: event.conflicts,
+    };
+  }
+  return {
+    status: "failed",
+    error: `la preparación terminó sin resultado (estado del trabajo: ${event.status})`,
+    entries: null,
+    conflicts: null,
+  };
+}
+
 export function sseEventToAction(event: SseParsedEvent): WizardAction {
   if (event.type === "progress") {
     return {
@@ -277,6 +437,23 @@ export type WizardAction =
   | { type: "ESTIMATE_RECEIVED"; estimate: EstimateResponse }
   | { type: "ESTIMATE_FAILED"; message: string }
   | { type: "PROCEED_TO_GLOSSARY" }
+  /** The user clicked "prepare glossary" (dispatched before the POST, so the
+   * paid action cannot be clicked twice). */
+  | { type: "GLOSSARY_EXTRACTION_STARTED" }
+  | { type: "GLOSSARY_EXTRACTION_START_FAILED"; message: string }
+  | { type: "GLOSSARY_PROGRESS_RECEIVED"; progress: GlossaryProgressInfo }
+  | { type: "GLOSSARY_STOP_REQUESTED" }
+  /** The stop request itself failed (network error, or the server refused
+   * it); the pass may still be running. */
+  | { type: "GLOSSARY_STOP_FAILED"; message: string }
+  | {
+      type: "GLOSSARY_EXTRACTION_ENDED";
+      result: GlossaryExtractionResult;
+      /** The glossary fetched after a "done" preparation, when available. */
+      glossary?: GlossaryEntry[];
+      /** The estimate re-fetched after any other end, when available. */
+      estimate?: EstimateResponse;
+    }
   | { type: "GLOSSARY_LOADED"; entries: GlossaryEntry[] }
   | { type: "GLOSSARY_CHANGED"; entries: GlossaryEntry[] }
   | { type: "GLOSSARY_LOCKED" }
@@ -320,7 +497,80 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "PROCEED_TO_GLOSSARY":
       // Guard (spec: glossary strictly pre-run, always after an estimate).
       if (!state.estimate) return state;
+      // Guard: a preparation in flight ends only through its own terminal.
+      if (state.screen === "preparing") return state;
       return { ...state, screen: "glossary" };
+    case "GLOSSARY_EXTRACTION_STARTED":
+      // Guard: the paid pass starts only from the estimate screen, and only
+      // while that screen shows its cost line (null once extracted).
+      if (state.screen !== "estimate" || !state.estimate?.glossary_extraction) return state;
+      return {
+        ...state,
+        screen: "preparing",
+        glossaryProgress: null,
+        stopRequested: false,
+        stopError: null,
+        preparationMessage: null,
+      };
+    case "GLOSSARY_EXTRACTION_START_FAILED":
+      if (state.screen !== "preparing") return state;
+      return {
+        ...state,
+        screen: "estimate",
+        glossaryProgress: null,
+        stopRequested: false,
+        stopError: null,
+        preparationMessage: `No se pudo iniciar la preparación del glosario: ${action.message}`,
+      };
+    case "GLOSSARY_PROGRESS_RECEIVED":
+      if (state.screen !== "preparing") return state;
+      return { ...state, glossaryProgress: action.progress };
+    case "GLOSSARY_STOP_REQUESTED":
+      if (state.screen !== "preparing") return state;
+      return { ...state, stopRequested: true, stopError: null };
+    case "GLOSSARY_STOP_FAILED":
+      // Re-enable the stop button: otherwise it stays disabled while the
+      // paid pass keeps going.
+      if (state.screen !== "preparing") return state;
+      return {
+        ...state,
+        stopRequested: false,
+        stopError: `No se pudo detener la preparación: ${action.message}`,
+      };
+    case "GLOSSARY_EXTRACTION_ENDED": {
+      if (state.screen !== "preparing") return state;
+      const { result } = action;
+      const cleared = {
+        ...state,
+        glossaryProgress: null,
+        stopRequested: false,
+        stopError: null,
+      };
+      if (result.status === "done") {
+        return {
+          ...cleared,
+          screen: "glossary",
+          glossary: action.glossary ?? state.glossary,
+          glossaryNotice: formatGlossaryExtractionSummary(
+            result.entries ?? 0,
+            result.conflicts ?? 0,
+          ),
+          // The job's glossary is extracted now; the line must not be offered
+          // again even if this estimate is shown before a re-fetch.
+          estimate: state.estimate ? { ...state.estimate, glossary_extraction: null } : null,
+        };
+      }
+      return {
+        ...cleared,
+        screen: "estimate",
+        estimate: action.estimate ?? state.estimate,
+        preparationMessage: formatGlossaryExtractionEnd(
+          result.status,
+          result.error,
+          state.glossaryProgress?.costUsd ?? null,
+        ),
+      };
+    }
     case "GLOSSARY_LOADED":
       return { ...state, glossary: action.entries };
     case "GLOSSARY_CHANGED":
@@ -370,10 +620,10 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "RESET":
       return { ...initialWizardState };
     case "CONNECTION_LOST":
-      // Guard: only a run in flight can "lose connection" in the dead-end
-      // sense (RES-001) — no-op elsewhere so this can never clobber an
-      // unrelated screen.
-      if (state.screen !== "run") return state;
+      // Guard: only a run or a glossary preparation in flight can "lose
+      // connection" in the dead-end sense (RES-001) — no-op elsewhere so this
+      // can never clobber an unrelated screen.
+      if (state.screen !== "run" && state.screen !== "preparing") return state;
       return { ...state, screen: "error", connectionError: action.message };
     case "RECOVER_FROM_ERROR":
       // Guard: only meaningful from the error screen. This resets the pure

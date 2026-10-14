@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from borgesica.api import TranslatorEngine
 from borgesica.domain.models import (
     GlossaryEntry,
+    GlossaryExtractionOutcome,
     JobStatus,
     SourceType,
     TranslationUnit,
@@ -369,6 +370,26 @@ def _join(client: TestClient, job_id: str) -> None:
     client.app.state.runner._handles[job_id].thread.join(timeout=5)
 
 
+def _hold_extraction_before_its_first_batch(
+    monkeypatch: pytest.MonkeyPatch, engine: TranslatorEngine
+) -> tuple[threading.Event, threading.Event]:
+    """Make the background pass wait, before any batch call, until the
+    returned *proceed* event is set; *entered* is set once it is waiting."""
+    entered = threading.Event()
+    proceed = threading.Event()
+    original_extract = engine.extract_glossary
+
+    def _blocking_extract(job_id_arg, on_progress=None, should_stop=None):
+        entered.set()
+        proceed.wait(timeout=5)
+        return original_extract(
+            job_id_arg, on_progress=on_progress, should_stop=should_stop
+        )
+
+    monkeypatch.setattr(engine, "extract_glossary", _blocking_extract)
+    return entered, proceed
+
+
 def test_glossary_extract_returns_202_and_runs_the_pass_in_background(
     tmp_path: Path,
 ) -> None:
@@ -520,17 +541,7 @@ def test_sse_stream_subscribed_before_the_pass_starts_gets_its_events(
     engine, _ = _make_engine(provider=provider)
     client = _app_and_client(engine)
     job_id = _create_job(client, tmp_path)
-
-    entered = threading.Event()
-    proceed = threading.Event()
-    original_extract = engine.extract_glossary
-
-    def _blocking_extract(job_id_arg, on_progress=None):
-        entered.set()
-        proceed.wait(timeout=5)
-        return original_extract(job_id_arg, on_progress=on_progress)
-
-    monkeypatch.setattr(engine, "extract_glossary", _blocking_extract)
+    entered, proceed = _hold_extraction_before_its_first_batch(monkeypatch, engine)
 
     assert client.post(f"/jobs/{job_id}/glossary/extract").status_code == 202
     assert entered.wait(timeout=2)
@@ -637,3 +648,206 @@ def test_shutdown_during_an_extraction_does_not_cancel_the_job(tmp_path: Path) -
     job = checkpoint.load_job(job_id)
     assert job.status == JobStatus.CREATED
     assert job.glossary_extracted is True
+
+
+# ---------------------------------------------------------------------------
+# POST /jobs/{id}/glossary/extract/stop — a cooperative stop, never a cancel
+# ---------------------------------------------------------------------------
+
+
+def test_stop_during_an_extraction_stops_it_and_keeps_the_job_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A whole-book pass is dozens of sequential calls, so the user must be
+    # able to stop it. Marking the job CANCELLED would take it out of the
+    # wizard for good; the pass is stopped instead and the job stays CREATED.
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    entered, proceed = _hold_extraction_before_its_first_batch(monkeypatch, engine)
+    assert client.post(f"/jobs/{job_id}/glossary/extract").status_code == 202
+    assert entered.wait(timeout=2)
+
+    stop_resp = client.post(f"/jobs/{job_id}/glossary/extract/stop")
+
+    assert stop_resp.status_code == 202
+    assert stop_resp.json()["status"] == "CREATED"
+    with client.stream("GET", f"/jobs/{job_id}/events") as stream_resp:
+        proceed.set()
+        events = _read_events(stream_resp)
+    _join(client, job_id)
+
+    terminal = events[-1]
+    assert terminal["type"] == "glossary_terminal"
+    assert terminal["status"] == "stopped"
+    assert "stopped" in terminal["error"]
+    assert (terminal["entries"], terminal["conflicts"]) == (None, None)
+    assert provider.call_count == 0
+    job = checkpoint.load_job(job_id)
+    assert (job.status, job.glossary_extracted) == (JobStatus.CREATED, False)
+
+
+def test_a_stopped_extraction_can_be_started_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    entered, proceed = _hold_extraction_before_its_first_batch(monkeypatch, engine)
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    assert entered.wait(timeout=2)
+    client.post(f"/jobs/{job_id}/glossary/extract/stop")
+    proceed.set()
+    _join(client, job_id)
+
+    assert client.post(f"/jobs/{job_id}/glossary/extract").status_code == 202
+    _join(client, job_id)
+
+    assert checkpoint.load_job(job_id).glossary_extracted is True
+    assert provider.call_count == 1
+
+
+def test_a_stop_after_the_pass_released_its_slot_leaves_the_job_untouched(
+    tmp_path: Path,
+) -> None:
+    # The race the separate route closes: the user clicks stop just as the
+    # pass ends (its terminal is queued, the client has not read it yet).
+    # The stop must never fall back to cancelling the job, which would
+    # strand the glossary that was just paid for.
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    _join(client, job_id)
+
+    resp = client.post(f"/jobs/{job_id}/glossary/extract/stop")
+
+    assert resp.status_code == 409
+    assert "no active glossary extraction" in resp.json()["detail"]
+    job = checkpoint.load_job(job_id)
+    assert (job.status, job.glossary_extracted) == (JobStatus.CREATED, True)
+
+
+def test_a_stop_never_touches_a_translation_run(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    provider = _BlockingOnFirstCallProvider(started, release)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path, num_cues=2, chunk_size=1)
+    client.post(f"/jobs/{job_id}/run", json={"out_path": str(tmp_path / "out.srt")})
+    assert started.wait(timeout=2)
+
+    resp = client.post(f"/jobs/{job_id}/glossary/extract/stop")
+
+    assert resp.status_code == 409
+    release.set()
+    _join(client, job_id)
+    assert checkpoint.load_job(job_id).status == JobStatus.DONE
+
+
+def test_stop_unknown_job_404() -> None:
+    engine, _ = _make_engine()
+    client = _app_and_client(engine)
+
+    resp = client.post("/jobs/does-not-exist/glossary/extract/stop")
+
+    assert resp.status_code == 404
+    assert "Job not found" in resp.json()["detail"]
+
+
+def test_cancel_during_an_extraction_cancels_the_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Cancel keeps its one meaning: the job is cancelled. The pass, which
+    # re-checks the job before every call, then ends without spending more.
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    entered, proceed = _hold_extraction_before_its_first_batch(monkeypatch, engine)
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    assert entered.wait(timeout=2)
+
+    resp = client.post(f"/jobs/{job_id}/cancel")
+
+    assert resp.json()["status"] == "CANCELLED"
+    proceed.set()
+    _join(client, job_id)
+    assert provider.call_count == 0
+    assert checkpoint.load_job(job_id).status == JobStatus.CANCELLED
+    assert client.app.state.runner.finished_glossary_terminal(job_id)["status"] == "failed"
+
+
+def test_shutdown_during_an_extraction_stops_it_before_the_next_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sidecar is about to be killed: a batch started now would be paid
+    # for and lost, so the pass is asked to stop, never cancelled.
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine, shutdown_join_timeout=0.2)
+    job_id = _create_job(client, tmp_path)
+    entered, proceed = _hold_extraction_before_its_first_batch(monkeypatch, engine)
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    assert entered.wait(timeout=2)
+
+    assert client.post("/shutdown").json()["clean"] is False
+
+    proceed.set()
+    _join(client, job_id)
+    assert provider.call_count == 0
+    assert client.app.state.runner.finished_glossary_terminal(job_id)["status"] == "stopped"
+    assert checkpoint.load_job(job_id).status == JobStatus.CREATED
+
+
+class _RecordingEngine:
+    """Engine stand-in for the runner alone: a run that fails at once, an
+    extraction that succeeds at once, and a record of cancel_job calls."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    def run_job(self, job_id, out_path, on_progress=None):  # noqa: ARG002
+        raise RuntimeError("the run failed before touching the job")
+
+    def extract_glossary(self, job_id, on_progress=None, should_stop=None):  # noqa: ARG002
+        return GlossaryExtractionOutcome(batches=1, entries=0, conflicts=0, cost_usd=0.0)
+
+    def cancel_job(self, job_id) -> None:
+        self.cancelled.append(job_id)
+
+
+def test_shutdown_never_acts_on_the_previous_execution_of_a_job_being_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The slot and the new execution's handle are registered together: a
+    # shutdown can never see the slot claimed for a job while the handle
+    # stored for it is still the job's previous execution. Here the previous
+    # execution was a run and the new one an extraction, so reading the stale
+    # handle would cancel_job the CREATED job and take it out of the wizard.
+    from borgesica.serve import runner as runner_module
+
+    engine = _RecordingEngine()
+    runner = runner_module.JobRunner(engine)
+    runner.start("job-1", "out.srt")
+    runner._handles["job-1"].thread.join(timeout=5)
+    real_thread = threading.Thread
+
+    class _ShutdownWhileBuilt(real_thread):
+        """Lands a shutdown while the new execution is being set up."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            runner.shutdown(join_timeout=0)
+            super().__init__(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner_module.threading, "Thread", _ShutdownWhileBuilt)
+        runner.start_glossary_extraction("job-1")
+    runner._handles["job-1"].thread.join(timeout=5)
+
+    assert engine.cancelled == []
+    assert runner.finished_glossary_terminal("job-1")["status"] == "done"

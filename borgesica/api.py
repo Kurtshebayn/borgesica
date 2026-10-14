@@ -21,6 +21,7 @@ from borgesica.domain.context import ContextManager
 from borgesica.domain.cost import CostEstimator, usage_cost
 from borgesica.domain.errors import (
     BudgetExceeded,
+    ExtractionStopped,
     GlossaryEntryRejectedError,
     JobNotFoundError,
     JobStateError,
@@ -278,6 +279,7 @@ class TranslatorEngine:
         self,
         job_id: str,
         on_progress: Callable[[int, int, float], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> GlossaryExtractionOutcome:
         """Extract the glossary from every stored chunk before translation.
 
@@ -315,10 +317,19 @@ class TranslatorEngine:
         kept: the glossary, the proposals and the flag are written only at the
         end, so a retry starts over and pays for every batch again.
 
+        Stopping: ``should_stop`` is asked before each batch call (never
+        during one). When it answers True the pass raises
+        ``ExtractionStopped`` with the same outcome as a failed batch — spend
+        kept, nothing extracted written, job still CREATED — so it can be
+        started again. A stop asked for during the last call changes nothing:
+        every batch is then paid for and the result is written.
+
         Args:
             job_id:      ID of a CREATED job whose glossary was not extracted.
             on_progress: Optional callback ``(done, total, cost_usd)`` after
                          each batch.
+            should_stop: Optional predicate; True before a batch call stops
+                         the pass there.
 
         Returns:
             GlossaryExtractionOutcome for this pass.
@@ -332,6 +343,8 @@ class TranslatorEngine:
                               is recorded on the job as it now stands and no
                               glossary is written.
             BudgetExceeded:   if the next batch could exceed ``budget_usd``.
+            ExtractionStopped: if ``should_stop`` asked for a stop before a
+                              batch call.
             MalformedOutput / ProviderError: if a batch call fails.
         """
         job = self._load_job_or_raise(job_id)
@@ -392,6 +405,10 @@ class TranslatorEngine:
         spent = 0.0
         per_batch: list[list[GlossaryEntry]] = []
         for done, indices in enumerate(batches, start=1):
+            if should_stop is not None and should_stop():
+                raise ExtractionStopped(
+                    job_id=job_id, batches_done=done - 1, total_batches=len(batches)
+                )
             # No call is made for a job the pass no longer owns.
             job = still_created()
             batch_chunks = [chunks[i] for i in indices]

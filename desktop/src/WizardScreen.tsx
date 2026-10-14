@@ -2,18 +2,26 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import {
   cancelJob,
   createJob,
+  extractGlossary,
   getEstimate,
   getGlossary,
   getStatus,
   putGlossary,
   resumeJob,
   runJob,
+  stopGlossaryExtraction,
 } from "./apiClient";
-import { subscribeToJobEvents, type SseSubscription } from "./sseClient";
+import {
+  subscribeToGlossaryExtraction,
+  subscribeToJobEvents,
+  type SseSubscription,
+} from "./sseClient";
 import {
   defaultModelForProvider,
   formatBestEffortSummary,
   formatFailureSummary,
+  formatGlossaryExtractionLine,
+  formatGlossaryProgress,
   formatProgress,
   initialWizardState,
   runRecoveryAction,
@@ -33,8 +41,10 @@ const JOB_STATUS_LABELS: Record<JobStatus, string> = {
 };
 
 /**
- * The T7b translation wizard: pick -> estimate -> glossary -> run -> done,
- * plus a resume path for an interrupted job (spec: desktop-shell). Screen
+ * The T7b translation wizard: pick -> estimate -> [preparing] -> glossary ->
+ * run -> done, plus a resume path for an interrupted job (spec:
+ * desktop-shell). "preparing" is the optional, paid glossary extraction
+ * pass, started only by the user's click on the estimate screen. Screen
  * transitions and guards live in the pure `wizardReducer`; this component
  * is the untested glue wiring it to the sidecar's REST/SSE API.
  *
@@ -97,6 +107,38 @@ export default function WizardScreen({
       dispatch({ type: "GLOSSARY_LOADED", entries: glossary.entries });
     } catch {
       // Best-effort load; an empty glossary is a valid pre-run state.
+    }
+  }
+
+  /** The paid pass: only ever reached from the "prepare glossary" button,
+   * which is shown only next to its cost line. The reducer leaves the
+   * estimate screen first, so the button cannot be clicked twice. */
+  async function handlePrepareGlossary() {
+    if (!state.jobId) return;
+    const jobId = state.jobId;
+    dispatch({ type: "GLOSSARY_EXTRACTION_STARTED" });
+    try {
+      await extractGlossary(baseUrl, token, jobId);
+    } catch (err) {
+      dispatch({ type: "GLOSSARY_EXTRACTION_START_FAILED", message: String(err) });
+      return;
+    }
+    subscriptionRef.current?.close();
+    subscriptionRef.current = subscribeToGlossaryExtraction(baseUrl, token, jobId, dispatch);
+  }
+
+  async function handleStopPreparation() {
+    if (!state.jobId) return;
+    dispatch({ type: "GLOSSARY_STOP_REQUESTED" });
+    try {
+      // The stop route never cancels the job (unlike /cancel): the pass stops
+      // before its next batch, the job stays CREATED, and the stream reports
+      // the end.
+      await stopGlossaryExtraction(baseUrl, token, state.jobId);
+    } catch (err) {
+      // The pass may still be running (or just ended — the stream then
+      // reports it): re-enable the button instead of leaving it disabled.
+      dispatch({ type: "GLOSSARY_STOP_FAILED", message: String(err) });
     }
   }
 
@@ -236,22 +278,47 @@ export default function WizardScreen({
       {state.screen === "estimate" && state.estimate && (
         <div>
           <h2>2. Estimación</h2>
+          {state.preparationMessage && <p role="alert">{state.preparationMessage}</p>}
           <p>
-            Costo estimado: ${state.estimate.usd_low.toFixed(2)} – $
+            Costo estimado de la traducción: ${state.estimate.usd_low.toFixed(2)} – $
             {state.estimate.usd_high.toFixed(2)}
           </p>
           {!state.estimate.within_budget && (
             <p role="alert">Esta estimación supera el presupuesto configurado.</p>
           )}
-          <button onClick={() => void handleProceedToGlossary()}>
-            Continuar al glosario
+          {state.estimate.glossary_extraction ? (
+            <div>
+              <p>{formatGlossaryExtractionLine(state.estimate.glossary_extraction)}</p>
+              <button onClick={() => void handlePrepareGlossary()}>Preparar glosario</button>
+              <button onClick={() => void handleProceedToGlossary()}>Omitir</button>
+            </div>
+          ) : (
+            <button onClick={() => void handleProceedToGlossary()}>
+              Continuar al glosario
+            </button>
+          )}
+        </div>
+      )}
+
+      {state.screen === "preparing" && (
+        <div>
+          <h2>Preparando el glosario</h2>
+          <p>
+            {state.glossaryProgress
+              ? formatGlossaryProgress(state.glossaryProgress)
+              : "Iniciando…"}
+          </p>
+          <button onClick={() => void handleStopPreparation()} disabled={state.stopRequested}>
+            {state.stopRequested ? "Deteniendo… (se aplica entre lotes)" : "Detener"}
           </button>
+          {state.stopError && <p role="alert">{state.stopError}</p>}
         </div>
       )}
 
       {state.screen === "glossary" && (
         <div>
           <h2>3. Glosario (se bloquea antes de traducir)</h2>
+          {state.glossaryNotice && <p>{state.glossaryNotice}</p>}
           <ul>
             {state.glossary.map((entry, index) => (
               <li key={entry.term}>
