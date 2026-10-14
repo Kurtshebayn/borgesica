@@ -94,12 +94,23 @@ term itself when it must not be translated>", "locked": false, \
 
 Rules:
 - Include ONLY terms a translator needs to handle consistently.
-- KEEP INVENTED LANGUAGE VERBATIM: when a term belongs to a fictional or \
-in-world language, or is a proper noun with no established Spanish form, its \
-rendering IS the term itself — copy it into "translation" character for \
-character. Its literal meaning is EXPLANATION: put that in "note", NEVER in \
-"translation". A glossed entry instructs the translator to REPLACE the word \
-everywhere it appears.
+- KEEP INVENTED LANGUAGE VERBATIM: when a term is a word of a fictional or \
+in-world language, or the name of a person or place, its rendering IS the \
+term itself — copy it into "translation" character for character. Its \
+literal meaning is EXPLANATION: put that in "note", NEVER in "translation". \
+A glossed entry instructs the translator to REPLACE the word everywhere it \
+appears.
+- TRANSLATE ENGLISH WORDS, EVEN CAPITALISED: a term made of ordinary English \
+words is NOT invented language, even when the book capitalises it and gives \
+it a special in-world sense (an institution, a rank, a group, a power, a \
+concept). Give its Spanish rendering and keep the capitalisation, e.g. \
+"the Wardens" -> "los Guardianes", "Gift" -> "Don", "Weave" -> "Trama". \
+Capitalisation alone never makes an English word foreign.
+- ADAPT DEMONYMS IN LOWERCASE: a word naming the people, language or things \
+of an invented place (a demonym or place adjective) is adapted to Spanish \
+and written in LOWERCASE, as Spanish writes demonyms, e.g. "Ardanian" -> \
+"ardaniano", "the Velorans" -> "los veloranos". The place name itself stays \
+verbatim.
 - Do NOT include common English or Spanish vocabulary.
 - If no notable terms are found, return an empty glossary_additions list.
 - The top-level "translation" field (outside glossary_additions) must be \
