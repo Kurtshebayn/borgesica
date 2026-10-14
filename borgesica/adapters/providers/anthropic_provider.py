@@ -67,6 +67,9 @@ MAX_RETRIES = 3
 # corrupting the tool_use input and causing a deterministic MalformedOutput
 # across every retry). 8192 gives enough headroom for translation output that
 # can run longer than the source text plus the summary/glossary fields.
+# A response that still hits the cap is rejected outright (stop_reason
+# 'max_tokens' → malformed, see translate): the corruption is not always
+# visible in the tool input.
 _MAX_OUTPUT_TOKENS = 8192
 
 # APPROXIMATE prices — (input_usd_per_mtok, output_usd_per_mtok). NOT verified.
@@ -202,12 +205,23 @@ class AnthropicProvider:
                 )
                 # HTTP 200: this response WAS billed regardless of parse outcome.
                 usage = self._extract_usage(response)
-                unit = self._parse_response(response)
+                # A max_tokens stop is a TRUNCATED response, whatever its
+                # tool input looks like: the API hands back what it could
+                # parse, and a cut-off glossary_additions list — the unit's
+                # last field — can still validate. Treat it as malformed, the
+                # way a truncated JSON body already fails to parse in the
+                # OpenAI-compatible adapter, never as a complete answer.
+                truncated = getattr(response, "stop_reason", None) == "max_tokens"
+                unit = None if truncated else self._parse_response(response)
                 if unit is not None:
                     return TranslationResult(unit=unit, usage=_sum_usage(wasted, usage))
                 # Malformed but billed — accrue its usage and retry.
                 wasted = _sum_usage(wasted, usage)
-                last_error = ValueError("No valid TranslationUnit in response")
+                last_error = ValueError(
+                    "Response truncated at max_tokens"
+                    if truncated
+                    else "No valid TranslationUnit in response"
+                )
 
             except anthropic.RateLimitError as exc:
                 retry_after = _get_retry_after(exc)

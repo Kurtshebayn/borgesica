@@ -49,6 +49,7 @@ __all__ = [
     "NullGlossaryExtractor",
     "apply_additions",
     "character_gender_evidence",
+    "count_proposal_conflicts",
     "dedupe_glossary",
     "drop_reversed_entries",
     "extraction_prompts",
@@ -66,6 +67,14 @@ __all__ = [
 # Glossary-extraction system prompt
 # ---------------------------------------------------------------------------
 
+# What the extractor must put in the unit's top-level "translation" field.
+# Extraction translates nothing, but the provider contract is TranslationUnit,
+# which rejects an empty translation when there is no translations array
+# (models.py): the prompt used to ask for "" and so made every obedient
+# response fail validation, burning each adapter's retries. A fixed non-empty
+# placeholder satisfies the contract; the extractor never reads the field.
+_EXTRACTION_PLACEHOLDER = "-"
+
 _EXTRACTION_SYSTEM_PROMPT = """\
 You are a literary terminology extractor. Given a passage of English text, \
 identify proper nouns, invented terms, character names, place names, and \
@@ -74,7 +83,7 @@ across a long document.
 
 Return your response as a JSON object with EXACTLY the following fields:
   {
-    "translation": "",
+    "translation": \"""" + _EXTRACTION_PLACEHOLDER + """\",
     "summary_update": "Terminology extraction complete.",
     "glossary_additions": [
       {"term": "<source term>", "translation": "<Spanish rendering, or the \
@@ -93,7 +102,8 @@ character. Its literal meaning is EXPLANATION: put that in "note", NEVER in \
 everywhere it appears.
 - Do NOT include common English or Spanish vocabulary.
 - If no notable terms are found, return an empty glossary_additions list.
-- The "translation" field must be an empty string for this extraction task."""
+- The top-level "translation" field (outside glossary_additions) must be \
+exactly \"""" + _EXTRACTION_PLACEHOLDER + """\": this task translates nothing."""
 
 # Prepended to the source text to form the user message of every extraction
 # call. One constant so the batched pass and the cost estimate price the same
@@ -664,17 +674,20 @@ def settlement_counts(
 # Whole-book extraction pass — batch planning and reconciliation
 # ---------------------------------------------------------------------------
 
-EXTRACTION_BATCH_TOKENS = 8000
+EXTRACTION_BATCH_TOKENS = 6000
 """Source tokens one extraction call may carry.
 
 Bounded by OUTPUT, not input: the adapters cap a call at 8192 output tokens,
 and every extracted term costs output. On job 9be143da ("The Strength of the
-Few", 569 prose chunks of ~800 tokens) the worst 10-chunk batch (~8000 tokens)
-carries 167 attested glossary terms, which at the measured mean of 38.8 tokens
-per extracted entry is ~6.5k output tokens — under the cap. 20-chunk batches
-reach ~7.8k, leaving no headroom. A single chunk carried up to 59 terms, so
-the cap is NOT guaranteed on a denser book; this is a measured margin, not a
-proof.
+Few", 569 prose chunks of ~800 tokens) the densest 10-chunk batch (chunks
+550-559, an end-of-book list of names) emitted 6044 output tokens from 6063
+input tokens — a ratio of 0.997, so an 8000-token batch of that density would
+reach the cap and be truncated. At 6000 tokens the worst measured density
+(~1 output token per input token) projects ~6k output, ~26% headroom under
+8192. Typical batches are far lighter (mean ratio 0.326). This is a measured
+margin, not a proof: a denser book can still exceed it, which is why a
+truncated extraction response must fail loudly rather than return a partial
+list.
 """
 
 
@@ -746,6 +759,12 @@ def merge_extraction_batches(
       - ``first_draw`` stays None: these are not quorum draws, and
         ``settlement_counts`` must not count them as quorum's work.
 
+    Blank renderings are not votes: an entry "term -> ''" would order the
+    translator to delete the word, so a blank never wins a plurality, is not
+    recorded as a proposal, and does not use up its batch's vote (a later
+    non-blank occurrence in the same batch still votes). A term with no
+    non-blank rendering in any batch is dropped.
+
     Entries come out in order of first appearance; nothing should depend on
     it, since the store returns glossaries sorted by term. Blank terms are
     dropped. Reversed entries are NOT resolved here: that needs the source
@@ -765,10 +784,11 @@ def merge_extraction_batches(
             key = term.casefold()
             if addition.note and key not in notes:
                 notes[key] = addition.note
-            if key in voted:
+            rendering = normalize_term(addition.translation)
+            if not rendering or key in voted:
                 continue
             voted.add(key)
-            proposals.setdefault(key, []).append(normalize_term(addition.translation))
+            proposals.setdefault(key, []).append(rendering)
             spellings.setdefault(key, term)
 
     entries = [
@@ -782,6 +802,20 @@ def merge_extraction_batches(
     ]
     merged, _duplicates = dedupe_glossary(Glossary(entries=entries))
     return merged, {key: tuple(renderings) for key, renderings in proposals.items()}
+
+
+def count_proposal_conflicts(proposals: dict[str, tuple[str, ...]]) -> int:
+    """Count the terms whose batches proposed more than one distinct rendering.
+
+    Renderings are compared the way ``_plurality`` groups them
+    (``_rendering_key``: normalised, casefolded), so a case or spacing variant
+    is the same rendering and not a disagreement worth a reviewer's time.
+    """
+    return sum(
+        1
+        for renderings in proposals.values()
+        if len({_rendering_key(rendering) for rendering in renderings}) > 1
+    )
 
 
 # ---------------------------------------------------------------------------

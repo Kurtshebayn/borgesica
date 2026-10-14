@@ -132,6 +132,7 @@ class InMemoryCheckpointStore:
         self._chunks: dict[str, dict[int, Chunk]] = {}
         self._glossaries: dict[str, Glossary] = {}
         self._votes: dict[str, GlossaryVotes] = {}
+        self._proposals: dict[str, dict[str, tuple[str, ...]]] = {}
         self._summaries: dict[str, dict[int, RollingSummary]] = {}
 
     # --- CheckpointStore Protocol methods ---
@@ -163,6 +164,14 @@ class InMemoryCheckpointStore:
 
     def load_votes(self, job_id: str) -> GlossaryVotes:
         return self._votes.get(job_id, GlossaryVotes())
+
+    def save_glossary_proposals(
+        self, job_id: str, proposals: dict[str, tuple[str, ...]]
+    ) -> None:
+        self._proposals[job_id] = dict(proposals)
+
+    def load_glossary_proposals(self, job_id: str) -> dict[str, tuple[str, ...]]:
+        return dict(self._proposals.get(job_id, {}))
 
     def save_summary(self, job_id: str, s: RollingSummary) -> None:
         if job_id not in self._summaries:

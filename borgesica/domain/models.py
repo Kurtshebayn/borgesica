@@ -519,6 +519,23 @@ class GlossaryExtractionEstimate(BaseModel):
     usd_high: float
 
 
+class GlossaryExtractionOutcome(BaseModel):
+    """What one run of the whole-book glossary extraction pass did.
+
+    ``entries`` counts the terms the pass extracted (after merging batches and
+    the hygiene rules), not the size of the stored glossary: entries already
+    there win over the pass, so the two differ. ``conflicts`` counts the terms
+    whose batches proposed more than one distinct rendering — the ones a
+    reviewer should look at first. ``cost_usd`` is what THIS pass spent; the
+    job's running ``cost_usd`` includes it.
+    """
+
+    batches: int
+    entries: int
+    conflicts: int
+    cost_usd: float
+
+
 class CostEstimate(BaseModel):
     input_tokens: int
     output_tokens: int
@@ -609,6 +626,11 @@ class Job(BaseModel):
     cost_usd: float = 0.0
     created_at: datetime
     updated_at: datetime
+    # True once the whole-book glossary extraction pass has completed for this
+    # job. The pass is an explicit paid action, and a second run would bill the
+    # whole book again, so the flag is what refuses it — and what removes the
+    # extraction line from the estimate once there is nothing left to spend.
+    glossary_extracted: bool = False
 
 
 class Progress(BaseModel):

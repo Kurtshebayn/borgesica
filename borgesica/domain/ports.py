@@ -154,6 +154,23 @@ class CheckpointStore(Protocol):
     def load_votes(self, job_id: str) -> GlossaryVotes:
         ...
 
+    def save_glossary_proposals(
+        self, job_id: str, proposals: dict[str, tuple[str, ...]]
+    ) -> None:
+        """Replace the per-term renderings the extraction pass proposed.
+
+        Keyed by casefolded term, each tuple in batch order — the order is the
+        evidence of which passage proposed what. Separate from save_glossary:
+        the glossary keeps one rendering per term, and these are every
+        rendering any batch proposed, kept so disagreement can be reviewed
+        instead of silently resolved. Full overwrite, like save_glossary.
+        """
+        ...
+
+    def load_glossary_proposals(self, job_id: str) -> dict[str, tuple[str, ...]]:
+        """Return the stored proposals, per-term order preserved; {} if none."""
+        ...
+
     def save_summary(self, job_id: str, s: RollingSummary) -> None:
         ...
 

@@ -1,0 +1,436 @@
+"""Tests for the explicit pre-translation glossary pass on TranslatorEngine.
+
+Covers ``estimate_glossary_extraction`` and ``extract_glossary``: the pass
+runs only when asked (``create_job`` spends nothing), over every stored chunk
+in batches, accrues each batch's real cost as it happens, stops before a call
+that could break the budget, keeps human decisions already in the glossary,
+persists every proposed rendering, and refuses to run (and bill) twice.
+
+No network: a scripted provider returns one list of glossary additions per
+call, with usage the test controls.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
+import pytest
+
+from borgesica.api import TranslatorEngine
+from borgesica.domain.errors import BudgetExceeded, JobStateError, MalformedOutput
+from borgesica.domain.glossary import LlmGlossaryExtractor
+from borgesica.domain.models import (
+    Chunk,
+    ChunkStatus,
+    Glossary,
+    GlossaryEntry,
+    GlossaryExtractionEstimate,
+    GlossaryExtractionOutcome,
+    Job,
+    JobConfig,
+    JobStatus,
+    SourceType,
+    TranslationResult,
+    TranslationUnit,
+    Usage,
+)
+from tests.fakes import InMemoryCheckpointStore
+
+# Price of the scripted provider: $1/Mtok in, $5/Mtok out, cache hits $0.10.
+IN_PRICE, OUT_PRICE, CACHE_PRICE = 1.0, 5.0, 0.1
+CALL_USAGE = Usage(input_tokens=1_000_000, output_tokens=200_000, cached_input_tokens=0)
+# 1M input at $1 + 0.2M output at $5.
+CALL_COST = 2.0
+
+
+def entry(term: str, translation: str, **kwargs) -> GlossaryEntry:
+    return GlossaryEntry(term=term, translation=translation, **kwargs)
+
+
+@dataclass
+class ScriptedProvider:
+    """One scripted list of glossary additions per call, in call order.
+
+    ``fail_on`` maps a call index to the exception that call raises instead.
+    Token counting is one token per whitespace-separated word.
+    """
+
+    additions_per_call: list[list[GlossaryEntry]] = field(default_factory=list)
+    usage: Usage = field(default_factory=lambda: CALL_USAGE)
+    fail_on: dict[int, Exception] = field(default_factory=dict)
+    call_log: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def translate(
+        self, system: str, user: str, model: str, segment_count: int | None = None
+    ) -> TranslationResult:
+        index = len(self.call_log)
+        self.call_log.append((system, user, model))
+        if index in self.fail_on:
+            raise self.fail_on[index]
+        unit = TranslationUnit(
+            translation="",
+            translations=[],
+            summary_update="Terminology extraction complete.",
+            glossary_additions=self.additions_per_call[index],
+        )
+        return TranslationResult(unit=unit, usage=self.usage)
+
+    def count_tokens(self, text: str, model: str) -> int:  # noqa: ARG002
+        return len(text.split())
+
+    def price(self, model: str) -> tuple[float, float]:  # noqa: ARG002
+        return (IN_PRICE, OUT_PRICE)
+
+    def cache_price(self, model: str) -> float:  # noqa: ARG002
+        return CACHE_PRICE
+
+
+def words(n: int, tag: str = "w") -> str:
+    return " ".join([tag] * n)
+
+
+def setup_job(
+    store: InMemoryCheckpointStore,
+    texts: list[str],
+    *,
+    budget_usd: float | None = None,
+    status: JobStatus = JobStatus.CREATED,
+    glossary: Glossary | None = None,
+    cost_usd: float = 0.0,
+    glossary_extracted: bool = False,
+) -> Job:
+    now = datetime.now(UTC)
+    job = Job(
+        id="job-1",
+        config=JobConfig(
+            source_type=SourceType.EPUB, model="fake-model", budget_usd=budget_usd
+        ),
+        source_path="/tmp/book.epub",
+        status=status,
+        total_chunks=len(texts),
+        cost_usd=cost_usd,
+        created_at=now,
+        updated_at=now,
+        glossary_extracted=glossary_extracted,
+    )
+    store.save_job(job)
+    # Saved in reverse to prove the pass orders by index, not by insertion.
+    for index in reversed(range(len(texts))):
+        store.save_chunk(
+            job.id,
+            Chunk(index=index, source_text=texts[index], status=ChunkStatus.PENDING),
+        )
+    store.save_glossary(job.id, glossary or Glossary())
+    return job
+
+
+def make_engine(
+    provider: ScriptedProvider, store: InMemoryCheckpointStore, **kwargs
+) -> TranslatorEngine:
+    return TranslatorEngine(
+        provider=provider, checkpoint=store, readers={}, writers={}, **kwargs
+    )
+
+
+# Three chunks of 3000 words: the first two fill one 6000-token batch, the
+# third opens a second one.
+THREE_CHUNKS = [words(3000, "a"), words(3000, "b"), words(3000, "c")]
+
+
+# ---------------------------------------------------------------------------
+# estimate_glossary_extraction
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_is_the_domain_estimate_over_every_stored_chunk() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider()
+    job = setup_job(store, THREE_CHUNKS)
+    engine = make_engine(provider, store)
+
+    estimate = engine.estimate_glossary_extraction(job.id)
+
+    assert isinstance(estimate, GlossaryExtractionEstimate)
+    assert estimate == engine._cost_est.estimate_glossary_extraction(
+        sorted(store.load_chunks(job.id), key=lambda c: c.index), job.config
+    )
+    assert estimate.batches == 2
+    assert provider.call_log == []
+
+
+def test_estimate_is_none_once_the_glossary_was_extracted() -> None:
+    store = InMemoryCheckpointStore()
+    job = setup_job(store, THREE_CHUNKS, glossary_extracted=True)
+
+    assert make_engine(ScriptedProvider(), store).estimate_glossary_extraction(job.id) is None
+
+
+# ---------------------------------------------------------------------------
+# extract_glossary — the happy path
+# ---------------------------------------------------------------------------
+
+
+def test_extract_calls_one_batch_at_a_time_in_index_order() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[], []])
+    job = setup_job(store, THREE_CHUNKS)
+
+    make_engine(provider, store).extract_glossary(job.id)
+
+    users = [user for _system, user, _model in provider.call_log]
+    assert len(users) == 2
+    assert users[0].endswith(THREE_CHUNKS[0] + "\n\n" + THREE_CHUNKS[1])
+    assert users[1].endswith(THREE_CHUNKS[2])
+
+
+def test_extract_persists_the_glossary_proposals_flag_and_cost() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider(
+        [
+            [entry("Birthright", "Primogenitura"), entry("Vis", "Vis")],
+            [entry("Birthright", "Derecho de nacimiento")],
+        ]
+    )
+    job = setup_job(store, THREE_CHUNKS, cost_usd=0.5)
+
+    outcome = make_engine(provider, store).extract_glossary(job.id)
+
+    saved = {e.term: e for e in store.load_glossary(job.id).entries}
+    assert saved["Birthright"].translation == "Primogenitura"
+    assert saved["Vis"].translation == "Vis"
+    # Not quorum draws: settlement counts must never see them.
+    assert all(e.first_draw is None for e in saved.values())
+    assert store.load_glossary_proposals(job.id) == {
+        "birthright": ("Primogenitura", "Derecho de nacimiento"),
+        "vis": ("Vis",),
+    }
+    final = store.load_job(job.id)
+    assert final.glossary_extracted is True
+    assert final.status == JobStatus.CREATED
+    assert final.cost_usd == pytest.approx(0.5 + 2 * CALL_COST)
+    assert isinstance(outcome, GlossaryExtractionOutcome)
+    assert (outcome.batches, outcome.entries, outcome.conflicts) == (2, 2, 1)
+    # What THIS pass spent, not the job's running total.
+    assert outcome.cost_usd == pytest.approx(2 * CALL_COST)
+
+
+def test_extract_prices_cached_input_at_the_cache_rate() -> None:
+    store = InMemoryCheckpointStore()
+    usage = Usage(input_tokens=1_000_000, output_tokens=0, cached_input_tokens=400_000)
+    provider = ScriptedProvider([[]], usage=usage)
+    job = setup_job(store, [words(10)])
+
+    outcome = make_engine(provider, store).extract_glossary(job.id)
+
+    assert outcome.cost_usd == pytest.approx(0.6 * IN_PRICE + 0.4 * CACHE_PRICE)
+
+
+def test_conflicts_compare_renderings_as_the_plurality_groups_them() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider(
+        [
+            [entry("Will cage", "Jaula de Voluntad"), entry("Vis", "Vis")],
+            [entry("Will cage", "jaula de  voluntad"), entry("Vis", "Visto")],
+        ]
+    )
+    job = setup_job(store, THREE_CHUNKS)
+
+    outcome = make_engine(provider, store).extract_glossary(job.id)
+
+    # Case and spacing are the same rendering; only "Vis" really disagrees.
+    assert outcome.conflicts == 1
+
+
+def test_extract_reports_progress_after_each_batch_with_cost_persisted() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[], []])
+    job = setup_job(store, THREE_CHUNKS)
+    seen: list[tuple[int, int, float, float]] = []
+
+    def on_progress(done: int, total: int, cost: float) -> None:
+        seen.append((done, total, cost, store.load_job(job.id).cost_usd))
+
+    make_engine(provider, store).extract_glossary(job.id, on_progress=on_progress)
+
+    assert seen == [
+        (1, 2, pytest.approx(CALL_COST), pytest.approx(CALL_COST)),
+        (2, 2, pytest.approx(2 * CALL_COST), pytest.approx(2 * CALL_COST)),
+    ]
+
+
+def test_existing_entries_win_over_extraction_output() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider(
+        [[entry("Vis", "Visto"), entry("Will", "Albedrío"), entry("Caeror", "Caeror")], []]
+    )
+    existing = Glossary(
+        entries=[
+            entry("Vis", "Vis", locked=True),
+            entry("Will", "Voluntad"),  # hand-edited, unlocked
+        ]
+    )
+    job = setup_job(store, THREE_CHUNKS, glossary=existing)
+
+    make_engine(provider, store).extract_glossary(job.id)
+
+    saved = {e.term: e for e in store.load_glossary(job.id).entries}
+    assert saved["Vis"].translation == "Vis"
+    assert saved["Vis"].locked is True
+    assert saved["Will"].translation == "Voluntad"
+    assert saved["Caeror"].translation == "Caeror"
+
+
+def test_extract_resolves_reversed_pairs_against_the_source() -> None:
+    store = InMemoryCheckpointStore()
+    # The English side is what the source says: "Will" appears, "Voluntad"
+    # does not, so the reversed entry is the one to drop.
+    texts = ["The Will binds them. " + words(10)]
+    provider = ScriptedProvider([[entry("Voluntad", "Will"), entry("Will", "Voluntad")]])
+    job = setup_job(store, texts)
+
+    make_engine(provider, store).extract_glossary(job.id)
+
+    saved = [(e.term, e.translation) for e in store.load_glossary(job.id).entries]
+    assert saved == [("Will", "Voluntad")]
+
+
+def test_extract_uses_an_injected_batch_extractor() -> None:
+    store = InMemoryCheckpointStore()
+    engine_provider = ScriptedProvider()
+    extractor_provider = ScriptedProvider([[entry("Vis", "Vis")]])
+    job = setup_job(store, [words(10)])
+
+    make_engine(
+        engine_provider,
+        store,
+        batch_extractor=LlmGlossaryExtractor(extractor_provider),
+    ).extract_glossary(job.id)
+
+    assert len(extractor_provider.call_log) == 1
+    assert engine_provider.call_log == []
+
+
+def test_create_job_still_makes_no_provider_call(tmp_path) -> None:
+    # The pass is an explicit paid action: an engine that can run it must
+    # still create jobs without spending anything.
+    from borgesica.adapters.readers.srt_reader import SrtReader
+
+    srt = tmp_path / "test.srt"
+    srt.write_text(
+        "1\n00:00:00,000 --> 00:00:01,500\nThe Hierarchy rules.\n", encoding="utf-8"
+    )
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider()
+    engine = TranslatorEngine(
+        provider=provider,
+        checkpoint=store,
+        readers={SourceType.SRT: SrtReader()},
+        writers={},
+    )
+
+    job = engine.create_job(
+        str(srt), JobConfig(source_type=SourceType.SRT, model="fake-model")
+    )
+
+    assert provider.call_log == []
+    assert job.glossary_extracted is False
+
+
+# ---------------------------------------------------------------------------
+# extract_glossary — refusals and failures
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status", [JobStatus.RUNNING, JobStatus.PAUSED, JobStatus.DONE, JobStatus.CANCELLED]
+)
+def test_extract_refuses_a_job_that_is_not_created(status: JobStatus) -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[]])
+    job = setup_job(store, [words(10)], status=status)
+
+    with pytest.raises(JobStateError):
+        make_engine(provider, store).extract_glossary(job.id)
+
+    assert provider.call_log == []
+
+
+def test_extract_refuses_to_run_twice() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[entry("Vis", "Vis")], [entry("Vis", "Visto")]])
+    job = setup_job(store, [words(10)])
+    engine = make_engine(provider, store)
+    engine.extract_glossary(job.id)
+
+    with pytest.raises(JobStateError, match="already extracted"):
+        engine.extract_glossary(job.id)
+
+    assert len(provider.call_log) == 1
+    assert store.load_job(job.id).cost_usd == pytest.approx(CALL_COST)
+
+
+def test_budget_guard_stops_before_a_call_that_could_break_the_budget() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[entry("Vis", "Vis")], []])
+    # Each batch's ceiling is a few cents, so the first call is allowed; it
+    # really costs $2, which leaves less than the second batch's ceiling.
+    job = setup_job(store, [words(3000), words(4000)], budget_usd=2.01)
+
+    with pytest.raises(BudgetExceeded):
+        make_engine(provider, store).extract_glossary(job.id)
+
+    assert len(provider.call_log) == 1
+    final = store.load_job(job.id)
+    assert final.cost_usd == pytest.approx(CALL_COST)
+    assert final.status == JobStatus.CREATED
+    assert final.glossary_extracted is False
+    assert store.load_glossary(job.id) == Glossary()
+
+
+def test_budget_guard_counts_what_the_job_already_spent() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[]])
+    job = setup_job(store, [words(3000)], budget_usd=1.0, cost_usd=1.0)
+
+    with pytest.raises(BudgetExceeded):
+        make_engine(provider, store).extract_glossary(job.id)
+
+    assert provider.call_log == []
+
+
+def test_budget_guard_projects_the_batch_ceiling() -> None:
+    store = InMemoryCheckpointStore()
+    provider = ScriptedProvider([[]])
+    job = setup_job(store, [words(3000)])
+    engine = make_engine(provider, store)
+    ceiling = engine.estimate_glossary_extraction(job.id).usd_high
+    store.save_job(
+        store.load_job(job.id).model_copy(
+            update={"config": job.config.model_copy(update={"budget_usd": ceiling * 0.99})}
+        )
+    )
+
+    with pytest.raises(BudgetExceeded):
+        engine.extract_glossary(job.id)
+
+    assert provider.call_log == []
+
+
+def test_a_failed_batch_keeps_the_spend_and_writes_no_glossary() -> None:
+    store = InMemoryCheckpointStore()
+    wasted = Usage(input_tokens=500_000, output_tokens=0)
+    provider = ScriptedProvider(
+        [[entry("Vis", "Vis")], []],
+        fail_on={1: MalformedOutput(job_id="unknown", chunk_index=-1, usage=wasted)},
+    )
+    job = setup_job(store, THREE_CHUNKS)
+
+    with pytest.raises(MalformedOutput):
+        make_engine(provider, store).extract_glossary(job.id)
+
+    final = store.load_job(job.id)
+    # The successful batch AND the billed-but-failed attempts are real money.
+    assert final.cost_usd == pytest.approx(CALL_COST + 0.5 * IN_PRICE)
+    assert final.glossary_extracted is False
+    assert store.load_glossary(job.id) == Glossary()
+    assert store.load_glossary_proposals(job.id) == {}

@@ -23,6 +23,9 @@ Subcommands:
              defects that only surface deep into a long book. Extracted chunks
              keep their original indices.
     estimate <job_id>
+             Prints the translation estimate as JSON, plus a
+             "glossary_extraction" key: the cost of `glossary extract`, or
+             null once it has run.
     run     <job_id> [--out <path>] [--provider ...]
              Prints a skip-summary line if any chunks ended FAILED.
     resume  <job_id> [--out <path>] [--provider ...]
@@ -45,6 +48,11 @@ Subcommands:
              writer exports them as source text. Refuses a RUNNING job.
              --dry-run lists them without changing anything.
     glossary show   <job_id>
+    glossary extract <job_id>
+             PAID. Extracts the glossary from the whole source of a CREATED
+             job before translation, in batches, accruing each batch's cost
+             to the job (budget-guarded). Runs once per job; entries already
+             in the glossary win. Progress on stderr, outcome JSON on stdout.
     glossary update <job_id> <term> <translation> [--lock]
 
 Provider selection:
@@ -466,11 +474,19 @@ def _cmd_create(args: argparse.Namespace, engine: TranslatorEngine) -> int:
 def _cmd_estimate(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         estimate = engine.estimate_cost(args.job_id)
-        print(estimate.model_dump_json(indent=2))
-        return 0
+        extraction = engine.estimate_glossary_extraction(args.job_id)
     except JobNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    # The translation estimate's keys are printed unchanged; the glossary
+    # extraction pass is one more key, null once the pass has run (there is
+    # nothing left to spend on it).
+    data = json.loads(estimate.model_dump_json())
+    data["glossary_extraction"] = (
+        json.loads(extraction.model_dump_json()) if extraction is not None else None
+    )
+    print(json.dumps(data, indent=2))
+    return 0
 
 
 def _resolve_out(args: argparse.Namespace, engine: TranslatorEngine) -> str:
@@ -707,6 +723,25 @@ def _run_server(config: Any) -> None:
     asyncio.run(_serve_and_announce())
 
 
+def _cmd_glossary_extract(args: argparse.Namespace, engine: TranslatorEngine) -> int:
+    """Run the paid whole-book glossary extraction pass for a CREATED job.
+
+    One progress line per batch on stderr, the outcome as JSON on stdout — the
+    same split as ``glossary show``, so the JSON stays machine-readable.
+    """
+
+    def on_progress(done: int, total: int, cost_usd: float) -> None:
+        print(f"  batch {done}/{total}  cost=${cost_usd:.5f}", file=sys.stderr, flush=True)
+
+    try:
+        outcome = engine.extract_glossary(args.job_id, on_progress=on_progress)
+    except BorgesicaError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(outcome.model_dump_json(indent=2))
+    return 0
+
+
 def _cmd_glossary_update(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         entry = GlossaryEntry(
@@ -899,6 +934,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_gshow.add_argument("job_id")
     _add_provider(p_gshow)
 
+    # extract — the explicit, PAID whole-book pass; `estimate` shows its cost.
+    p_gextract = gsub.add_parser(
+        "extract",
+        help="Extract the glossary from the whole source before translating (paid)",
+    )
+    p_gextract.add_argument("job_id")
+    _add_provider(p_gextract)
+
     p_gupdate = gsub.add_parser("update", help="Add or update a glossary entry")
     p_gupdate.add_argument("job_id")
     p_gupdate.add_argument("term")
@@ -998,6 +1041,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if args.glossary_command == "show":
             return _cmd_glossary_show(args, engine)
+        if args.glossary_command == "extract":
+            return _cmd_glossary_extract(args, engine)
         if args.glossary_command == "update":
             return _cmd_glossary_update(args, engine)
         return 1

@@ -71,3 +71,15 @@ def test_fake_provider_without_segment_count_keeps_string_echo() -> None:
     assert result.unit.translations is None
     assert result.unit.translation == "[translated] plain prose"
     assert fake.segment_count_log == [None]
+
+
+def test_in_memory_store_round_trips_glossary_proposals() -> None:
+    """Mirrors the SQLite store: full overwrite, per-term order kept, per job."""
+    store = InMemoryCheckpointStore()
+    assert store.load_glossary_proposals("job-1") == {}
+
+    store.save_glossary_proposals("job-1", {"vis": ("Vis", "Visto"), "will": ("Voluntad",)})
+    store.save_glossary_proposals("job-1", {"vis": ("Vis", "Visto")})
+
+    assert store.load_glossary_proposals("job-1") == {"vis": ("Vis", "Visto")}
+    assert store.load_glossary_proposals("job-2") == {}

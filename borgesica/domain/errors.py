@@ -59,12 +59,16 @@ class JobNotFoundError(BorgesicaError):
 class JobStateError(BorgesicaError):
     """Raised when an operation is invalid for the job's current status."""
 
-    def __init__(self, *, job_id: str, current_status: str) -> None:
-        super().__init__(
-            f"Invalid operation for job {job_id!r} in status {current_status!r}"
-        )
+    def __init__(
+        self, *, job_id: str, current_status: str, reason: str | None = None
+    ) -> None:
+        message = f"Invalid operation for job {job_id!r} in status {current_status!r}"
+        if reason:
+            message = f"{message}: {reason}"
+        super().__init__(message)
         self.job_id = job_id
         self.current_status = current_status
+        self.reason = reason
 
 
 class GlossaryEntryRejectedError(BorgesicaError):
