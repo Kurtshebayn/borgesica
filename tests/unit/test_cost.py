@@ -1082,3 +1082,97 @@ def test_pdf_rides_the_prose_output_model():
     assert chunk_output_tokens(185, SourceType.PDF) == chunk_output_tokens(
         185, SourceType.EPUB
     )
+
+
+# ---------------------------------------------------------------------------
+# Glossary extraction pass — its own estimate line
+# ---------------------------------------------------------------------------
+
+
+def _extraction_overhead_tokens(provider, config) -> int:
+    """System prompt + user-prompt prefix, measured from the real prompts."""
+    from borgesica.domain.glossary import extraction_prompts
+
+    system, prefix = extraction_prompts("")
+    return provider.count_tokens(system, config.model) + provider.count_tokens(
+        prefix, config.model
+    )
+
+
+def test_extraction_estimate_prices_every_batch_with_its_prompt_overhead():
+    from borgesica.domain.cost import CostEstimator
+    from borgesica.domain.models import GlossaryExtractionEstimate
+
+    provider = FakeTranslationProvider()
+    config = make_config(source_type=SourceType.EPUB)
+    # 3000 + 3000 fit one 8000-token batch; the third chunk opens a second.
+    chunks = [make_chunk(i, text="w " * 3000) for i in range(3)]
+
+    estimate = CostEstimator(provider=provider).estimate_glossary_extraction(
+        chunks, config
+    )
+
+    overhead = _extraction_overhead_tokens(provider, config)
+    assert overhead > 0
+    expected_input = 9000 + 2 * overhead
+    assert isinstance(estimate, GlossaryExtractionEstimate)
+    assert estimate.batches == 2
+    assert estimate.input_tokens == expected_input
+    assert estimate.output_tokens == round(expected_input * 0.326)
+    assert estimate.output_tokens_high == round(expected_input * 0.997)
+    in_price, out_price = provider.price(config.model)
+    assert estimate.usd == pytest.approx(
+        (expected_input * in_price + estimate.output_tokens * out_price) / 1_000_000
+    )
+    assert estimate.usd_high == pytest.approx(
+        (expected_input * in_price + estimate.output_tokens_high * out_price)
+        / 1_000_000
+    )
+    assert estimate.usd_high > estimate.usd
+
+
+def test_extraction_estimate_covers_every_chunk_whatever_its_status():
+    from borgesica.domain.cost import CostEstimator
+
+    provider = FakeTranslationProvider()
+    config = make_config(source_type=SourceType.EPUB)
+    estimator = CostEstimator(provider=provider)
+    pending = [make_chunk(i, text="w " * 100) for i in range(4)]
+    mixed = [
+        make_chunk(i, status=ChunkStatus.DONE if i % 2 else ChunkStatus.PENDING,
+                   text="w " * 100)
+        for i in range(4)
+    ]
+
+    assert estimator.estimate_glossary_extraction(
+        mixed, config
+    ) == estimator.estimate_glossary_extraction(pending, config)
+
+
+def test_extraction_estimate_of_no_chunks_is_zero():
+    from borgesica.domain.cost import CostEstimator
+
+    estimate = CostEstimator(
+        provider=FakeTranslationProvider()
+    ).estimate_glossary_extraction([], make_config())
+
+    assert estimate.batches == 0
+    assert estimate.input_tokens == 0
+    assert estimate.output_tokens == 0
+    assert estimate.output_tokens_high == 0
+    assert estimate.usd == 0.0
+    assert estimate.usd_high == 0.0
+
+
+def test_extraction_estimate_leaves_the_translation_estimate_unchanged():
+    from borgesica.domain.cost import CostEstimator
+
+    provider = FakeTranslationProvider()
+    config = make_config(source_type=SourceType.EPUB)
+    chunks = [make_chunk(i, text="w " * 800) for i in range(3)]
+    estimator = CostEstimator(provider=provider)
+    before = estimator.estimate(make_job(config, total=3), chunks, config)
+
+    estimator.estimate_glossary_extraction(chunks, config)
+
+    assert estimator.estimate(make_job(config, total=3), chunks, config) == before

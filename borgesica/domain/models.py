@@ -487,6 +487,38 @@ class TranslationResult(BaseModel):
     usage: Usage = Field(default_factory=Usage)
 
 
+class ExtractionBatch(BaseModel):
+    """What ONE glossary-extraction call over one batch of chunks produced.
+
+    ``entries`` are the call's raw ``glossary_additions`` — not deduplicated,
+    not merged — because reconciling batches is a separate decision
+    (``merge_extraction_batches``) that needs every batch's own proposal.
+    ``usage`` is the call's real token usage, so the caller can accrue the
+    spend of each call as it happens instead of estimating it afterwards.
+    """
+
+    entries: list[GlossaryEntry] = Field(default_factory=list)
+    usage: Usage = Field(default_factory=Usage)
+
+
+class GlossaryExtractionEstimate(BaseModel):
+    """Projected cost of the whole-book glossary extraction pass.
+
+    Separate from ``CostEstimate`` because extraction is a separate, explicit
+    paid action: it covers every chunk once, in batches, before translation,
+    and the user decides whether to run it. ``output_tokens`` is the expected
+    figure and ``output_tokens_high`` the worst measured batch ratio applied to
+    the whole book; ``usd`` and ``usd_high`` price them respectively.
+    """
+
+    batches: int
+    input_tokens: int
+    output_tokens: int
+    output_tokens_high: int
+    usd: float
+    usd_high: float
+
+
 class CostEstimate(BaseModel):
     input_tokens: int
     output_tokens: int

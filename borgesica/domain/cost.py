@@ -24,11 +24,13 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, NamedTuple
 
+from borgesica.domain.glossary import extraction_prompts, plan_extraction_batches
 from borgesica.domain.models import (
     Chunk,
     ChunkStatus,
     CostEstimate,
     Glossary,
+    GlossaryExtractionEstimate,
     Job,
     JobConfig,
     RollingSummary,
@@ -161,6 +163,17 @@ def output_model(source_type: SourceType) -> _OutputModel:
     segmented `translations` array, and only SRT was measured separately.
     """
     return _SRT_OUTPUT_MODEL if source_type == SourceType.SRT else _PROSE_OUTPUT_MODEL
+
+# Output tokens per INPUT token of one glossary-extraction call. Measured on
+# job 9be143da split into 10-chunk batches: each batch's glossary entries,
+# serialized as the extractor's JSON and tokenized at 3.853 chars/token, came
+# to an output/input ratio of mean 0.326, median 0.308, p90 0.404, max 0.997
+# across batches. The expected figure uses the mean; the ceiling uses the
+# worst batch, applied to the whole book. Measured on the glossary entries the
+# TRANSLATION run produced (no extraction output existed yet), so both are to
+# be recalibrated against real extraction output.
+_EXTRACTION_OUTPUT_RATIO = 0.326
+_EXTRACTION_OUTPUT_RATIO_HIGH = 0.997
 
 # reflective mode runs 3 passes: translate (draft) + critique + revise
 _REFLECTIVE_PASSES = 3
@@ -513,4 +526,56 @@ class CostEstimator:
             model=config.model,
             cached=cached,
             within_budget=within_budget,
+        )
+
+    def estimate_glossary_extraction(
+        self, chunks: list[Chunk], config: JobConfig
+    ) -> GlossaryExtractionEstimate:
+        """Project the cost of the whole-book glossary extraction pass.
+
+        A line of its own, separate from ``estimate``: extraction is an
+        explicit paid action the user chooses to run, and it covers EVERY
+        chunk exactly once whatever its translation status — the glossary is
+        about the whole text, not about what is left to translate.
+
+        Batches are planned exactly as the pass plans them
+        (``plan_extraction_batches`` over the provider's own token count), and
+        every batch pays the extraction system prompt and user-prompt prefix on
+        top of its source, measured from ``extraction_prompts`` rather than
+        restated.
+
+        Output is a ratio of input — the extractor emits glossary entries, not
+        a translation, so the translation output model does not apply. ``usd``
+        prices the expected ratio, ``usd_high`` the worst measured batch. Both
+        assume a cold cache (no discount): a first pass reuses nothing but the
+        system prompt, and an optimistic number is the wrong one to show
+        before a spend the user has to approve.
+        """
+        model = config.model
+        texts = [chunk.source_text for chunk in chunks]
+        batches = plan_extraction_batches(
+            texts, lambda text: self._provider.count_tokens(text, model)
+        )
+        system, prefix = extraction_prompts("")
+        overhead = self._provider.count_tokens(
+            system, model
+        ) + self._provider.count_tokens(prefix, model)
+
+        # Every chunk lands in exactly one batch, and every batch pays the
+        # prompt overhead once.
+        input_tokens = len(batches) * overhead + sum(
+            self._provider.count_tokens(text, model) for text in texts
+        )
+        output_tokens = round(input_tokens * _EXTRACTION_OUTPUT_RATIO)
+        output_tokens_high = round(input_tokens * _EXTRACTION_OUTPUT_RATIO_HIGH)
+
+        in_usd_per_mtok, out_usd_per_mtok = self._provider.price(model)
+        input_usd = input_tokens / 1_000_000 * in_usd_per_mtok
+        return GlossaryExtractionEstimate(
+            batches=len(batches),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            output_tokens_high=output_tokens_high,
+            usd=input_usd + output_tokens / 1_000_000 * out_usd_per_mtok,
+            usd_high=input_usd + output_tokens_high / 1_000_000 * out_usd_per_mtok,
         )
