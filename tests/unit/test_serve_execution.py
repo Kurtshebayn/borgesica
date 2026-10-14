@@ -18,7 +18,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from borgesica.api import TranslatorEngine
-from borgesica.domain.models import JobStatus, SourceType
+from borgesica.domain.models import (
+    GlossaryEntry,
+    JobStatus,
+    SourceType,
+    TranslationUnit,
+)
 from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
 
 
@@ -332,3 +337,303 @@ def test_shutdown_with_no_active_run_is_clean() -> None:
 
     assert resp.status_code == 200
     assert resp.json() == {"status": "shutting_down", "clean": True}
+
+
+# ---------------------------------------------------------------------------
+# POST /jobs/{id}/glossary/extract — the explicit, paid pre-translation pass
+# ---------------------------------------------------------------------------
+
+# What the scripted extraction call proposes. "Cue" occurs in every fixture
+# cue, so the source-text hygiene rules keep it.
+_EXTRACTED = TranslationUnit(
+    translation="",
+    translations=[],
+    summary_update="Terminology extraction complete.",
+    glossary_additions=[GlossaryEntry(term="Cue", translation="Señal")],
+)
+
+
+def _read_events(stream_resp, terminal_types=("terminal", "glossary_terminal")) -> list[dict]:
+    events: list[dict] = []
+    for line in stream_resp.iter_lines():
+        if not line or line.startswith(":"):
+            continue
+        assert line.startswith("data: ")
+        events.append(json.loads(line[len("data: ") :]))
+        if events[-1]["type"] in terminal_types:
+            break
+    return events
+
+
+def _join(client: TestClient, job_id: str) -> None:
+    client.app.state.runner._handles[job_id].thread.join(timeout=5)
+
+
+def test_glossary_extract_returns_202_and_runs_the_pass_in_background(
+    tmp_path: Path,
+) -> None:
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+
+    resp = client.post(f"/jobs/{job_id}/glossary/extract")
+
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "CREATED"
+    _join(client, job_id)
+    assert provider.call_count == 1
+    status = client.get(f"/jobs/{job_id}").json()
+    assert status["status"] == "CREATED"
+    assert status["glossary_extracted"] is True
+    assert status["cost_usd"] > 0
+    glossary = client.get(f"/jobs/{job_id}/glossary").json()["entries"]
+    assert [(e["term"], e["translation"]) for e in glossary] == [("Cue", "Señal")]
+
+
+def test_glossary_extract_unknown_job_404() -> None:
+    engine, _ = _make_engine()
+    client = _app_and_client(engine)
+
+    resp = client.post("/jobs/does-not-exist/glossary/extract")
+
+    assert resp.status_code == 404
+    # The engine's 404, not the router's "Not Found" for a missing route.
+    assert "Job not found" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"status": JobStatus.PAUSED},
+        {"status": JobStatus.DONE},
+        {"glossary_extracted": True},
+    ],
+)
+def test_glossary_extract_conflicts_for_a_job_the_pass_refuses(
+    tmp_path: Path, update: dict
+) -> None:
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    checkpoint.save_job(checkpoint.load_job(job_id).model_copy(update=update))
+
+    resp = client.post(f"/jobs/{job_id}/glossary/extract")
+
+    assert resp.status_code == 409
+    # Refused before any thread or call: nothing is spent.
+    assert job_id not in client.app.state.runner._handles
+    assert provider.call_count == 0
+
+
+def test_an_active_extraction_makes_run_resume_and_extract_busy(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    provider = _BlockingOnFirstCallProvider(started, release)
+    provider.canned_unit = _EXTRACTED
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    other_id = _create_job(client, tmp_path)
+    out_path = str(tmp_path / "out.srt")
+
+    assert client.post(f"/jobs/{job_id}/glossary/extract").status_code == 202
+    assert started.wait(timeout=2)
+
+    assert client.post(f"/jobs/{job_id}/run", json={"out_path": out_path}).status_code == 409
+    assert client.post(f"/jobs/{job_id}/resume", json={"out_path": out_path}).status_code == 409
+    assert client.post(f"/jobs/{other_id}/run", json={"out_path": out_path}).status_code == 409
+    assert client.post(f"/jobs/{other_id}/glossary/extract").status_code == 409
+
+    release.set()
+    _join(client, job_id)
+    # Only the extraction call was ever made; the busy requests spent nothing.
+    assert provider.call_count == 1
+    assert checkpoint.load_job(other_id).cost_usd == 0.0
+
+
+def test_an_active_run_makes_extract_busy(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    provider = _BlockingOnFirstCallProvider(started, release)
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    other_id = _create_job(client, tmp_path)
+
+    client.post(f"/jobs/{job_id}/run", json={"out_path": str(tmp_path / "out.srt")})
+    assert started.wait(timeout=2)
+
+    assert client.post(f"/jobs/{other_id}/glossary/extract").status_code == 409
+
+    release.set()
+    _join(client, job_id)
+    assert checkpoint.load_job(other_id).glossary_extracted is False
+
+
+def test_sse_stream_emits_glossary_progress_then_glossary_terminal(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    provider = _BlockingOnFirstCallProvider(started, release)
+    provider.canned_unit = _EXTRACTED
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    assert started.wait(timeout=2)
+
+    with client.stream("GET", f"/jobs/{job_id}/events") as stream_resp:
+        assert stream_resp.status_code == 200
+        release.set()
+        events = _read_events(stream_resp)
+    _join(client, job_id)
+
+    cost = checkpoint.load_job(job_id).cost_usd
+    assert events == [
+        {
+            "type": "glossary_progress",
+            "job_id": job_id,
+            "batch": 1,
+            "total_batches": 1,
+            "cost_usd": pytest.approx(cost),
+        },
+        {
+            "type": "glossary_terminal",
+            "status": "done",
+            "error": None,
+            "entries": 1,
+            "conflicts": 0,
+            "cost_usd": pytest.approx(cost),
+        },
+    ]
+
+
+def test_sse_stream_subscribed_before_the_pass_starts_gets_its_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REL-001 window for extraction: the client connects after POST
+    returns but before the worker has made its first call. It must get the
+    pass's events, not a terminal built from the still-CREATED status."""
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, _ = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    original_extract = engine.extract_glossary
+
+    def _blocking_extract(job_id_arg, on_progress=None):
+        entered.set()
+        proceed.wait(timeout=5)
+        return original_extract(job_id_arg, on_progress=on_progress)
+
+    monkeypatch.setattr(engine, "extract_glossary", _blocking_extract)
+
+    assert client.post(f"/jobs/{job_id}/glossary/extract").status_code == 202
+    assert entered.wait(timeout=2)
+
+    with client.stream("GET", f"/jobs/{job_id}/events") as stream_resp:
+        proceed.set()
+        events = _read_events(stream_resp)
+    _join(client, job_id)
+
+    assert [e["type"] for e in events] == ["glossary_progress", "glossary_terminal"]
+    assert events[-1]["status"] == "done"
+
+
+def test_sse_stream_after_a_finished_extraction_replays_its_terminal(
+    tmp_path: Path,
+) -> None:
+    # The job stays CREATED after the pass, so the stored status alone could
+    # not tell a late subscriber whether the pass succeeded.
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, _ = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    _join(client, job_id)
+
+    with client.stream("GET", f"/jobs/{job_id}/events") as stream_resp:
+        events = _read_events(stream_resp)
+
+    assert len(events) == 1
+    assert events[0]["type"] == "glossary_terminal"
+    assert events[0]["status"] == "done"
+    assert events[0]["entries"] == 1
+
+
+def test_a_failed_extraction_ends_with_a_failed_glossary_terminal(tmp_path: Path) -> None:
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED, fail_on={0})
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    _join(client, job_id)
+    with client.stream("GET", f"/jobs/{job_id}/events") as stream_resp:
+        events = _read_events(stream_resp)
+
+    terminal = events[-1]
+    assert terminal["type"] == "glossary_terminal"
+    assert terminal["status"] == "failed"
+    assert "Malformed provider output" in terminal["error"]
+    assert (terminal["entries"], terminal["conflicts"], terminal["cost_usd"]) == (
+        None,
+        None,
+        None,
+    )
+    job = checkpoint.load_job(job_id)
+    assert (job.status, job.glossary_extracted) == (JobStatus.CREATED, False)
+
+
+def test_a_budget_stop_ends_with_a_budget_exceeded_glossary_terminal(
+    tmp_path: Path,
+) -> None:
+    provider = FakeTranslationProvider(canned_unit=_EXTRACTED)
+    engine, _ = _make_engine(provider=provider)
+    client = _app_and_client(engine)
+    srt_path = _make_srt_fixture(tmp_path)
+    job_id = client.post(
+        "/jobs",
+        json={"source_path": srt_path, "model": "fake-model", "budget_usd": 1e-9},
+    ).json()["id"]
+
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    _join(client, job_id)
+    with client.stream("GET", f"/jobs/{job_id}/events") as stream_resp:
+        events = _read_events(stream_resp)
+
+    terminal = events[-1]
+    assert terminal["type"] == "glossary_terminal"
+    assert terminal["status"] == "budget_exceeded"
+    assert "Budget exceeded" in terminal["error"]
+    assert terminal["entries"] is None
+    assert provider.call_count == 0
+
+
+def test_shutdown_during_an_extraction_does_not_cancel_the_job(tmp_path: Path) -> None:
+    # Cancelling would mark the job CANCELLED: it could never be extracted
+    # again, and the wizard would lose its CREATED job. The pass is left to
+    # finish (or to be killed by the sidecar's own fallback); spend already
+    # made stays recorded either way.
+    started = threading.Event()
+    release = threading.Event()
+    provider = _BlockingOnFirstCallProvider(started, release)
+    provider.canned_unit = _EXTRACTED
+    engine, checkpoint = _make_engine(provider=provider)
+    client = _app_and_client(engine, shutdown_join_timeout=0.2)
+    job_id = _create_job(client, tmp_path)
+
+    client.post(f"/jobs/{job_id}/glossary/extract")
+    assert started.wait(timeout=2)
+
+    assert client.post("/shutdown").json()["clean"] is False
+
+    release.set()
+    _join(client, job_id)
+    job = checkpoint.load_job(job_id)
+    assert job.status == JobStatus.CREATED
+    assert job.glossary_extracted is True
