@@ -35,6 +35,21 @@ export interface JobResponse {
    * a "DONE" run actually produced untranslated output. */
   failed_count: number;
   failed_indices: number[];
+  /** True once the explicit pre-translation glossary pass has run for the
+   * job, so an empty glossary that was never extracted can be told apart
+   * from one that was. */
+  glossary_extracted: boolean;
+}
+
+/** Cost of the explicit, paid pre-translation glossary pass (one provider
+ * call per batch), kept apart from the translation estimate. */
+export interface GlossaryExtractionEstimate {
+  batches: number;
+  input_tokens: number;
+  output_tokens: number;
+  output_tokens_high: number;
+  usd: number;
+  usd_high: number;
 }
 
 export interface EstimateResponse {
@@ -46,6 +61,9 @@ export interface EstimateResponse {
   model: string;
   cached: boolean;
   within_budget: boolean;
+  /** Null when the pass cannot run: the job is not CREATED, or its glossary
+   * was already extracted. */
+  glossary_extraction: GlossaryExtractionEstimate | null;
 }
 
 export interface CreateJobRequest {

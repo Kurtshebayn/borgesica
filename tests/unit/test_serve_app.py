@@ -206,6 +206,65 @@ def test_estimate_endpoint_returns_cost_fields(tmp_path: Path) -> None:
     assert "within_budget" in body
 
 
+def test_estimate_endpoint_reports_the_glossary_extraction_line(tmp_path: Path) -> None:
+    engine, _ = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+
+    created = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"})
+    job_id = created.json()["id"]
+    body = client.get(f"/jobs/{job_id}/estimate").json()
+
+    expected = engine.estimate_glossary_extraction(job_id)
+    assert body["glossary_extraction"] == expected.model_dump()
+    assert set(body["glossary_extraction"]) == {
+        "batches",
+        "input_tokens",
+        "output_tokens",
+        "output_tokens_high",
+        "usd",
+        "usd_high",
+    }
+
+
+def test_estimate_endpoint_glossary_extraction_is_null_once_extracted(
+    tmp_path: Path,
+) -> None:
+    engine, checkpoint = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+    created = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"})
+    job_id = created.json()["id"]
+    checkpoint.save_job(
+        checkpoint.load_job(job_id).model_copy(update={"glossary_extracted": True})
+    )
+
+    body = client.get(f"/jobs/{job_id}/estimate").json()
+
+    assert body["glossary_extraction"] is None
+    # The translation estimate itself is unchanged.
+    assert "usd_high" in body
+
+
+def test_status_endpoint_reports_whether_the_glossary_was_extracted(
+    tmp_path: Path,
+) -> None:
+    engine, checkpoint = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+    created = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"}).json()
+    job_id = created["id"]
+
+    assert created["glossary_extracted"] is False
+    assert client.get(f"/jobs/{job_id}").json()["glossary_extracted"] is False
+
+    checkpoint.save_job(
+        checkpoint.load_job(job_id).model_copy(update={"glossary_extracted": True})
+    )
+
+    assert client.get(f"/jobs/{job_id}").json()["glossary_extracted"] is True
+
+
 def test_estimate_endpoint_unknown_job_404() -> None:
     engine, _ = _make_engine()
     client = _client(engine)

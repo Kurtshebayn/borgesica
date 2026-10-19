@@ -26,6 +26,25 @@ class BudgetExceeded(BorgesicaError):
         self.cost_so_far = cost_so_far
 
 
+class ExtractionStopped(BorgesicaError):
+    """Raised when the glossary extraction pass stops because it was asked to.
+
+    The stop is cooperative: it is honoured before a batch call, never during
+    one. The job stays CREATED, the spend of every batch already made stays
+    recorded on it, and nothing the pass extracted is written — so the pass
+    may be started again (and pays for every batch again).
+    """
+
+    def __init__(self, *, job_id: str, batches_done: int, total_batches: int) -> None:
+        super().__init__(
+            f"Glossary extraction stopped for job {job_id!r} after "
+            f"{batches_done} of {total_batches} batches"
+        )
+        self.job_id = job_id
+        self.batches_done = batches_done
+        self.total_batches = total_batches
+
+
 class MalformedOutput(BorgesicaError):
     """Raised when the provider returns output that cannot be parsed as TranslationUnit
     after all retry tiers are exhausted.
@@ -59,12 +78,16 @@ class JobNotFoundError(BorgesicaError):
 class JobStateError(BorgesicaError):
     """Raised when an operation is invalid for the job's current status."""
 
-    def __init__(self, *, job_id: str, current_status: str) -> None:
-        super().__init__(
-            f"Invalid operation for job {job_id!r} in status {current_status!r}"
-        )
+    def __init__(
+        self, *, job_id: str, current_status: str, reason: str | None = None
+    ) -> None:
+        message = f"Invalid operation for job {job_id!r} in status {current_status!r}"
+        if reason:
+            message = f"{message}: {reason}"
+        super().__init__(message)
         self.job_id = job_id
         self.current_status = current_status
+        self.reason = reason
 
 
 class GlossaryEntryRejectedError(BorgesicaError):

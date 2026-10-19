@@ -707,11 +707,11 @@ def test_cached_input_tokens_are_a_subset_of_input_tokens():
 def test_usage_cost_prices_cached_tokens_at_the_cache_rate():
     """The whole point: 850 of 1000 input tokens must not cost the miss rate."""
     from borgesica.domain.models import Usage
-    from borgesica.domain.orchestrator import TranslationOrchestrator
+    from borgesica.domain.cost import usage_cost
 
     usage = Usage(input_tokens=1000, output_tokens=100, cached_input_tokens=850)
 
-    cost = TranslationOrchestrator._usage_cost(
+    cost = usage_cost(
         usage, in_price=0.14, out_price=0.28, cache_price=0.00225
     )
 
@@ -722,11 +722,11 @@ def test_usage_cost_prices_cached_tokens_at_the_cache_rate():
 def test_usage_cost_without_cached_tokens_is_unchanged():
     """A provider reporting no cache hits must price exactly as it always did."""
     from borgesica.domain.models import Usage
-    from borgesica.domain.orchestrator import TranslationOrchestrator
+    from borgesica.domain.cost import usage_cost
 
     usage = Usage(input_tokens=1000, output_tokens=100)
 
-    cost = TranslationOrchestrator._usage_cost(
+    cost = usage_cost(
         usage, in_price=0.14, out_price=0.28, cache_price=0.00225
     )
 
@@ -736,7 +736,7 @@ def test_usage_cost_without_cached_tokens_is_unchanged():
 def test_usage_cost_reproduces_the_measured_dashboard_bill():
     """The real 1,114-request workload must price to what DeepSeek charged."""
     from borgesica.domain.models import Usage
-    from borgesica.domain.orchestrator import TranslationOrchestrator
+    from borgesica.domain.cost import usage_cost
 
     usage = Usage(
         input_tokens=5_115_392 + 892_787,
@@ -744,7 +744,7 @@ def test_usage_cost_reproduces_the_measured_dashboard_bill():
         cached_input_tokens=5_115_392,
     )
 
-    cost = TranslationOrchestrator._usage_cost(
+    cost = usage_cost(
         usage, in_price=0.14, out_price=0.28, cache_price=0.00225
     )
 
@@ -756,7 +756,7 @@ def test_usage_cost_reproduces_the_measured_dashboard_bill():
 def test_naive_pricing_would_have_doubled_the_measured_bill():
     """Guards the regression: ignoring the cache overstates by ~2x, not a little."""
     from borgesica.domain.models import Usage
-    from borgesica.domain.orchestrator import TranslationOrchestrator
+    from borgesica.domain.cost import usage_cost
 
     usage = Usage(
         input_tokens=5_115_392 + 892_787,
@@ -764,10 +764,10 @@ def test_naive_pricing_would_have_doubled_the_measured_bill():
         cached_input_tokens=5_115_392,
     )
 
-    cache_aware = TranslationOrchestrator._usage_cost(
+    cache_aware = usage_cost(
         usage, in_price=0.14, out_price=0.28, cache_price=0.00225
     )
-    naive = TranslationOrchestrator._usage_cost(
+    naive = usage_cost(
         usage.model_copy(update={"cached_input_tokens": 0}),
         in_price=0.14,
         out_price=0.28,
@@ -1105,7 +1105,7 @@ def test_extraction_estimate_prices_every_batch_with_its_prompt_overhead():
 
     provider = FakeTranslationProvider()
     config = make_config(source_type=SourceType.EPUB)
-    # 3000 + 3000 fit one 8000-token batch; the third chunk opens a second.
+    # 3000 + 3000 fill one 6000-token batch; the third chunk opens a second.
     chunks = [make_chunk(i, text="w " * 3000) for i in range(3)]
 
     estimate = CostEstimator(provider=provider).estimate_glossary_extraction(
@@ -1118,8 +1118,9 @@ def test_extraction_estimate_prices_every_batch_with_its_prompt_overhead():
     assert isinstance(estimate, GlossaryExtractionEstimate)
     assert estimate.batches == 2
     assert estimate.input_tokens == expected_input
-    assert estimate.output_tokens == round(expected_input * 0.326)
-    assert estimate.output_tokens_high == round(expected_input * 0.997)
+    # The output ratios were calibrated on batch SOURCE tokens.
+    assert estimate.output_tokens == round(9000 * 0.326)
+    assert estimate.output_tokens_high == round(9000 * 0.997)
     in_price, out_price = provider.price(config.model)
     assert estimate.usd == pytest.approx(
         (expected_input * in_price + estimate.output_tokens * out_price) / 1_000_000
@@ -1176,3 +1177,61 @@ def test_extraction_estimate_leaves_the_translation_estimate_unchanged():
     estimator.estimate_glossary_extraction(chunks, config)
 
     assert estimator.estimate(make_job(config, total=3), chunks, config) == before
+
+
+def test_extraction_output_ratios_apply_to_source_tokens_only():
+    from borgesica.domain.cost import CostEstimator
+
+    provider = FakeTranslationProvider()
+    config = make_config(source_type=SourceType.EPUB)
+    # Ten oversized chunks: ten batches, so the prompt overhead is paid ten
+    # times — the output projection must not grow with it.
+    chunks = [make_chunk(i, text="w " * 7000) for i in range(10)]
+
+    estimate = CostEstimator(provider=provider).estimate_glossary_extraction(
+        chunks, config
+    )
+
+    overhead = _extraction_overhead_tokens(provider, config)
+    assert estimate.batches == 10
+    assert estimate.input_tokens == 70_000 + 10 * overhead
+    assert estimate.output_tokens == round(70_000 * 0.326)
+    assert estimate.output_tokens_high == round(70_000 * 0.997)
+
+
+class _CountingProvider(FakeTranslationProvider):
+    """Records every text ``count_tokens`` is asked to measure."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.counted: list[str] = []
+
+    def count_tokens(self, text: str, model: str) -> int:
+        self.counted.append(text)
+        return super().count_tokens(text, model)
+
+
+def test_extraction_estimate_counts_each_chunk_once():
+    from borgesica.domain.cost import CostEstimator
+
+    provider = _CountingProvider()
+    config = make_config(source_type=SourceType.EPUB)
+    texts = [f"chunk{i} " + "w " * 500 for i in range(5)]
+    chunks = [make_chunk(i, text=text) for i, text in enumerate(texts)]
+
+    CostEstimator(provider=provider).estimate_glossary_extraction(chunks, config)
+
+    # One provider count per chunk: on a real provider each count can be an
+    # API round trip, and a 569-chunk book should not pay for 1138.
+    assert [provider.counted.count(text) for text in texts] == [1] * 5
+
+
+def test_run_and_extraction_share_one_usage_cost_formula():
+    """The budget guard and the extraction pass must count the same dollar."""
+    import borgesica.api as api
+    import borgesica.domain.orchestrator as orchestrator
+    from borgesica.domain.cost import usage_cost
+
+    assert orchestrator.usage_cost is usage_cost
+    assert api.usage_cost is usage_cost
+    assert not hasattr(orchestrator.TranslationOrchestrator, "_usage_cost")

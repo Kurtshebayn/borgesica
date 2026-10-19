@@ -11,7 +11,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from borgesica.domain.models import GlossaryEntry, Job, JobStatus
+from borgesica.domain.models import (
+    GlossaryEntry,
+    GlossaryExtractionEstimate,
+    Job,
+    JobStatus,
+)
 
 
 class CreateJobRequest(BaseModel):
@@ -50,6 +55,10 @@ class JobResponse(BaseModel):
     best_effort_indices: list[int]
     failed_count: int
     failed_indices: list[int]
+    # True once the explicit pre-translation glossary pass has run, so the
+    # wizard can tell an empty glossary that was never extracted from one
+    # that was.
+    glossary_extracted: bool
 
 
 def job_to_response(
@@ -69,10 +78,20 @@ def job_to_response(
         best_effort_indices=best_effort_indices,
         failed_count=len(failed_indices),
         failed_indices=failed_indices,
+        glossary_extracted=job.glossary_extracted,
     )
 
 
 class EstimateResponse(BaseModel):
+    """Translation estimate, plus the glossary extraction line beside it.
+
+    ``glossary_extraction`` is the cost of the explicit pre-translation pass
+    (``POST /jobs/{id}/glossary/extract``), kept apart from the translation
+    figures because it is a separate action the user decides on. Null when the
+    pass cannot run: the job is not CREATED, or its glossary was already
+    extracted.
+    """
+
     input_tokens: int
     output_tokens: int
     usd: float
@@ -81,6 +100,7 @@ class EstimateResponse(BaseModel):
     model: str
     cached: bool
     within_budget: bool
+    glossary_extraction: GlossaryExtractionEstimate | None = None
 
 
 class GlossaryResponse(BaseModel):

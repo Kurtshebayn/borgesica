@@ -7,19 +7,28 @@
  * the auth token into a `?token=` query parameter (RISK-001/002/003). Reading
  * the stream with `fetch` + a `ReadableStream` reader lets the token ride the
  * `X-Borgesica-Token` header like every other route, so it never appears in a
- * URL. Untested by design: this module is pure DOM/network glue; the frame
- * parsing and action mapping it delegates to (`extractSseData`, `parseSseData`,
- * `sseEventToAction`, `isRunningStatus`) are pure and covered by
- * `wizard.test.ts`.
+ * URL. The frame parsing and action mapping it delegates to (`extractSseData`,
+ * `parseSseData`, `parseGlossarySseData`, `sseEventToAction`,
+ * `isRunningStatus`) are pure and covered by `wizard.test.ts`; the
+ * subscriptions themselves are exercised against a stubbed `fetch` in
+ * `sseClient.test.ts`.
+ *
+ * A glossary preparation is watched by its own subscription
+ * (`subscribeToGlossaryExtraction`): the job stays CREATED throughout, so the
+ * run's status-polling fallback cannot tell how the pass is going. It
+ * reconnects to the stream instead, which replays the pass's end.
  */
-import { getStatus } from "./apiClient";
-import type { JobStatus } from "./apiTypes";
+import { getEstimate, getGlossary, getStatus } from "./apiClient";
+import type { EstimateResponse, GlossaryEntry, JobStatus } from "./apiTypes";
 import {
   extractSseData,
+  glossaryResultFromEvent,
   isPersistentConnectionFailure,
   isRunningStatus,
+  parseGlossarySseData,
   parseSseData,
   sseEventToAction,
+  type GlossaryExtractionResult,
   type WizardAction,
 } from "./wizard";
 
@@ -28,6 +37,46 @@ const TOKEN_HEADER = "X-Borgesica-Token";
 
 export interface SseSubscription {
   close(): void;
+}
+
+/** Reads job_id's event stream frame by frame until *onFrame* returns true
+ * (a terminal event: the stream is then aborted) or the server ends it.
+ * Rejects when the stream cannot be opened (non-OK or bodiless response) or
+ * drops — callers treat that like an early end. */
+async function readSseFrames(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+  controller: AbortController,
+  onFrame: (frame: string) => boolean,
+): Promise<"terminal" | "ended"> {
+  const resp = await fetch(`${baseUrl}/jobs/${jobId}/events`, {
+    headers: { [TOKEN_HEADER]: token },
+    signal: controller.signal,
+  });
+  if (!resp.ok || !resp.body) {
+    throw new Error(`event stream unavailable (HTTP ${resp.status})`);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return "ended";
+    buffer += decoder.decode(value, { stream: true });
+    // Events are separated by a blank line (server emits "\n\n"). Process
+    // every complete frame; keep the trailing partial in the buffer.
+    let sep = buffer.indexOf("\n\n");
+    while (sep !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      if (onFrame(frame)) {
+        controller.abort(); // stop the stream once terminal is seen
+        return "terminal";
+      }
+      sep = buffer.indexOf("\n\n");
+    }
+  }
 }
 
 export function subscribeToJobEvents(
@@ -131,42 +180,16 @@ export function subscribeToJobEvents(
   }
 
   async function streamEvents(): Promise<void> {
-    const resp = await fetch(`${baseUrl}/jobs/${jobId}/events`, {
-      headers: { [TOKEN_HEADER]: token },
-      signal: controller.signal,
-    });
-    // A non-OK response (e.g. auth/404) or a bodiless response cannot be
-    // streamed — fall back to polling, which surfaces a recoverable error if
-    // the sidecar is truly unreachable.
-    if (!resp.ok || !resp.body) {
-      startPolling();
-      return;
-    }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // Events are separated by a blank line (server emits "\n\n"). Process
-      // every complete frame; keep the trailing partial in the buffer.
-      let sep = buffer.indexOf("\n\n");
-      while (sep !== -1) {
-        const frame = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        if (handleFrame(frame)) {
-          controller.abort(); // stop the stream once terminal is seen
-          return;
-        }
-        sep = buffer.indexOf("\n\n");
-      }
-    }
+    const outcome = await readSseFrames(baseUrl, token, jobId, controller, handleFrame);
     // The stream ended before a terminal event: reconnect via status polling
     // (spec: reconnection falls back to status polling), unless we're closing.
-    if (!closed && !terminalSeen) startPolling();
+    if (outcome === "ended" && !closed && !terminalSeen) startPolling();
   }
 
+  // A non-OK response (e.g. auth/404) or a bodiless response cannot be
+  // streamed and rejects like a dropped connection — both fall back to
+  // polling, which surfaces a recoverable error if the sidecar is truly
+  // unreachable.
   streamEvents().catch(() => {
     // The fetch/stream errored (dropped connection, abort). If we aborted on
     // purpose (terminal seen or close()) there is nothing to do; otherwise
@@ -179,6 +202,112 @@ export function subscribeToJobEvents(
       closed = true;
       controller.abort();
       stopPolling();
+    },
+  };
+}
+
+export interface GlossarySubscriptionOptions {
+  /** Wait before reopening a stream that dropped or ended early. */
+  reconnectDelayMs?: number;
+}
+
+/** Watches job_id's glossary preparation: dispatches each batch's progress
+ * and, once the pass ends, one GLOSSARY_EXTRACTION_ENDED carrying what the
+ * next screen needs — the glossary after "done", the re-fetched estimate
+ * otherwise (cost so far and the extraction line both come from the job).
+ *
+ * A stream that drops or ends without the pass's end is reopened after
+ * `reconnectDelayMs`: the server then streams the pass still in flight, or
+ * replays how it ended. Consecutive attempts that bring no event count as
+ * connection failures; once `isPersistentConnectionFailure` judges them
+ * persistent, CONNECTION_LOST is dispatched instead of retrying forever. */
+export function subscribeToGlossaryExtraction(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+  dispatch: (action: WizardAction) => void,
+  { reconnectDelayMs = POLL_INTERVAL_MS }: GlossarySubscriptionOptions = {},
+): SseSubscription {
+  let closed = false;
+  let finished = false;
+  let consecutiveFailures = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let controller = new AbortController();
+
+  /** Fetch what the next screen shows, then end the preparation. A failed
+   * fetch still ends it — the screen copes with a missing glossary or
+   * estimate — so the wizard never stays on "preparing". */
+  function finish(result: GlossaryExtractionResult): void {
+    finished = true;
+    const followUp: Promise<{ glossary?: GlossaryEntry[]; estimate?: EstimateResponse }> =
+      result.status === "done"
+        ? getGlossary(baseUrl, token, jobId).then(({ entries }) => ({ glossary: entries }))
+        : getEstimate(baseUrl, token, jobId).then((estimate) => ({ estimate }));
+    followUp
+      .catch(() => ({}))
+      .then((extra) => {
+        if (closed) return;
+        dispatch({ type: "GLOSSARY_EXTRACTION_ENDED", result, ...extra });
+      });
+  }
+
+  function handleFrame(frame: string): boolean {
+    const data = extractSseData(frame);
+    if (data === null) return false; // heartbeat / comment — ignore
+    const event = parseGlossarySseData(data);
+    if (!event) return false; // malformed / unknown — ignore, keep streaming
+    consecutiveFailures = 0;
+    if (event.type === "glossary_progress") {
+      dispatch({
+        type: "GLOSSARY_PROGRESS_RECEIVED",
+        progress: {
+          batch: event.batch,
+          totalBatches: event.total_batches,
+          costUsd: event.cost_usd,
+        },
+      });
+      return false;
+    }
+    finish(glossaryResultFromEvent(event));
+    return true;
+  }
+
+  function reconnectLater(): void {
+    if (closed || finished) return;
+    consecutiveFailures += 1;
+    if (isPersistentConnectionFailure(consecutiveFailures)) {
+      finished = true;
+      dispatch({
+        type: "CONNECTION_LOST",
+        message:
+          "Se perdió la conexión con el motor de traducción durante la preparación del glosario. La preparación puede seguir en curso, pero esta app ya no puede comunicarse con ella.",
+      });
+      return;
+    }
+    retryTimer = setTimeout(connect, reconnectDelayMs);
+  }
+
+  function connect(): void {
+    retryTimer = null;
+    if (closed || finished) return;
+    controller = new AbortController();
+    readSseFrames(baseUrl, token, jobId, controller, handleFrame)
+      .then((outcome) => {
+        if (outcome === "ended") reconnectLater();
+      })
+      .catch(() => reconnectLater());
+  }
+
+  connect();
+
+  return {
+    close(): void {
+      closed = true;
+      controller.abort();
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
     },
   };
 }

@@ -35,6 +35,7 @@ from borgesica.domain.models import (
     JobConfig,
     RollingSummary,
     SourceType,
+    Usage,
     translation_tool_schema,
 )
 from borgesica.domain.ports import TranslationProvider
@@ -164,12 +165,39 @@ def output_model(source_type: SourceType) -> _OutputModel:
     """
     return _SRT_OUTPUT_MODEL if source_type == SourceType.SRT else _PROSE_OUTPUT_MODEL
 
-# Output tokens per INPUT token of one glossary-extraction call. Measured on
+
+def usage_cost(
+    usage: Usage, in_price: float, out_price: float, cache_price: float
+) -> float:
+    """Compute the USD cost of one provider call from its REAL Usage.
+
+    The one formula for money actually spent — the translation run's budget
+    guard and the glossary extraction pass both accrue with it, so a dollar
+    counted by one is the same dollar counted by the other.
+
+    ``cached_input_tokens`` is the subset of ``input_tokens`` the provider
+    served from its prompt cache, and it is billed at ``cache_price``, not at
+    ``in_price``. Pricing all input at the miss rate overstated a real
+    DeepSeek bill 2.04x, and because this figure is what the budget guard
+    accrues, a job with ``budget_usd`` set would raise BudgetExceeded at
+    roughly half the budget it had actually spent.
+    """
+    cached = min(usage.cached_input_tokens, usage.input_tokens)
+    missed = usage.input_tokens - cached
+    return (
+        missed / 1_000_000 * in_price
+        + cached / 1_000_000 * cache_price
+        + usage.output_tokens / 1_000_000 * out_price
+    )
+
+
+# Output tokens per SOURCE token of one glossary-extraction call. Measured on
 # job 9be143da split into 10-chunk batches: each batch's glossary entries,
 # serialized as the extractor's JSON and tokenized at 3.853 chars/token, came
 # to an output/input ratio of mean 0.326, median 0.308, p90 0.404, max 0.997
-# across batches. The expected figure uses the mean; the ceiling uses the
-# worst batch, applied to the whole book. Measured on the glossary entries the
+# across batches, where "input" is the batch's source tokens without prompt
+# overhead. The expected figure uses the mean; the ceiling uses the worst
+# batch, applied to the whole book. Measured on the glossary entries the
 # TRANSLATION run produced (no extraction output existed yet), so both are to
 # be recalibrated against real extraction output.
 _EXTRACTION_OUTPUT_RATIO = 0.326
@@ -553,9 +581,16 @@ class CostEstimator:
         """
         model = config.model
         texts = [chunk.source_text for chunk in chunks]
-        batches = plan_extraction_batches(
-            texts, lambda text: self._provider.count_tokens(text, model)
-        )
+        # Each distinct text is counted once and the count reused for both the
+        # plan and the sum: on a real provider a count can be a round trip.
+        counts: dict[str, int] = {}
+
+        def count_once(text: str) -> int:
+            if text not in counts:
+                counts[text] = self._provider.count_tokens(text, model)
+            return counts[text]
+
+        batches = plan_extraction_batches(texts, count_once)
         system, prefix = extraction_prompts("")
         overhead = self._provider.count_tokens(
             system, model
@@ -563,11 +598,12 @@ class CostEstimator:
 
         # Every chunk lands in exactly one batch, and every batch pays the
         # prompt overhead once.
-        input_tokens = len(batches) * overhead + sum(
-            self._provider.count_tokens(text, model) for text in texts
-        )
-        output_tokens = round(input_tokens * _EXTRACTION_OUTPUT_RATIO)
-        output_tokens_high = round(input_tokens * _EXTRACTION_OUTPUT_RATIO_HIGH)
+        source_tokens = sum(count_once(text) for text in texts)
+        input_tokens = len(batches) * overhead + source_tokens
+        # The ratios were measured against batch SOURCE tokens, so they project
+        # output from the source alone; the overhead is priced as input only.
+        output_tokens = round(source_tokens * _EXTRACTION_OUTPUT_RATIO)
+        output_tokens_high = round(source_tokens * _EXTRACTION_OUTPUT_RATIO_HIGH)
 
         in_usd_per_mtok, out_usd_per_mtok = self._provider.price(model)
         input_usd = input_tokens / 1_000_000 * in_usd_per_mtok

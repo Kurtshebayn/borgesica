@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from borgesica.domain.glossary import (
     EXTRACTION_BATCH_TOKENS,
     LlmGlossaryExtractor,
+    count_proposal_conflicts,
     merge_extraction_batches,
     plan_extraction_batches,
     settlement_counts,
@@ -93,8 +94,8 @@ class ScriptedExtractionProvider:
 # ---------------------------------------------------------------------------
 
 
-def test_batch_budget_is_eight_thousand_tokens() -> None:
-    assert EXTRACTION_BATCH_TOKENS == 8000
+def test_batch_budget_is_six_thousand_tokens() -> None:
+    assert EXTRACTION_BATCH_TOKENS == 6000
 
 
 def test_plan_of_no_chunks_is_no_batches() -> None:
@@ -135,12 +136,12 @@ def test_plan_keeps_every_chunk_exactly_once_in_order() -> None:
     assert all(batch for batch in batches)
 
 
-def test_plan_default_budget_holds_ten_prose_chunks_of_800_tokens() -> None:
-    ten = [words(800)] * 10
-    eleven = [words(800)] * 11
+def test_plan_default_budget_holds_seven_prose_chunks_of_800_tokens() -> None:
+    seven = [words(800)] * 7
+    eight = [words(800)] * 8
 
-    assert plan_extraction_batches(ten, count_words) == [list(range(10))]
-    assert plan_extraction_batches(eleven, count_words) == [list(range(10)), [10]]
+    assert plan_extraction_batches(seven, count_words) == [list(range(7))]
+    assert plan_extraction_batches(eight, count_words) == [list(range(7)), [7]]
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +318,44 @@ def test_merge_drops_blank_terms() -> None:
     assert proposals == {"vis": ("Vis",)}
 
 
+def test_merge_does_not_count_a_blank_rendering_as_a_vote() -> None:
+    batches = [
+        [entry("Birthright", "")],
+        [entry("Birthright", "   ")],
+        [entry("Birthright", "Primogenitura")],
+    ]
+
+    glossary, proposals = merge_extraction_batches(batches)
+
+    # Two blanks would otherwise outvote the one real rendering, and an entry
+    # "Birthright -> ''" orders the translator to delete the word.
+    assert glossary.entries[0].translation == "Primogenitura"
+    assert proposals == {"birthright": ("Primogenitura",)}
+
+
+def test_merge_drops_a_term_with_no_non_blank_rendering() -> None:
+    glossary, proposals = merge_extraction_batches(
+        [[entry("Vis", "Vis"), entry("Hierarchy", "")], [entry("Hierarchy", "  ")]]
+    )
+
+    assert [e.term for e in glossary.entries] == ["Vis"]
+    assert proposals == {"vis": ("Vis",)}
+
+
+def test_merge_lets_a_batch_vote_after_a_blank_occurrence() -> None:
+    # A blank occurrence is not the batch's vote, so a later non-blank one is.
+    batches = [
+        [entry("Will", ""), entry("Will", "Voluntad")],
+        [entry("Will", "Albedrío")],
+        [entry("Will", "Voluntad")],
+    ]
+
+    glossary, proposals = merge_extraction_batches(batches)
+
+    assert proposals == {"will": ("Voluntad", "Albedrío", "Voluntad")}
+    assert glossary.entries[0].translation == "Voluntad"
+
+
 def test_merge_orders_entries_by_first_appearance_across_batches() -> None:
     batches = [
         [entry("Caeror", "Caeror"), entry("Vis", "Vis")],
@@ -337,3 +376,114 @@ def test_merge_leaves_direction_decisions_to_the_caller() -> None:
     glossary, _proposals = merge_extraction_batches(batches)
 
     assert [e.term for e in glossary.entries] == ["Will", "Voluntad"]
+
+
+# ---------------------------------------------------------------------------
+# count_proposal_conflicts
+# ---------------------------------------------------------------------------
+
+
+def test_no_proposals_have_no_conflicts() -> None:
+    assert count_proposal_conflicts({}) == 0
+
+
+def test_a_conflict_is_a_term_whose_batches_proposed_different_renderings() -> None:
+    proposals = {
+        "birthright": ("Primogenitura", "Derecho de nacimiento"),
+        "vis": ("Vis", "Vis", "Vis"),
+        "will": ("Voluntad",),
+    }
+
+    assert count_proposal_conflicts(proposals) == 1
+
+
+def test_renderings_differing_only_in_case_or_spacing_do_not_conflict() -> None:
+    # Same grouping as the plurality: these are one rendering, not two.
+    proposals = {"will cage": ("Jaula de Voluntad", "jaula de  voluntad ")}
+
+    assert count_proposal_conflicts(proposals) == 0
+
+
+# ---------------------------------------------------------------------------
+# The extraction prompt must ask for a unit TranslationUnit accepts
+# ---------------------------------------------------------------------------
+
+
+def test_extraction_prompt_does_not_ask_for_an_empty_top_level_translation() -> None:
+    from borgesica.domain.glossary import _EXTRACTION_SYSTEM_PROMPT
+
+    # TranslationUnit rejects an empty translation, so an obedient model
+    # following these instructions failed every extraction call.
+    assert '"translation": ""' not in _EXTRACTION_SYSTEM_PROMPT
+    assert "must be an empty string" not in _EXTRACTION_SYSTEM_PROMPT
+
+
+def test_extraction_prompt_asks_for_the_placeholder() -> None:
+    from borgesica.domain.glossary import _EXTRACTION_PLACEHOLDER, _EXTRACTION_SYSTEM_PROMPT
+
+    assert _EXTRACTION_PLACEHOLDER.strip()
+    assert f'"translation": "{_EXTRACTION_PLACEHOLDER}"' in _EXTRACTION_SYSTEM_PROMPT
+
+
+def test_extraction_prompt_translates_english_words_with_an_in_world_sense() -> None:
+    """A capitalised English word is not invented language.
+
+    Measured 2026-10-08 on gpt-6-luna over the whole book: under a rule that
+    kept "a proper noun with no established Spanish form" verbatim, 38 of 53
+    batches left "Will" as "Will" and plurality locked it in for the book.
+    """
+    from borgesica.domain.glossary import _EXTRACTION_SYSTEM_PROMPT
+
+    prompt = _EXTRACTION_SYSTEM_PROMPT.lower()
+
+    assert "english word" in prompt, "prompt must name English words as their own case"
+    assert "capital" in prompt, "prompt must say capitalisation does not make a word foreign"
+    assert "proper noun with no established spanish form" not in prompt
+
+
+def test_extraction_prompt_adapts_invented_demonyms_in_lowercase() -> None:
+    """Spanish writes demonyms lowercase and inflects them.
+
+    Measured 2026-10-09 on gpt-6-luna after the capitalised-English rule:
+    the model adapted invented demonyms but kept the capital ("Vetusian" ->
+    "Vetusiano" in 21 of 26 batches, "Catenans" -> "Catenanos"). User decision
+    the same day: adapt them, in lowercase.
+    """
+    from borgesica.domain.glossary import _EXTRACTION_SYSTEM_PROMPT
+
+    prompt = _EXTRACTION_SYSTEM_PROMPT.lower()
+
+    assert "demonym" in prompt
+    assert "lowercase" in prompt
+
+
+def test_extraction_prompt_examples_are_not_taken_from_the_measured_book() -> None:
+    """Teaching with the evaluation book's own terms would measure nothing."""
+    from borgesica.domain.glossary import _EXTRACTION_SYSTEM_PROMPT
+
+    for term in (
+        "Will",
+        "Voluntad",
+        "Concurrence",
+        "Academy",
+        "Governance",
+        "Vetusian",
+        "Catenans",
+    ):
+        assert f'"{term}"' not in _EXTRACTION_SYSTEM_PROMPT
+
+
+def test_a_unit_obeying_the_extraction_prompt_validates() -> None:
+    from borgesica.domain.glossary import _EXTRACTION_PLACEHOLDER
+
+    unit = TranslationUnit.model_validate(
+        {
+            "translation": _EXTRACTION_PLACEHOLDER,
+            "summary_update": "Terminology extraction complete.",
+            "glossary_additions": [
+                {"term": "Leathfhear", "translation": "Leathfhear", "note": "half-man"}
+            ],
+        }
+    )
+
+    assert [e.term for e in unit.glossary_additions] == ["Leathfhear"]
