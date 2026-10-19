@@ -655,3 +655,57 @@ def test_the_final_save_keeps_fields_changed_during_the_pass() -> None:
     assert final.config.budget_usd == 99.0
     assert final.glossary_extracted is True
     assert final.cost_usd == pytest.approx(2 * CALL_COST)
+
+
+# ---------------------------------------------------------------------------
+# review_glossary
+# ---------------------------------------------------------------------------
+
+
+def test_review_attaches_the_stored_proposals_and_the_whole_source_evidence() -> None:
+    store = InMemoryCheckpointStore()
+    gap = " " + "." * 80 + " "
+    # Evidence spread over chunks that are all still PENDING: the review runs
+    # before anything is translated, so it must read the source, not output.
+    texts = [gap.join(["Vis said he was ready."] * 3), gap + "Vis nodded, he agreed."]
+    glossary = Glossary(
+        entries=[entry("Vis", "Vis"), entry("Birthright", "Primogenitura")]
+    )
+    job = setup_job(store, texts, glossary=glossary)
+    store.save_glossary_proposals(
+        job.id, {"birthright": ("Primogenitura", "Derecho de nacimiento")}
+    )
+
+    reviewed = {
+        item.entry.term: item
+        for item in make_engine(ScriptedProvider(), store).review_glossary(job.id).entries
+    }
+
+    assert (reviewed["Vis"].masculine_mentions, reviewed["Vis"].feminine_mentions) == (4, 0)
+    assert "conflicting_renderings" in reviewed["Birthright"].flags
+    assert [p.rendering for p in reviewed["Birthright"].proposals] == [
+        "Primogenitura",
+        "Derecho de nacimiento",
+    ]
+
+
+def test_review_persists_nothing() -> None:
+    store = InMemoryCheckpointStore()
+    gap = " " + "." * 80 + " "
+    texts = [gap.join(["Vis said he was ready."] * 25)]
+    job = setup_job(store, texts, glossary=Glossary(entries=[entry("Vis", "Vis")]))
+
+    reviewed = make_engine(ScriptedProvider(), store).review_glossary(job.id).entries
+
+    assert reviewed[0].gender == "masculine"
+    assert reviewed[0].gender_source == "seeded"
+    assert store.load_glossary(job.id).entries[0].gender is None
+
+
+def test_review_of_an_unknown_job_raises() -> None:
+    from borgesica.domain.errors import JobNotFoundError
+
+    engine = make_engine(ScriptedProvider(), InMemoryCheckpointStore())
+
+    with pytest.raises(JobNotFoundError):
+        engine.review_glossary("missing")

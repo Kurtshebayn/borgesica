@@ -54,6 +54,14 @@ Subcommands:
              to the job (budget-guarded). Runs once per job; entries already
              in the glossary win. Progress on stderr, outcome JSON on stdout.
     glossary update <job_id> <term> <translation> [--lock]
+    glossary review <job_id>
+             Free. Prints every glossary entry with what a reviewer needs
+             before translating: the gender the run will anchor and the
+             pronoun counts behind it, the renderings the extraction batches
+             proposed, and risk flags (conflicting_renderings,
+             kept_vs_translated, lowercase_identity, possible_gloss — a weak
+             signal — and undecided_gender). Same JSON as
+             GET /jobs/{id}/glossary/review.
 
 Provider selection:
     Pass --provider on any command, or let it auto-detect: BORGESICA_PROVIDER env
@@ -661,6 +669,17 @@ def _cmd_glossary_show(args: argparse.Namespace, engine: TranslatorEngine) -> in
         return 1
 
 
+def _cmd_glossary_review(args: argparse.Namespace, engine: TranslatorEngine) -> int:
+    """Print the glossary triage view as JSON — free, derived, never stored."""
+    try:
+        review = engine.review_glossary(args.job_id)
+    except JobNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(review.model_dump(mode="json"), indent=2, ensure_ascii=False))
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     """Boot the local HTTP API (borgesica.serve) bound to loopback only.
 
@@ -942,6 +961,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_gextract.add_argument("job_id")
     _add_provider(p_gextract)
 
+    p_greview = gsub.add_parser(
+        "review",
+        help="Print each glossary entry with gender evidence and risk flags (free)",
+    )
+    p_greview.add_argument("job_id")
+    _add_provider(p_greview)
+
     p_gupdate = gsub.add_parser("update", help="Add or update a glossary entry")
     p_gupdate.add_argument("job_id")
     p_gupdate.add_argument("term")
@@ -1045,6 +1071,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_glossary_extract(args, engine)
         if args.glossary_command == "update":
             return _cmd_glossary_update(args, engine)
+        if args.glossary_command == "review":
+            return _cmd_glossary_review(args, engine)
         return 1
 
     handler = dispatch.get(args.command)

@@ -25,7 +25,7 @@ from borgesica.domain.errors import (
     JobNotFoundError,
     JobStateError,
 )
-from borgesica.domain.models import JobConfig, JobStatus, SourceType
+from borgesica.domain.models import GlossaryReview, JobConfig, JobStatus, SourceType
 from borgesica.serve.runner import JobRunner
 from borgesica.serve.schemas import (
     CreateJobRequest,
@@ -205,6 +205,14 @@ def create_app(
     def put_glossary(job_id: str, payload: GlossaryUpdateRequest) -> GlossaryResponse:
         updated = engine.update_glossary(job_id, payload.entries)
         return GlossaryResponse(entries=updated.entries)
+
+    @app.get("/jobs/{job_id}/glossary/review", response_model=GlossaryReview)
+    def get_glossary_review(job_id: str) -> GlossaryReview:
+        """Every glossary entry with its gender evidence and risk flags, for
+        the pre-translation review screen. Derived on each request, free (no
+        provider call) and never persisted; GlossaryReview documents the
+        shape."""
+        return engine.review_glossary(job_id)
 
     @app.post("/jobs/{job_id}/run", response_model=JobResponse, status_code=202)
     def start_run(job_id: str, payload: RunRequest) -> JobResponse:

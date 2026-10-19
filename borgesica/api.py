@@ -41,6 +41,7 @@ from borgesica.domain.glossary import (
     seed_character_gender,
     settlement_counts,
 )
+from borgesica.domain.glossary_review import review_glossary
 from borgesica.domain.markup import segment_count
 from borgesica.domain.models import (
     Chunk,
@@ -50,6 +51,7 @@ from borgesica.domain.models import (
     GlossaryEntry,
     GlossaryExtractionEstimate,
     GlossaryExtractionOutcome,
+    GlossaryReview,
     GlossarySettlements,
     GlossaryVotes,
     Job,
@@ -762,9 +764,12 @@ class TranslatorEngine:
         right half of an inverse pair. Without the source, job 13b43ac6 lost
         "Will -> Voluntad" and kept "Voluntad -> Will".
         """
+        return sanitize_glossary(glossary, source_text=self._source_text(job_id))
+
+    def _source_text(self, job_id: str) -> str:
+        """The whole ENGLISH source of a job, every chunk in index order."""
         chunks = sorted(self._checkpoint.load_chunks(job_id), key=lambda c: c.index)
-        source_text = "\n\n".join(c.source_text for c in chunks)
-        return sanitize_glossary(glossary, source_text=source_text)
+        return "\n\n".join(c.source_text for c in chunks)
 
     def get_glossary(self, job_id: str) -> Glossary:
         """Return the current persisted glossary for a job.
@@ -828,6 +833,42 @@ class TranslatorEngine:
         self._load_job_or_raise(job_id)
         return settlement_counts(
             self._clean_glossary(job_id), self._checkpoint.load_votes(job_id)
+        )
+
+    def review_glossary(self, job_id: str) -> GlossaryReview:
+        """Return the glossary with each entry's gender evidence and risk flags.
+
+        What a reviewer needs to triage an extracted glossary before paying to
+        translate with it: the gender the run would anchor and the pronoun
+        counts behind it, the renderings the extraction batches proposed, and
+        the deterministic flags in ``GlossaryRiskFlag``.
+
+        Makes ZERO provider calls and persists nothing. Everything is derived
+        on each call from the stored glossary, the stored proposals and the
+        whole ENGLISH source — every chunk, translated or not, since the
+        review normally runs before anything is translated. Deriving is cheap
+        (0.17s for the pronoun scan plus the lowercase vocabulary on a 1.5M
+        character book) and, unlike a stored verdict, cannot disagree with an
+        entry a human has since edited.
+
+        Args:
+            job_id: ID of the job.
+
+        Returns:
+            One review entry per entry ``get_glossary`` returns, in the same
+            order, plus the gender thresholds used. ``proposals`` is empty
+            for every entry when the extraction pass never ran.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        source_text = self._source_text(job_id)
+        glossary, _dropped = sanitize_glossary(
+            self._checkpoint.load_glossary(job_id), source_text=source_text
+        )
+        return review_glossary(
+            glossary, self._checkpoint.load_glossary_proposals(job_id), source_text
         )
 
     def update_glossary(self, job_id: str, entries: list[GlossaryEntry]) -> Glossary:

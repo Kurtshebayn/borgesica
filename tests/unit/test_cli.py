@@ -1424,3 +1424,65 @@ def test_cmd_estimate_extraction_line_is_null_once_extracted(
     out, _ = capsys.readouterr()
     assert code == 0
     assert json.loads(out)["glossary_extraction"] is None
+
+
+def test_cmd_glossary_review_prints_the_review_as_json(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Same shape as GET /jobs/{id}/glossary/review, so a script and the app
+    read one format."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.models import (
+        GlossaryEntry,
+        GlossaryReview,
+        GlossaryReviewEntry,
+        RenderingProposal,
+    )
+
+    review = GlossaryReview(
+        entries=[
+            GlossaryReviewEntry(
+                entry=GlossaryEntry(term="Aequa", translation="Aequa"),
+                masculine_mentions=95,
+                feminine_mentions=84,
+                proposals=[RenderingProposal(rendering="Aequa", batches=3)],
+                flags=["undecided_gender"],
+            )
+        ],
+        min_gender_mentions=20,
+        min_gender_ratio=0.7,
+    )
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.review_glossary.return_value = review
+        mock_build.return_value = engine
+
+        code = main(["glossary", "review", "job-1"])
+
+    out, _err = capsys.readouterr()
+    assert code == 0
+    engine.review_glossary.assert_called_once_with("job-1")
+    assert json.loads(out) == review.model_dump(mode="json")
+
+
+def test_cmd_glossary_review_reports_an_unknown_job(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+    from borgesica.domain.errors import JobNotFoundError
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.review_glossary.side_effect = JobNotFoundError(job_id="job-1")
+        mock_build.return_value = engine
+
+        code = main(["glossary", "review", "job-1"])
+
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert out == ""
+    assert "ERROR" in err
