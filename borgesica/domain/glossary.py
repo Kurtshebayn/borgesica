@@ -53,11 +53,14 @@ __all__ = [
     "dedupe_glossary",
     "drop_reversed_entries",
     "extraction_prompts",
+    "gender_eligible",
     "get_extractor",
     "merge_additions",
     "merge_extraction_batches",
     "plan_extraction_batches",
     "normalize_term",
+    "rendering_counts",
+    "renderings_disagree",
     "sanitize_glossary",
     "seed_character_gender",
     "settlement_counts",
@@ -543,8 +546,11 @@ def _rendering_key(rendering: str) -> str:
     return normalize_term(rendering).casefold()
 
 
-def _plurality(proposals: tuple[str, ...]) -> str:
-    """Return the most-proposed rendering, earliest proposal breaking ties.
+def rendering_counts(proposals: tuple[str, ...]) -> list[tuple[str, int]]:
+    """Group proposals into distinct renderings, most-proposed first.
+
+    Each rendering is reported in its first-proposed spelling, with the number
+    of proposals it collected; ties keep the order of first proposal.
 
     Grouped by ``casefold`` so "jaula de Voluntad" and "Jaula de Voluntad" are
     one rendering rather than two competing ones — on the real data that case
@@ -557,9 +563,25 @@ def _plurality(proposals: tuple[str, ...]) -> str:
         key = _rendering_key(rendering)
         counts[key] = counts.get(key, 0) + 1
         spelling.setdefault(key, rendering)
-    # dict preserves insertion order and max() keeps the first maximum, so ties
-    # resolve to the rendering proposed earliest.
-    return spelling[max(counts, key=lambda key: counts[key])]
+    # dict preserves insertion order and sorted() is stable, so ties keep the
+    # rendering proposed earliest in front.
+    ranked = sorted(counts, key=lambda key: -counts[key])
+    return [(spelling[key], counts[key]) for key in ranked]
+
+
+def renderings_disagree(proposals: tuple[str, ...]) -> bool:
+    """True when the proposals hold more than one distinct rendering.
+
+    Compared the way ``rendering_counts`` groups them, so a case or spacing
+    variant is the same rendering and not a disagreement worth a reviewer's
+    time.
+    """
+    return len({_rendering_key(proposal) for proposal in proposals}) > 1
+
+
+def _plurality(proposals: tuple[str, ...]) -> str:
+    """Return the most-proposed rendering, earliest proposal breaking ties."""
+    return rendering_counts(proposals)[0][0]
 
 
 def apply_additions(
@@ -818,15 +840,9 @@ def merge_extraction_batches(
 def count_proposal_conflicts(proposals: dict[str, tuple[str, ...]]) -> int:
     """Count the terms whose batches proposed more than one distinct rendering.
 
-    Renderings are compared the way ``_plurality`` groups them
-    (``_rendering_key``: normalised, casefolded), so a case or spacing variant
-    is the same rendering and not a disagreement worth a reviewer's time.
+    See ``renderings_disagree`` for what counts as distinct.
     """
-    return sum(
-        1
-        for renderings in proposals.values()
-        if len({_rendering_key(rendering) for rendering in renderings}) > 1
-    )
+    return sum(1 for renderings in proposals.values() if renderings_disagree(renderings))
 
 
 # ---------------------------------------------------------------------------
@@ -928,6 +944,21 @@ def _classify_gender(
     return "feminine" if feminine / total >= min_ratio else None
 
 
+def gender_eligible(entry: GlossaryEntry) -> bool:
+    """True when pronoun evidence may set this entry's gender.
+
+    Only an unclassified name carried into Spanish UNCHANGED: once a term is
+    translated its Spanish gender is grammatical and belongs to the Spanish
+    noun, whatever the English referent was. See ``seed_character_gender``.
+    """
+    term = normalize_term(entry.term)
+    return (
+        entry.gender is None
+        and bool(term)
+        and term == normalize_term(entry.translation)
+    )
+
+
 def seed_character_gender(
     glossary: Glossary,
     evidence: dict[str, tuple[int, int]],
@@ -968,16 +999,11 @@ def seed_character_gender(
 
     entries: list[GlossaryEntry] = []
     for entry in glossary.entries:
-        term = normalize_term(entry.term)
-        eligible = (
-            entry.gender is None
-            # Only a name carried into Spanish UNCHANGED. Once a term is
-            # translated its Spanish gender is grammatical and belongs to the
-            # Spanish noun, whatever the English referent was.
-            and bool(term)
-            and term == normalize_term(entry.translation)
+        counts = (
+            evidence.get(normalize_term(entry.term).casefold())
+            if gender_eligible(entry)
+            else None
         )
-        counts = evidence.get(term.casefold()) if eligible else None
         gender = (
             _classify_gender(counts[0], counts[1], min_mentions, min_ratio)
             if counts is not None
