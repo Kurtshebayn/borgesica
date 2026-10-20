@@ -25,7 +25,9 @@ import {
   formatGlossaryProgress,
   formatProgress,
   initialWizardState,
+  loadGlossaryReview,
   runRecoveryAction,
+  saveGlossary,
   wizardReducer,
   type Provider,
 } from "./wizard";
@@ -96,16 +98,11 @@ export default function WizardScreen({
     !state.glossaryReviewError &&
     !state.glossaryLocked;
   useEffect(() => {
-    if (needsReview && state.jobId) void loadGlossaryReview(state.jobId);
+    if (needsReview && state.jobId) void reloadGlossaryReview(state.jobId);
   }, [needsReview]);
 
-  async function loadGlossaryReview(jobId: string) {
-    try {
-      const review = await getGlossaryReview(baseUrl, token, jobId);
-      dispatch({ type: "GLOSSARY_REVIEW_LOADED", review });
-    } catch (err) {
-      dispatch({ type: "GLOSSARY_REVIEW_FAILED", message: String(err) });
-    }
+  function reloadGlossaryReview(jobId: string): Promise<void> {
+    return loadGlossaryReview(() => getGlossaryReview(baseUrl, token, jobId), dispatch);
   }
 
   async function handlePick() {
@@ -171,34 +168,16 @@ export default function WizardScreen({
     dispatch({ type: "GLOSSARY_CHANGED", entries });
   }
 
-  /** Saves the changed entries and reloads the review, so flags and gender
-   * verdicts reflect what was just saved. */
-  async function handleSaveGlossary() {
+  /** "save" or "lock": the decision (what to send, when to lock) is the
+   * tested `saveGlossary`; this only wires the API calls. */
+  async function handleSaveGlossary(mode: "save" | "lock") {
     if (!state.jobId) return;
-    const changes = glossaryChangesToSave(state.glossaryReview, state.glossary);
-    if (changes.length === 0) return;
-    try {
-      await putGlossary(baseUrl, token, state.jobId, changes);
-    } catch (err) {
-      dispatch({ type: "GLOSSARY_SAVE_FAILED", message: String(err) });
-      return;
-    }
-    await loadGlossaryReview(state.jobId);
-  }
-
-  /** A refused save (the glossary rules reject an entry: HTTP 422, nothing
-   * saved) keeps the screen editable instead of locking a glossary that was
-   * never stored. */
-  async function handleLockAndSaveGlossary() {
-    if (!state.jobId) return;
-    const changes = glossaryChangesToSave(state.glossaryReview, state.glossary);
-    try {
-      if (changes.length > 0) await putGlossary(baseUrl, token, state.jobId, changes);
-    } catch (err) {
-      dispatch({ type: "GLOSSARY_SAVE_FAILED", message: String(err) });
-      return;
-    }
-    dispatch({ type: "GLOSSARY_LOCKED" });
+    const jobId = state.jobId;
+    await saveGlossary(state, mode, {
+      put: (entries) => putGlossary(baseUrl, token, jobId, entries),
+      loadReview: () => reloadGlossaryReview(jobId),
+      dispatch,
+    });
   }
 
   function startWatching(jobId: string) {
@@ -418,13 +397,13 @@ export default function WizardScreen({
             Agregar entrada
           </button>
           {!state.glossaryLocked && pendingGlossaryChanges > 0 && state.glossaryReview && (
-            <button onClick={() => void handleSaveGlossary()}>
+            <button onClick={() => void handleSaveGlossary("save")}>
               Guardar {pendingGlossaryChanges === 1 ? "1 cambio" : `${pendingGlossaryChanges} cambios`}{" "}
               y actualizar la revisión
             </button>
           )}
           {!state.glossaryLocked && (
-            <button onClick={() => void handleLockAndSaveGlossary()}>
+            <button onClick={() => void handleSaveGlossary("lock")}>
               Bloquear glosario y continuar
             </button>
           )}
