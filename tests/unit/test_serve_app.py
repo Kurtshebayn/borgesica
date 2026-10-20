@@ -305,6 +305,29 @@ def test_glossary_get_and_update_roundtrip(tmp_path: Path) -> None:
     assert get_again.json()["entries"][0]["term"] == "Aleph"
 
 
+def test_glossary_update_takes_a_gender_anchor_away(tmp_path: Path) -> None:
+    """The review screen's "no gender" choice: a stored decision that a later
+    edit sending ``gender: null`` (meaning "unchanged") does not undo."""
+    engine, _ = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+    job_id = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"}).json()["id"]
+    url = f"/jobs/{job_id}/glossary"
+
+    client.put(url, json={"entries": [{"term": "Caten", "translation": "Caten", "gender": "masculine"}]})
+    put_resp = client.put(
+        url, json={"entries": [{"term": "Caten", "translation": "Caten", "gender": "unanchored"}]}
+    )
+    client.put(url, json={"entries": [{"term": "Caten", "translation": "Caten", "locked": True}]})
+
+    assert put_resp.status_code == 200
+    assert put_resp.json()["entries"][0]["gender"] == "unanchored"
+    stored = client.get(url).json()["entries"][0]
+    assert (stored["gender"], stored["locked"]) == ("unanchored", True)
+    reviewed = client.get(f"{url}/review").json()["entries"][0]
+    assert (reviewed["gender"], reviewed["gender_source"]) == (None, "stored")
+
+
 def test_glossary_update_unknown_job_404() -> None:
     engine, _ = _make_engine()
     client = _client(engine)

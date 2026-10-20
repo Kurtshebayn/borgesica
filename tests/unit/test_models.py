@@ -607,6 +607,21 @@ def test_glossary_entry_accepts_the_two_classified_genders() -> None:
     )
 
 
+def test_glossary_entry_stores_a_persons_decision_to_anchor_no_gender() -> None:
+    """"unanchored" is a decision, not an unknown.
+
+    The seeder tags non-persons too (the city Caten, the rank Princeps) from
+    the pronouns of the people standing near them. None cannot undo that —
+    every run re-seeds a None — so a person needs a value that says "no
+    anchor for this term", distinct from "not classified yet".
+    """
+    from borgesica.domain.models import GlossaryEntry
+
+    entry = GlossaryEntry(term="Caten", translation="Caten", gender="unanchored")
+
+    assert entry.gender == "unanchored"
+
+
 def test_glossary_entry_downgrades_an_unrecognized_gender_to_unclassified() -> None:
     """A value nobody recognises must degrade to "unclassified", never raise.
 

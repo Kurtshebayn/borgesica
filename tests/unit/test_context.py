@@ -919,6 +919,23 @@ def test_render_omits_unclassified_characters_from_the_gender_line():
     assert "Emissa" not in line, "unclassified must not be silently assigned"
 
 
+def test_render_omits_an_unanchored_term_from_the_gender_line():
+    """A person decided the term carries no character gender: the prompt must
+    say nothing about it, not echo the marker."""
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="Caten", translation="Caten", gender="unanchored"),
+        ]
+    )
+
+    rendered = glossary.render()
+
+    assert "Vis" in _gender_line(rendered)
+    assert "Caten" not in _gender_line(rendered)
+    assert "unanchored" not in rendered
+
+
 def test_render_omits_the_gender_line_when_nothing_is_classified():
     """A glossary with no classified character pays nothing for the feature."""
     glossary = Glossary(

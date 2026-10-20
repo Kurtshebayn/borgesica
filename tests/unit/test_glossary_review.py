@@ -67,6 +67,33 @@ def test_a_stored_gender_wins_over_the_evidence() -> None:
     assert reviewed["Vis"].gender_source == "stored"
 
 
+def test_a_decision_to_anchor_nothing_is_stored_and_anchors_no_gender() -> None:
+    # Caten would seed masculine; Aequa would be flagged undecided.
+    source = apart(
+        *["Caten saw he left."] * 4,
+        *["Aequa saw he left."] * 2,
+        *["Aequa said she stayed."] * 2,
+    )
+    reviewed = by_term(
+        review(
+            [
+                entry("Caten", "Caten", gender="unanchored"),
+                entry("Aequa", "Aequa", gender="unanchored"),
+            ],
+            source=source,
+            min_mentions=4,
+        )
+    )
+
+    for term in ("Caten", "Aequa"):
+        assert reviewed[term].gender is None, "the run anchors nothing"
+        assert reviewed[term].gender_source == "stored", "a person decided it"
+        assert reviewed[term].entry.gender == "unanchored"
+        assert reviewed[term].flags == [], "a decided entry is not undecided"
+    # The evidence is still shown, so the decision can be reconsidered.
+    assert reviewed["Caten"].masculine_mentions == 4
+
+
 def test_a_character_with_enough_mentions_but_no_majority_is_flagged_undecided() -> None:
     # 2 masculine, 2 feminine: past the mention floor, under the ratio.
     source = apart(*["Aequa saw he left."] * 2, *["Aequa said she stayed."] * 2)
