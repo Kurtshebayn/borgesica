@@ -299,14 +299,21 @@ def test_dedupe_recovers_a_gender_from_the_discarded_duplicate():
 def test_dedupe_keeps_the_winners_own_gender_when_it_has_one():
     from borgesica.domain.glossary import dedupe_glossary
 
-    glossary = Glossary(
+    first_wins = Glossary(
         entries=[
             GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
             GlossaryEntry(term="vis", translation="vis", gender="feminine"),
         ]
     )
+    locked_wins = Glossary(
+        entries=[
+            GlossaryEntry(term="vis", translation="vis", gender="feminine"),
+            GlossaryEntry(term="Vis", translation="Vis", locked=True, gender="masculine"),
+        ]
+    )
 
-    assert dedupe_glossary(glossary)[0].entries[0].gender == "masculine"
+    assert dedupe_glossary(first_wins)[0].entries[0].gender == "masculine"
+    assert dedupe_glossary(locked_wins)[0].entries[0].gender == "masculine"
 
 
 def test_dedupe_keeps_the_winners_own_note_when_it_has_one():
