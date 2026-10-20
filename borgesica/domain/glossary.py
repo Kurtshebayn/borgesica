@@ -185,10 +185,18 @@ class LlmGlossaryExtractor:
             config: JobConfig (model string used for the provider call).
 
         Returns:
-            Glossary populated with entries from the LLM response.
+            Glossary populated with entries from the LLM response. Each entry
+            keeps only what the model may propose — term, translation, note —
+            like every other model-output path: ``locked`` is a human decision,
+            ``gender`` is seeded from the source and ``first_draw`` records
+            what quorum committed, so none of them is taken from the model.
         """
         batch = self.extract_batch(text, config)
-        seeded, _duplicates = dedupe_glossary(Glossary(entries=batch.entries))
+        proposed = [
+            GlossaryEntry(term=e.term, translation=e.translation, note=e.note)
+            for e in batch.entries
+        ]
+        seeded, _duplicates = dedupe_glossary(Glossary(entries=proposed))
         return seeded
 
 
@@ -266,7 +274,9 @@ def dedupe_glossary(glossary: Glossary) -> tuple[Glossary, list[GlossaryEntry]]:
       - otherwise the first-seen entry wins;
       - the winner keeps its own term, translation and note, except that a
         missing note is filled from the first duplicate that has one — dedupe
-        should not be the step that loses the only human-readable context.
+        should not be the step that loses the only human-readable context;
+      - a missing gender is filled the same way: it is a fact about the
+        character (seeded, or a person's decision), not about the spelling.
 
     Entries whose normalised term is empty are dropped: they can never match
     source text, so they are pure prompt weight.
@@ -290,14 +300,22 @@ def dedupe_glossary(glossary: Glossary) -> tuple[Glossary, list[GlossaryEntry]]:
             continue
 
         if candidate.locked and not incumbent.locked:
-            # Locked wins, but keep any note the (unlocked) incumbent carried.
+            # Locked wins, but keep any note or gender the (unlocked)
+            # incumbent carried.
             winners[key] = candidate.model_copy(
-                update={"note": candidate.note or incumbent.note}
+                update={
+                    "note": candidate.note or incumbent.note,
+                    "gender": candidate.gender or incumbent.gender,
+                }
             )
             dropped.append(incumbent)
         else:
-            if incumbent.note is None and candidate.note is not None:
-                winners[key] = incumbent.model_copy(update={"note": candidate.note})
+            winners[key] = incumbent.model_copy(
+                update={
+                    "note": incumbent.note if incumbent.note is not None else candidate.note,
+                    "gender": incumbent.gender or candidate.gender,
+                }
+            )
             dropped.append(entry)
 
     return Glossary(entries=[winners[key] for key in order]), dropped

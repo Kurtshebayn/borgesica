@@ -274,6 +274,41 @@ def test_dedupe_recovers_a_note_from_the_discarded_duplicate():
     assert result.entries[0].note == "Iron-age lake dwelling."
 
 
+def test_dedupe_recovers_a_gender_from_the_discarded_duplicate():
+    """A gender is a fact about the character, stored by the seeder or a
+    person; collapsing two spellings must not drop it, whichever one wins."""
+    from borgesica.domain.glossary import dedupe_glossary
+
+    locked_wins = Glossary(
+        entries=[
+            GlossaryEntry(term="vis", translation="vis", gender="masculine"),
+            GlossaryEntry(term="Vis", translation="Vis", locked=True),
+        ]
+    )
+    first_wins = Glossary(
+        entries=[
+            GlossaryEntry(term="Lanistia", translation="Lanistia"),
+            GlossaryEntry(term="lanistia", translation="lanistia", gender="feminine"),
+        ]
+    )
+
+    assert [e.gender for e in dedupe_glossary(locked_wins)[0].entries] == ["masculine"]
+    assert [e.gender for e in dedupe_glossary(first_wins)[0].entries] == ["feminine"]
+
+
+def test_dedupe_keeps_the_winners_own_gender_when_it_has_one():
+    from borgesica.domain.glossary import dedupe_glossary
+
+    glossary = Glossary(
+        entries=[
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+            GlossaryEntry(term="vis", translation="vis", gender="feminine"),
+        ]
+    )
+
+    assert dedupe_glossary(glossary)[0].entries[0].gender == "masculine"
+
+
 def test_dedupe_keeps_the_winners_own_note_when_it_has_one():
     """A note on the surviving entry is never overwritten by a duplicate's note."""
     from borgesica.domain.glossary import dedupe_glossary
@@ -471,6 +506,43 @@ def test_llm_extractor_dedupes_its_own_output():
     glossary = extractor.extract("text", make_config(glossary_strategy="llm"))
 
     assert [e.term for e in glossary.entries] == ["Alupi"]
+
+
+def test_llm_extractor_keeps_only_what_the_model_may_propose():
+    """Gender, locking and the first draw are never the model's to set.
+
+    Gender is seeded from the English source (a stored one blocks the
+    seeder), locking is a human decision that bypasses the direction guard
+    and the vote, and first_draw records what quorum committed. The tool
+    schema still offers locked and first_draw, so a model can send them; every
+    other model-output path rebuilds entries without them, and so must the
+    create-time extraction.
+    """
+    from borgesica.domain.glossary import LlmGlossaryExtractor
+
+    canned = TranslationUnit(
+        translation="dummy",
+        summary_update="done",
+        glossary_additions=[
+            GlossaryEntry(
+                term="Caten",
+                translation="Caten",
+                note="a city",
+                locked=True,
+                gender="masculine",
+                first_draw="Catena",
+            ),
+        ],
+    )
+    provider = FakeTranslationProvider(canned_unit=canned)
+
+    glossary = LlmGlossaryExtractor(provider=provider).extract(
+        "text", make_config(glossary_strategy="llm")
+    )
+
+    assert glossary.entries == [
+        GlossaryEntry(term="Caten", translation="Caten", note="a city")
+    ]
 
 
 # ---------------------------------------------------------------------------
