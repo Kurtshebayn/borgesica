@@ -342,6 +342,88 @@ class GlossarySettlements(BaseModel):
         return self.changed + self.confirmed
 
 
+GlossaryRiskFlag = Literal[
+    "conflicting_renderings",
+    "kept_vs_translated",
+    "lowercase_identity",
+    "possible_gloss",
+    "undecided_gender",
+]
+"""A deterministic reason a glossary entry deserves a reviewer's look.
+
+- ``conflicting_renderings``: the extraction batches proposed more than one
+  distinct rendering (compared as the plurality groups them).
+- ``kept_vs_translated``: some batches kept the term verbatim, others
+  translated it. Always also ``conflicting_renderings``.
+- ``lowercase_identity``: a capitalised entry kept verbatim whose words the
+  source also writes in lowercase — ordinary vocabulary left untranslated.
+- ``possible_gloss``: a translated entry whose term the source never writes
+  lowercase and whose rendering shares no word with it. A WEAK signal: it also
+  fires on correct translations of capitalised English words.
+- ``undecided_gender``: a verbatim entry with enough gendered pronouns nearby
+  to be classified, but no clear majority, so the anchor leaves it unset.
+"""
+
+
+class RenderingProposal(BaseModel):
+    """One distinct rendering the extraction batches proposed for a term."""
+
+    rendering: str
+    batches: int
+
+
+class GlossaryReviewEntry(BaseModel):
+    """A glossary entry plus everything a reviewer needs to triage it.
+
+    Derived on every read, never stored: the source never changes, and a
+    stored verdict would age out of agreement with an entry a human edits.
+    Fields are documented on ``GlossaryReview``.
+    """
+
+    entry: GlossaryEntry
+    gender: CharacterGender | None = None
+    gender_source: Literal["stored", "seeded"] | None = None
+    masculine_mentions: int = 0
+    feminine_mentions: int = 0
+    proposals: list[RenderingProposal] = Field(default_factory=list)
+    flags: list[GlossaryRiskFlag] = Field(default_factory=list)
+
+
+class GlossaryReview(BaseModel):
+    """The triage view of a job's glossary: what GET /jobs/{id}/glossary/review
+    and ``glossary review`` return, field for field.
+
+    ``entries`` holds one GlossaryReviewEntry per entry the glossary read
+    returns, in the same order:
+
+    - ``entry``: the stored GlossaryEntry, unchanged (edit it through the
+      usual glossary update).
+    - ``gender`` / ``gender_source``: the gender a translation run will anchor
+      and where it comes from — "stored" (set on the entry, by a human or an
+      earlier run) or "seeded" (derived now from the pronoun evidence); both
+      null when neither applies.
+    - ``masculine_mentions`` / ``feminine_mentions``: gendered pronouns found
+      near the term in the English source, reported even when they support
+      no gender. Only verbatim (term == translation) entries can be seeded.
+    - ``proposals``: the distinct renderings the extraction batches proposed,
+      most-proposed first, each with the number of batches that proposed it.
+      Empty when the extraction pass never ran or never proposed the term.
+    - ``flags``: zero or more GlossaryRiskFlag values (see its docstring);
+      ``possible_gloss`` is a weak signal, the others are strong.
+
+    ``min_gender_mentions`` and ``min_gender_ratio`` are the seeder's
+    thresholds: a verbatim entry is classified only with at least that many
+    mentions of which at least that share agree, and is flagged
+    ``undecided_gender`` when it has the mentions but not the share. They
+    travel with the data so a reader can explain a verdict without
+    hard-coding them.
+    """
+
+    entries: list[GlossaryReviewEntry] = Field(default_factory=list)
+    min_gender_mentions: int
+    min_gender_ratio: float
+
+
 class RollingSummary(BaseModel):
     text: str = ""
     chunk_index: int = -1  # index of the last chunk that produced this summary

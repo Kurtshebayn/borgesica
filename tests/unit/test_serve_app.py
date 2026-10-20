@@ -315,3 +315,60 @@ def test_glossary_update_unknown_job_404() -> None:
     )
 
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /jobs/{id}/glossary/review
+# ---------------------------------------------------------------------------
+
+
+def test_glossary_review_returns_every_entry_with_evidence_and_flags(
+    tmp_path: Path,
+) -> None:
+    engine, checkpoint = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+    job_id = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"}).json()["id"]
+    client.put(
+        f"/jobs/{job_id}/glossary",
+        json={"entries": [{"term": "Cue", "translation": "Cue"}]},
+    )
+    checkpoint.save_glossary_proposals(job_id, {"cue": ("Cue", "Señal")})
+
+    resp = client.get(f"/jobs/{job_id}/glossary/review")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # The seeder's thresholds travel with the data, so the review screen can
+    # explain "undecided" without hard-coding them.
+    assert body["min_gender_mentions"] == 20
+    assert body["min_gender_ratio"] == 0.7
+    assert body["entries"] == [
+        {
+            "entry": {
+                "term": "Cue",
+                "translation": "Cue",
+                "locked": False,
+                "note": None,
+                "gender": None,
+                "first_draw": None,
+            },
+            "gender": None,
+            "gender_source": None,
+            "masculine_mentions": 0,
+            "feminine_mentions": 0,
+            "proposals": [
+                {"rendering": "Cue", "batches": 1},
+                {"rendering": "Señal", "batches": 1},
+            ],
+            "flags": ["conflicting_renderings", "kept_vs_translated"],
+        }
+    ]
+
+
+def test_glossary_review_unknown_job_404() -> None:
+    engine, _ = _make_engine()
+
+    resp = _client(engine).get("/jobs/does-not-exist/glossary/review")
+
+    assert resp.status_code == 404

@@ -21,6 +21,50 @@ export interface GlossaryEntry {
   note?: string | null;
 }
 
+export type CharacterGender = "masculine" | "feminine";
+
+/** Deterministic reasons an entry deserves a reviewer's look.
+ * kept_vs_translated always comes with conflicting_renderings;
+ * possible_gloss is a weak signal (it also fires on correct translations of
+ * capitalised English words such as Academy -> la Academia). */
+export type GlossaryRiskFlag =
+  | "conflicting_renderings"
+  | "kept_vs_translated"
+  | "lowercase_identity"
+  | "possible_gloss"
+  | "undecided_gender";
+
+/** One distinct rendering the extraction batches proposed for a term. */
+export interface RenderingProposal {
+  rendering: string;
+  batches: number;
+}
+
+export interface GlossaryReviewEntry {
+  /** The stored entry, unchanged; edit it through PUT /glossary. */
+  entry: GlossaryEntry;
+  /** The gender a translation run will anchor, or null. */
+  gender: CharacterGender | null;
+  /** "stored": set on the entry; "seeded": derived from the pronoun counts. */
+  gender_source: "stored" | "seeded" | null;
+  /** Gendered pronouns near the term in the English source. */
+  masculine_mentions: number;
+  feminine_mentions: number;
+  /** Most-proposed first; empty when no extraction batch proposed the term. */
+  proposals: RenderingProposal[];
+  flags: GlossaryRiskFlag[];
+}
+
+/** GET /jobs/{id}/glossary/review — derived on each request, never stored.
+ * Entries come in the same order as GET /jobs/{id}/glossary. */
+export interface GlossaryReviewResponse {
+  entries: GlossaryReviewEntry[];
+  /** A verbatim entry is classified only with at least this many mentions... */
+  min_gender_mentions: number;
+  /** ...of which at least this share agree; otherwise undecided_gender. */
+  min_gender_ratio: number;
+}
+
 export interface JobResponse {
   id: string;
   status: JobStatus;
