@@ -108,7 +108,14 @@ def _flags(
     # correct translations of capitalised English words (Academy -> la
     # Academia, Senate -> el Senado). A cognate test only halved that (37)
     # without finding anything the plain rule missed, so it was not added.
-    if not identity and not seen_lowercase and not _shares_a_word(term, entry.translation):
+    # A term with no word at all ("1984") makes both tests vacuous, so it is
+    # never flagged by default.
+    if (
+        not identity
+        and _words(term)
+        and not seen_lowercase
+        and not _shares_a_word(term, entry.translation)
+    ):
         flags.append("possible_gloss")
 
     if undecided:

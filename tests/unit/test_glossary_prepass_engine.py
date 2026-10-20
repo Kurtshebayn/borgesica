@@ -709,3 +709,25 @@ def test_review_of_an_unknown_job_raises() -> None:
 
     with pytest.raises(JobNotFoundError):
         engine.review_glossary("missing")
+
+
+def test_review_lists_exactly_the_entries_get_glossary_shows() -> None:
+    # The stored glossary holds what the read path repairs: a reversed pair
+    # and a case duplicate. The review must show the same entries, or the
+    # screen would offer to triage entries the glossary no longer has.
+    store = InMemoryCheckpointStore()
+    stored = Glossary(
+        entries=[
+            entry("Voluntad", "Will"),
+            entry("Will", "Voluntad"),
+            entry("alupi", "alupi"),
+            entry("Alupi", "Alupi"),
+        ]
+    )
+    job = setup_job(store, ["The Will answered him. The alupi waited."], glossary=stored)
+    engine = make_engine(ScriptedProvider(), store)
+
+    reviewed = engine.review_glossary(job.id)
+
+    assert [item.entry for item in reviewed.entries] == engine.get_glossary(job.id).entries
+    assert len(reviewed.entries) < len(stored.entries)

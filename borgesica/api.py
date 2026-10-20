@@ -863,12 +863,12 @@ class TranslatorEngine:
             JobNotFoundError: if job_id is not found.
         """
         self._load_job_or_raise(job_id)
-        source_text = self._source_text(job_id)
-        glossary, _dropped = sanitize_glossary(
-            self._checkpoint.load_glossary(job_id), source_text=source_text
-        )
+        # The same read path as ``get_glossary``, so the review never lists an
+        # entry the glossary screen does not show.
         return review_glossary(
-            glossary, self._checkpoint.load_glossary_proposals(job_id), source_text
+            self._clean_glossary(job_id),
+            self._checkpoint.load_glossary_proposals(job_id),
+            self._source_text(job_id),
         )
 
     def update_glossary(self, job_id: str, entries: list[GlossaryEntry]) -> Glossary:

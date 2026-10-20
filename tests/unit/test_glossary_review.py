@@ -221,6 +221,17 @@ def test_a_term_the_source_also_writes_lowercase_is_not_a_gloss() -> None:
     assert "possible_gloss" not in reviewed["Senate"].flags
 
 
+def test_a_term_without_words_is_never_a_gloss() -> None:
+    # Nothing to compare: with no word in the term, "shares no word" and
+    # "never written lowercase" are both vacuous, not evidence of a gloss.
+    source = "In 1984 they left. In 1984, again."
+    reviewed = by_term(
+        review([entry("1984", "mil novecientos ochenta y cuatro")], source=source)
+    )
+
+    assert "possible_gloss" not in reviewed["1984"].flags
+
+
 def test_an_identity_entry_is_never_a_gloss() -> None:
     source = "Leathfhear, he said."
     reviewed = by_term(review([entry("Leathfhear", "Leathfhear")], source=source))
