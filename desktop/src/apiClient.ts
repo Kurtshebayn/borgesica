@@ -13,6 +13,7 @@ import type {
   CreateJobRequest,
   EstimateResponse,
   GlossaryEntry,
+  GlossaryReviewResponse,
   JobResponse,
 } from "./apiTypes";
 
@@ -74,6 +75,20 @@ export function getGlossary(
   }).then(asJson<{ entries: GlossaryEntry[] }>);
 }
 
+/** Every glossary entry with its gender evidence, extraction proposals and
+ * risk flags — derived by the server on each call, free, never stored. */
+export function getGlossaryReview(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+): Promise<GlossaryReviewResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}/glossary/review`, {
+    headers: authHeaders(token),
+  }).then(asJson<GlossaryReviewResponse>);
+}
+
+/** Upserts *entries* (the rest of the glossary is kept). A 422 means the
+ * glossary rules rejected one of them and nothing was saved. */
 export function putGlossary(
   baseUrl: string,
   token: string,

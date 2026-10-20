@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { extractGlossary, stopGlossaryExtraction } from "./apiClient";
+import {
+  extractGlossary,
+  getGlossaryReview,
+  putGlossary,
+  stopGlossaryExtraction,
+} from "./apiClient";
 
 const BASE = "http://127.0.0.1:8765";
 
@@ -67,5 +72,31 @@ describe("stopGlossaryExtraction", () => {
     );
 
     await expect(stopGlossaryExtraction(BASE, "secret", "job-1")).rejects.toThrow(/HTTP 409/);
+  });
+});
+
+describe("getGlossaryReview", () => {
+  it("GETs the job's review route with the session token and returns the review", async () => {
+    const review = { entries: [], min_gender_mentions: 20, min_gender_ratio: 0.7 };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(review), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await getGlossaryReview(BASE, "secret", "job-1")).toEqual(review);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1/glossary/review`, {
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+});
+
+describe("putGlossary", () => {
+  it("rejects with the server's reason when an edit is refused (422)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"detail":"entry rejected: Caten"}', { status: 422 })),
+    );
+
+    await expect(
+      putGlossary(BASE, "secret", "job-1", [{ term: "Caten", translation: "", locked: false }]),
+    ).rejects.toThrow(/HTTP 422: .*entry rejected/);
   });
 });
