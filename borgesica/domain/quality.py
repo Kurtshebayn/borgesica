@@ -49,6 +49,7 @@ from borgesica.domain.models import (
     DEFAULT_GLOSSARY_BUDGET_TOKENS,
     Glossary,
     QualityScore,
+    anchored_gender,
     normalize_term,
 )
 from borgesica.domain.ports import TranslationProvider
@@ -416,7 +417,8 @@ def detect_gender_defects(text: str, glossary: Glossary) -> list[GenderDefect]:
 
     Characters with no anchored gender are skipped. Unclassified means
     unknown, and an unknown expectation cannot be violated — flagging one
-    would invent exactly the fact the seeder declined to guess.
+    would invent exactly the fact the seeder declined to guess. A term a
+    person stored as "unanchored" is skipped for the same reason.
 
     A ZERO RESULT IS NOT A CLEAN BILL OF HEALTH. Run over the finished book
     this returns 4 findings in 569 chunks and 0 across all 569 summaries —
@@ -428,9 +430,9 @@ def detect_gender_defects(text: str, glossary: Glossary) -> list[GenderDefect]:
     name no female character, which is a different question.
     """
     expected_by_name = {
-        normalize_term(e.term).casefold(): e.gender
+        normalize_term(e.term).casefold(): gender
         for e in glossary.entries
-        if e.gender is not None
+        if (gender := anchored_gender(e.gender)) is not None
     }
     if not expected_by_name:
         return []

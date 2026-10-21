@@ -454,6 +454,19 @@ def test_ignores_a_character_with_no_anchor():
     assert detect_gender_defects("—Tranquilo, Emissa.", _cast()) == []
 
 
+def test_skips_a_term_a_person_left_unanchored():
+    """No anchor means no expectation: "unanchored" is not a third gender a
+    Spanish adjective could disagree with."""
+    from borgesica.domain.models import Glossary, GlossaryEntry
+    from borgesica.domain.quality import detect_gender_defects
+
+    glossary = Glossary(
+        entries=[GlossaryEntry(term="Caten", translation="Caten", gender="unanchored")]
+    )
+
+    assert detect_gender_defects("—Tranquila, Caten. Callado, Caten.", glossary) == []
+
+
 def test_ignores_gendered_words_that_are_not_adjacent():
     """Recall is limited BY DESIGN. Here "ella" refers to Lanistia, not to
     Vis; only adjacency makes attribution safe, and a detector that guesses

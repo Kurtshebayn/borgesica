@@ -36,6 +36,7 @@ from borgesica.domain.models import (
     GlossaryReviewEntry,
     GlossaryRiskFlag,
     RenderingProposal,
+    anchored_gender,
     normalize_term,
 )
 from borgesica.domain.quality import lowercase_vocabulary
@@ -173,7 +174,7 @@ def review_glossary(
         reviewed.append(
             GlossaryReviewEntry(
                 entry=entry,
-                gender=anchored.gender,
+                gender=anchored_gender(anchored.gender),
                 gender_source=gender_source,
                 masculine_mentions=masculine,
                 feminine_mentions=feminine,

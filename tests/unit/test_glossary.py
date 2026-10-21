@@ -1151,6 +1151,17 @@ def test_seeds_feminine_gender_from_overwhelming_source_evidence():
     assert seeded.entries[0].gender == "feminine"
 
 
+def test_never_seeds_over_a_persons_decision_to_anchor_nothing():
+    """Caten is a city: the pronouns near it belong to the people in it."""
+    glossary = Glossary(
+        entries=[GlossaryEntry(term="Caten", translation="Caten", gender="unanchored")]
+    )
+
+    seeded = _seed(glossary, _passage("Caten", "he", 25))
+
+    assert seeded.entries[0].gender == "unanchored"
+
+
 def test_leaves_a_thinly_mentioned_name_unclassified():
     """A unanimous handful of mentions is not evidence.
 

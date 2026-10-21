@@ -221,6 +221,19 @@ class TestSQLiteCheckpointStore:
         # No recorded draw stays absent rather than becoming the translation.
         assert loaded["Aaru"].first_draw is None
 
+    def test_save_and_load_glossary_unanchored_gender(self):
+        """A person's "no gender anchor" must survive save/load: loaded back
+        as None, the next run would re-seed the very gender they removed."""
+        job = make_job()
+        self.store.save_job(job)
+        glossary = Glossary(entries=[
+            GlossaryEntry(term="Caten", translation="Caten", gender="unanchored"),
+            GlossaryEntry(term="Vis", translation="Vis", gender="masculine"),
+        ])
+        self.store.save_glossary(job.id, glossary)
+        loaded = {e.term: e.gender for e in self.store.load_glossary(job.id).entries}
+        assert loaded == {"Caten": "unanchored", "Vis": "masculine"}
+
     def test_migrates_existing_db_without_first_draw_column(self):
         """Job 9be143da's jobs.db predates the column. Opening it must add the
         column in place, load old rows with no recorded draw, and persist new

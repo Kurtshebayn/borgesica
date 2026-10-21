@@ -90,6 +90,20 @@ DEFAULT_GLOSSARY_BUDGET_TOKENS = 2500
 # which is a distinct and honest third state (see GlossaryEntry.gender).
 CharacterGender = Literal["masculine", "feminine"]
 
+# What a glossary entry can STORE: a character gender, or "unanchored" — a
+# person's decision that the term carries no character gender at all. The
+# seeder also tags non-persons (the city Caten, the rank Princeps) from the
+# pronouns of the people standing near them, and None cannot undo that: every
+# run re-seeds a None. "unanchored" is never seeded, never rendered into the
+# prompt and never an expectation a translation can violate; the run treats
+# the term like any unanchored one and leaves agreement to the Spanish.
+GlossaryGender = Literal["masculine", "feminine", "unanchored"]
+
+
+def anchored_gender(gender: GlossaryGender | None) -> CharacterGender | None:
+    """Return the character gender a stored value anchors, or None."""
+    return None if gender == "unanchored" else gender
+
 
 class GlossaryEntry(BaseModel):
     term: str
@@ -109,7 +123,9 @@ class GlossaryEntry(BaseModel):
     # None means UNCLASSIFIED, never "neutral" and never a guess: the seeder
     # only classifies a name that clears a margin, and leaves the rest alone.
     # Same discipline as ``first_draw`` — an unknown that stays unknown.
-    gender: CharacterGender | None = None
+    # "unanchored" is the opposite of unknown: a person decided the term has
+    # no character gender (see GlossaryGender).
+    gender: GlossaryGender | None = None
 
     @field_validator("gender", mode="before")
     @classmethod
@@ -126,7 +142,7 @@ class GlossaryEntry(BaseModel):
         """
         if value is None:
             return None
-        if isinstance(value, str) and value in get_args(CharacterGender):
+        if isinstance(value, str) and value in get_args(GlossaryGender):
             return value
         return None
     # The rendering this entry was COMMITTED with, kept so the confirmation
@@ -401,7 +417,8 @@ class GlossaryReview(BaseModel):
     - ``gender`` / ``gender_source``: the gender a translation run will anchor
       and where it comes from — "stored" (set on the entry, by a human or an
       earlier run) or "seeded" (derived now from the pronoun evidence); both
-      null when neither applies.
+      null when neither applies. An entry stored as "unanchored" reports
+      gender null with source "stored": a person decided it anchors nothing.
     - ``masculine_mentions`` / ``feminine_mentions``: gendered pronouns found
       near the term in the English source, reported even when they support
       no gender. Only verbatim (term == translation) entries can be seeded.
