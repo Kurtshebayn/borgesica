@@ -10,9 +10,11 @@ import type {
   EstimateResponse,
   GlossaryEntry,
   GlossaryExtractionEstimate,
+  GlossaryReviewResponse,
   JobResponse,
   JobStatus,
 } from "./apiTypes";
+import { glossaryChangesToSave } from "./glossaryReview";
 
 /** "preparing" is the explicit, paid glossary extraction pass, entered only
  * from the estimate screen by a user click and left only by its end (back to
@@ -104,6 +106,15 @@ export interface WizardState {
   /** What the finished preparation extracted, shown on the glossary screen. */
   glossaryNotice: string | null;
   glossary: GlossaryEntry[];
+  /** The server's triage view of the glossary as last saved: per-entry
+   * evidence and flags, in the same order as `glossary`. Never edited
+   * locally; reloaded after each save. */
+  glossaryReview: GlossaryReviewResponse | null;
+  /** Why the review could not be loaded; the screen then falls back to the
+   * plain list. */
+  glossaryReviewError: string | null;
+  /** Why the last glossary save failed (nothing was saved, nothing locked). */
+  glossarySaveError: string | null;
   glossaryLocked: boolean;
   progress: ProgressInfo | null;
   job: JobResponse | null;
@@ -130,6 +141,9 @@ export const initialWizardState: WizardState = {
   preparationMessage: null,
   glossaryNotice: null,
   glossary: [],
+  glossaryReview: null,
+  glossaryReviewError: null,
+  glossarySaveError: null,
   glossaryLocked: false,
   progress: null,
   job: null,
@@ -187,6 +201,57 @@ export function runRecoveryAction(state: WizardState, actions: RecoveryActions):
   actions.dispatch({ type: "RECOVER_FROM_ERROR" });
   if (recoveryRequiresRespawn(state)) {
     actions.restartSidecar();
+  }
+}
+
+/** Fetches the glossary triage review and reports it, or why it failed (the
+ * screen then falls back to the plain list). `getReview` is the API call. */
+export async function loadGlossaryReview(
+  getReview: () => Promise<GlossaryReviewResponse>,
+  dispatch: (action: WizardAction) => void,
+): Promise<void> {
+  try {
+    dispatch({ type: "GLOSSARY_REVIEW_LOADED", review: await getReview() });
+  } catch (err) {
+    dispatch({ type: "GLOSSARY_REVIEW_FAILED", message: String(err) });
+  }
+}
+
+/** The seams a glossary save needs, injected for the same reason as
+ * `RecoveryActions`: the decision stays here, tested, and WizardScreen.tsx
+ * only wires the API calls. */
+export interface GlossarySaveSeams {
+  /** PUT /jobs/{id}/glossary with these entries (an upsert). */
+  put: (entries: GlossaryEntry[]) => Promise<unknown>;
+  /** Reload the review after a save (see `loadGlossaryReview`). */
+  loadReview: () => Promise<void>;
+  dispatch: (action: WizardAction) => void;
+}
+
+/** "save" stores the changed entries and reloads the review, so flags and
+ * gender verdicts reflect them; "lock" stores them and locks the glossary for
+ * the run. A refused PUT (HTTP 422: the glossary rules rejected an entry,
+ * nothing was stored) is reported and never followed by a lock — locking a
+ * glossary that was not saved would send the person to pay for a
+ * translation without their fixes. */
+export async function saveGlossary(
+  state: WizardState,
+  mode: "save" | "lock",
+  seams: GlossarySaveSeams,
+): Promise<void> {
+  const changes = glossaryChangesToSave(state.glossaryReview, state.glossary);
+  if (changes.length > 0) {
+    try {
+      await seams.put(changes);
+    } catch (err) {
+      seams.dispatch({ type: "GLOSSARY_SAVE_FAILED", message: String(err) });
+      return;
+    }
+  }
+  if (mode === "lock") {
+    seams.dispatch({ type: "GLOSSARY_LOCKED" });
+  } else if (changes.length > 0) {
+    await seams.loadReview();
   }
 }
 
@@ -456,6 +521,16 @@ export type WizardAction =
     }
   | { type: "GLOSSARY_LOADED"; entries: GlossaryEntry[] }
   | { type: "GLOSSARY_CHANGED"; entries: GlossaryEntry[] }
+  /** The triage review arrived (on entering the screen, or after a save). */
+  | { type: "GLOSSARY_REVIEW_LOADED"; review: GlossaryReviewResponse }
+  | { type: "GLOSSARY_REVIEW_FAILED"; message: string }
+  /** One entry's rendering, gender or lock changed on the triage screen. */
+  | {
+      type: "GLOSSARY_ENTRY_EDITED";
+      index: number;
+      patch: Partial<Pick<GlossaryEntry, "translation" | "gender" | "locked">>;
+    }
+  | { type: "GLOSSARY_SAVE_FAILED"; message: string }
   | { type: "GLOSSARY_LOCKED" }
   | { type: "RUN_STARTED"; job: JobResponse }
   | { type: "RUN_START_FAILED"; message: string }
@@ -578,6 +653,33 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       // further edits are accepted by this reducer).
       if (state.glossaryLocked) return state;
       return { ...state, glossary: action.entries };
+    case "GLOSSARY_REVIEW_LOADED":
+      // A review replaces the editable entries with what was saved, so it
+      // must not land after the glossary is locked for the run.
+      if (state.glossaryLocked) return state;
+      return {
+        ...state,
+        glossaryReview: action.review,
+        glossary: action.review.entries.map((item) => item.entry),
+        glossaryReviewError: null,
+        glossarySaveError: null,
+      };
+    case "GLOSSARY_REVIEW_FAILED":
+      return { ...state, glossaryReviewError: `No se pudo cargar la revisión: ${action.message}` };
+    case "GLOSSARY_ENTRY_EDITED": {
+      if (state.glossaryLocked) return state;
+      const current = state.glossary[action.index];
+      if (!current) return state;
+      const glossary = state.glossary.map((entry, i) =>
+        i === action.index ? { ...entry, ...action.patch } : entry,
+      );
+      return { ...state, glossary };
+    }
+    case "GLOSSARY_SAVE_FAILED":
+      return {
+        ...state,
+        glossarySaveError: `No se pudieron guardar los cambios del glosario: ${action.message}`,
+      };
     case "GLOSSARY_LOCKED":
       return { ...state, glossaryLocked: true };
     case "RUN_STARTED":

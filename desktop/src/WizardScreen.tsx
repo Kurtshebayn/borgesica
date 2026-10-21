@@ -5,6 +5,7 @@ import {
   extractGlossary,
   getEstimate,
   getGlossary,
+  getGlossaryReview,
   getStatus,
   putGlossary,
   resumeJob,
@@ -24,10 +25,14 @@ import {
   formatGlossaryProgress,
   formatProgress,
   initialWizardState,
+  loadGlossaryReview,
   runRecoveryAction,
+  saveGlossary,
   wizardReducer,
   type Provider,
 } from "./wizard";
+import { glossaryChangesToSave } from "./glossaryReview";
+import GlossaryTriage from "./GlossaryTriage";
 import type { GlossaryEntry, JobStatus } from "./apiTypes";
 
 const JOB_STATUS_LABELS: Record<JobStatus, string> = {
@@ -83,6 +88,22 @@ export default function WizardScreen({
       subscriptionRef.current?.close();
     };
   }, []);
+
+  // The triage review is loaded on entering the glossary screen, whichever
+  // way it was reached (skipping the preparation or finishing it).
+  const needsReview =
+    state.screen === "glossary" &&
+    !!state.jobId &&
+    !state.glossaryReview &&
+    !state.glossaryReviewError &&
+    !state.glossaryLocked;
+  useEffect(() => {
+    if (needsReview && state.jobId) void reloadGlossaryReview(state.jobId);
+  }, [needsReview]);
+
+  function reloadGlossaryReview(jobId: string): Promise<void> {
+    return loadGlossaryReview(() => getGlossaryReview(baseUrl, token, jobId), dispatch);
+  }
 
   async function handlePick() {
     if (state.fileError || !state.filePath) return;
@@ -147,13 +168,16 @@ export default function WizardScreen({
     dispatch({ type: "GLOSSARY_CHANGED", entries });
   }
 
-  async function handleLockAndSaveGlossary() {
+  /** "save" or "lock": the decision (what to send, when to lock) is the
+   * tested `saveGlossary`; this only wires the API calls. */
+  async function handleSaveGlossary(mode: "save" | "lock") {
     if (!state.jobId) return;
-    try {
-      await putGlossary(baseUrl, token, state.jobId, state.glossary);
-    } finally {
-      dispatch({ type: "GLOSSARY_LOCKED" });
-    }
+    const jobId = state.jobId;
+    await saveGlossary(state, mode, {
+      put: (entries) => putGlossary(baseUrl, token, jobId, entries),
+      loadReview: () => reloadGlossaryReview(jobId),
+      dispatch,
+    });
   }
 
   function startWatching(jobId: string) {
@@ -221,6 +245,9 @@ export default function WizardScreen({
     }
   }
 
+  const pendingGlossaryChanges = state.glossaryReview
+    ? glossaryChangesToSave(state.glossaryReview, state.glossary).length
+    : 0;
   const bestEffortSummary = state.job
     ? formatBestEffortSummary(state.job.best_effort_count)
     : null;
@@ -319,9 +346,22 @@ export default function WizardScreen({
         <div>
           <h2>3. Glosario (se bloquea antes de traducir)</h2>
           {state.glossaryNotice && <p>{state.glossaryNotice}</p>}
+          {state.glossaryReviewError && <p role="alert">{state.glossaryReviewError}</p>}
+          {state.glossaryReview && (
+            <GlossaryTriage
+              review={state.glossaryReview}
+              glossary={state.glossary}
+              disabled={state.glossaryLocked}
+              onEdit={(index, patch) => dispatch({ type: "GLOSSARY_ENTRY_EDITED", index, patch })}
+            />
+          )}
           <ul>
-            {state.glossary.map((entry, index) => (
-              <li key={entry.term}>
+            {/* With a review, only the entries added here are listed (the
+                reviewed ones are in the triage above); without one, every
+                entry is, as a plain list. */}
+            {state.glossary.map((entry, index) =>
+              index < (state.glossaryReview?.entries.length ?? 0) ? null : (
+              <li key={index}>
                 <input
                   type="text"
                   value={entry.term}
@@ -342,7 +382,8 @@ export default function WizardScreen({
                   }
                 />
               </li>
-            ))}
+              ),
+            )}
           </ul>
           <button
             onClick={() =>
@@ -355,11 +396,18 @@ export default function WizardScreen({
           >
             Agregar entrada
           </button>
+          {!state.glossaryLocked && pendingGlossaryChanges > 0 && state.glossaryReview && (
+            <button onClick={() => void handleSaveGlossary("save")}>
+              Guardar {pendingGlossaryChanges === 1 ? "1 cambio" : `${pendingGlossaryChanges} cambios`}{" "}
+              y actualizar la revisión
+            </button>
+          )}
           {!state.glossaryLocked && (
-            <button onClick={() => void handleLockAndSaveGlossary()}>
+            <button onClick={() => void handleSaveGlossary("lock")}>
               Bloquear glosario y continuar
             </button>
           )}
+          {state.glossarySaveError && <p role="alert">{state.glossarySaveError}</p>}
           {state.glossaryLocked && (
             <div>
               <input

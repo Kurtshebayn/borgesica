@@ -13,6 +13,7 @@ import {
   initialWizardState,
   isPersistentConnectionFailure,
   isRunningStatus,
+  loadGlossaryReview,
   MAX_CONSECUTIVE_CONNECTION_FAILURES,
   parseGlossarySseData,
   parseSseData,
@@ -20,6 +21,7 @@ import {
   PROVIDERS,
   recoveryRequiresRespawn,
   runRecoveryAction,
+  saveGlossary,
   sseEventToAction,
   validateFilePath,
   wizardReducer,
@@ -28,6 +30,7 @@ import {
 import type {
   EstimateResponse,
   GlossaryExtractionEstimate,
+  GlossaryReviewResponse,
   JobResponse,
 } from "./apiTypes";
 
@@ -821,5 +824,190 @@ describe("wizardReducer — glossary preparation", () => {
     const next = wizardReducer(preparing, { type: "CONNECTION_LOST", message: "gone" });
     expect(next.screen).toBe("error");
     expect(next.connectionError).toBe("gone");
+  });
+});
+
+describe("glossary triage", () => {
+  const review: GlossaryReviewResponse = {
+    entries: [
+      {
+        entry: { term: "Caten", translation: "Caten", locked: false, note: null, gender: null },
+        gender: "masculine",
+        gender_source: "seeded",
+        masculine_mentions: 40,
+        feminine_mentions: 2,
+        proposals: [],
+        flags: [],
+      },
+      {
+        entry: { term: "Thrum", translation: "Thrum", locked: false, note: null, gender: null },
+        gender: null,
+        gender_source: null,
+        masculine_mentions: 0,
+        feminine_mentions: 0,
+        proposals: [{ rendering: "Thrum", batches: 3 }],
+        flags: ["lowercase_identity"],
+      },
+    ],
+    min_gender_mentions: 20,
+    min_gender_ratio: 0.7,
+  };
+  const onGlossary: WizardState = { ...initialWizardState, screen: "glossary" };
+
+  it("GLOSSARY_REVIEW_LOADED keeps the review and makes its entries the editable glossary", () => {
+    const next = wizardReducer(onGlossary, { type: "GLOSSARY_REVIEW_LOADED", review });
+    expect(next.glossaryReview).toBe(review);
+    expect(next.glossary).toEqual(review.entries.map((e) => e.entry));
+    expect(next.glossaryReviewError).toBeNull();
+  });
+
+  it("GLOSSARY_REVIEW_LOADED clears a previous save error (it follows a successful save)", () => {
+    const failed = { ...onGlossary, glossarySaveError: "HTTP 422" };
+    const next = wizardReducer(failed, { type: "GLOSSARY_REVIEW_LOADED", review });
+    expect(next.glossarySaveError).toBeNull();
+  });
+
+  it("GLOSSARY_REVIEW_FAILED records why, so the screen can fall back to the plain list", () => {
+    const next = wizardReducer(onGlossary, { type: "GLOSSARY_REVIEW_FAILED", message: "HTTP 500" });
+    expect(next.glossaryReviewError).toMatch(/HTTP 500/);
+    expect(next.glossaryReview).toBeNull();
+  });
+
+  it("GLOSSARY_ENTRY_EDITED patches one entry: rendering, gender and lock", () => {
+    const loaded = wizardReducer(onGlossary, { type: "GLOSSARY_REVIEW_LOADED", review });
+    let next = wizardReducer(loaded, {
+      type: "GLOSSARY_ENTRY_EDITED",
+      index: 1,
+      patch: { translation: "Zumbido", locked: true },
+    });
+    next = wizardReducer(next, {
+      type: "GLOSSARY_ENTRY_EDITED",
+      index: 0,
+      patch: { gender: "unanchored" },
+    });
+    expect(next.glossary[1]).toMatchObject({ term: "Thrum", translation: "Zumbido", locked: true });
+    expect(next.glossary[0]).toMatchObject({ term: "Caten", gender: "unanchored" });
+    // The evidence stays what the server derived; edits never rewrite it.
+    expect(next.glossaryReview).toBe(review);
+  });
+
+  it("GLOSSARY_ENTRY_EDITED is a no-op once the glossary is locked or out of range", () => {
+    const loaded = wizardReducer(onGlossary, { type: "GLOSSARY_REVIEW_LOADED", review });
+    const locked = { ...loaded, glossaryLocked: true };
+    const edit = { type: "GLOSSARY_ENTRY_EDITED", index: 0, patch: { locked: true } } as const;
+    expect(wizardReducer(locked, edit)).toBe(locked);
+    expect(wizardReducer(loaded, { ...edit, index: 5 })).toBe(loaded);
+  });
+
+  it("GLOSSARY_REVIEW_LOADED is ignored once the glossary is locked", () => {
+    const locked = { ...onGlossary, glossaryLocked: true };
+    expect(wizardReducer(locked, { type: "GLOSSARY_REVIEW_LOADED", review })).toBe(locked);
+  });
+
+  it("GLOSSARY_SAVE_FAILED surfaces the error and leaves the glossary unlocked", () => {
+    const next = wizardReducer(onGlossary, { type: "GLOSSARY_SAVE_FAILED", message: "HTTP 422: rejected" });
+    expect(next.glossarySaveError).toMatch(/HTTP 422: rejected/);
+    expect(next.glossaryLocked).toBe(false);
+  });
+});
+
+describe("glossary save and review load seams", () => {
+  const caten = { term: "Caten", translation: "Caten", locked: false, note: null, gender: null };
+  const thrum = { term: "Thrum", translation: "Thrum", locked: false, note: null, gender: null };
+  const review: GlossaryReviewResponse = {
+    entries: [caten, thrum].map((entry) => ({
+      entry,
+      gender: null,
+      gender_source: null,
+      masculine_mentions: 0,
+      feminine_mentions: 0,
+      proposals: [],
+      flags: [],
+    })),
+    min_gender_mentions: 20,
+    min_gender_ratio: 0.7,
+  };
+  const reviewed: WizardState = {
+    ...initialWizardState,
+    screen: "glossary",
+    glossaryReview: review,
+    glossary: [caten, thrum],
+  };
+  const edited: WizardState = {
+    ...reviewed,
+    glossary: [{ ...caten, gender: "unanchored" as const }, thrum],
+  };
+
+  function seams(put: () => Promise<unknown> = async () => ({})) {
+    return { put: vi.fn(put), loadReview: vi.fn(async () => {}), dispatch: vi.fn() };
+  }
+
+  it("loadGlossaryReview dispatches the review, or why it failed", async () => {
+    const dispatch = vi.fn();
+    await loadGlossaryReview(async () => review, dispatch);
+    expect(dispatch).toHaveBeenCalledWith({ type: "GLOSSARY_REVIEW_LOADED", review });
+
+    await loadGlossaryReview(async () => Promise.reject(new Error("HTTP 500")), dispatch);
+    expect(dispatch).toHaveBeenLastCalledWith({
+      type: "GLOSSARY_REVIEW_FAILED",
+      message: "Error: HTTP 500",
+    });
+  });
+
+  it("save sends only the changed entries, then reloads the review", async () => {
+    const s = seams();
+    await saveGlossary(edited, "save", s);
+    expect(s.put).toHaveBeenCalledWith([{ ...caten, gender: "unanchored" }]);
+    expect(s.loadReview).toHaveBeenCalledTimes(1);
+    expect(s.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("save does nothing when nothing changed", async () => {
+    const s = seams();
+    await saveGlossary(reviewed, "save", s);
+    expect(s.put).not.toHaveBeenCalled();
+    expect(s.loadReview).not.toHaveBeenCalled();
+  });
+
+  it("a refused save reports why and does not reload", async () => {
+    const s = seams(async () => Promise.reject(new Error("HTTP 422: rejected")));
+    await saveGlossary(edited, "save", s);
+    expect(s.dispatch).toHaveBeenCalledWith({
+      type: "GLOSSARY_SAVE_FAILED",
+      message: "Error: HTTP 422: rejected",
+    });
+    expect(s.loadReview).not.toHaveBeenCalled();
+  });
+
+  it("lock saves the changes first, then locks", async () => {
+    const s = seams();
+    await saveGlossary(edited, "lock", s);
+    expect(s.put).toHaveBeenCalledWith([{ ...caten, gender: "unanchored" }]);
+    expect(s.dispatch).toHaveBeenCalledWith({ type: "GLOSSARY_LOCKED" });
+  });
+
+  it("lock with nothing changed locks without a request", async () => {
+    const s = seams();
+    await saveGlossary(reviewed, "lock", s);
+    expect(s.put).not.toHaveBeenCalled();
+    expect(s.dispatch).toHaveBeenCalledWith({ type: "GLOSSARY_LOCKED" });
+  });
+
+  it("lock without a review sends the whole plain list, as before", async () => {
+    const s = seams();
+    const plain = { ...initialWizardState, screen: "glossary" as const, glossary: [caten] };
+    await saveGlossary(plain, "lock", s);
+    expect(s.put).toHaveBeenCalledWith([caten]);
+    expect(s.dispatch).toHaveBeenCalledWith({ type: "GLOSSARY_LOCKED" });
+  });
+
+  it("a refused lock reports why and does not lock", async () => {
+    const s = seams(async () => Promise.reject(new Error("HTTP 422: rejected")));
+    await saveGlossary(edited, "lock", s);
+    expect(s.dispatch).toHaveBeenCalledTimes(1);
+    expect(s.dispatch).toHaveBeenCalledWith({
+      type: "GLOSSARY_SAVE_FAILED",
+      message: "Error: HTTP 422: rejected",
+    });
   });
 });

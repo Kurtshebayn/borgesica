@@ -19,9 +19,18 @@ export interface GlossaryEntry {
   translation: string;
   locked: boolean;
   note?: string | null;
+  /** null means "not classified yet" (a run may seed it) and, on PUT,
+   * "keep the stored value"; "unanchored" is a person's decision that the
+   * term carries no character gender. */
+  gender?: GlossaryGender | null;
+  /** The rendering the vote committed; PUT always clears it. */
+  first_draw?: string | null;
 }
 
 export type CharacterGender = "masculine" | "feminine";
+
+/** What an entry can store: a character gender or a decision for none. */
+export type GlossaryGender = CharacterGender | "unanchored";
 
 /** Deterministic reasons an entry deserves a reviewer's look.
  * kept_vs_translated always comes with conflicting_renderings;
@@ -43,7 +52,8 @@ export interface RenderingProposal {
 export interface GlossaryReviewEntry {
   /** The stored entry, unchanged; edit it through PUT /glossary. */
   entry: GlossaryEntry;
-  /** The gender a translation run will anchor, or null. */
+  /** The gender a translation run will anchor, or null (also for an entry
+   * stored as "unanchored"). */
   gender: CharacterGender | null;
   /** "stored": set on the entry; "seeded": derived from the pronoun counts. */
   gender_source: "stored" | "seeded" | null;
