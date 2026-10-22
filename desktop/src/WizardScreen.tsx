@@ -121,7 +121,7 @@ export default function WizardScreen({
   useEffect(() => {
     if (needsNarrators && state.jobId) {
       const jobId = state.jobId;
-      void loadNarrators(() => getNarrators(baseUrl, token, jobId), dispatch);
+      void loadNarrators(jobId, () => getNarrators(baseUrl, token, jobId), dispatch);
     }
   }, [needsNarrators]);
 

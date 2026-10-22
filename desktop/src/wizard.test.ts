@@ -1045,7 +1045,7 @@ describe("narrator review", () => {
     jobId: "job-1",
     estimate: estimateWith(null),
   };
-  const loaded = wizardReducer(onGlossary, { type: "NARRATORS_LOADED", response });
+  const loaded = wizardReducer(onGlossary, { type: "NARRATORS_LOADED", jobId: "job-1", response });
   const RUNNING_JOB: JobResponse = {
     id: "job-1",
     status: "RUNNING",
@@ -1130,7 +1130,11 @@ describe("narrator review", () => {
     });
     const saving = wizardReducer(edited, { type: "NARRATORS_SAVE_STARTED" });
     expect(saving.narratorSaving).toBe(true);
-    const failed = wizardReducer(saving, { type: "NARRATORS_SAVE_FAILED", message: "HTTP 422: bad" });
+    const failed = wizardReducer(saving, {
+      type: "NARRATORS_SAVE_FAILED",
+      jobId: "job-1",
+      message: "HTTP 422: bad",
+    });
     expect(failed.narratorSaveError).toMatch(/HTTP 422: bad/);
     expect(failed.narratorSaving).toBe(false);
     expect(failed.narratorDraft).toEqual(edited.narratorDraft);
@@ -1141,19 +1145,67 @@ describe("narrator review", () => {
     const saved: NarratorsResponse = {
       chapters: response.chapters.map((c) => ({ ...c, narrator: c.first_person ? vis : null })),
     };
-    const next = wizardReducer(failed, { type: "NARRATORS_LOADED", response: saved });
+    const next = wizardReducer(failed, { type: "NARRATORS_LOADED", jobId: "job-1", response: saved });
     expect(next.narratorSaveError).toBeNull();
     expect(next.narratorSaving).toBe(false);
     expect(next.narratorDraft).toMatchObject({ "ch1.xhtml": vis, "ch3.xhtml": vis });
   });
 
   it("a failed load records a short error and blocks neither the glossary lock nor the run", () => {
-    const failed = wizardReducer(onGlossary, { type: "NARRATORS_LOAD_FAILED", message: "HTTP 500" });
+    const failed = wizardReducer(onGlossary, {
+      type: "NARRATORS_LOAD_FAILED",
+      jobId: "job-1",
+      message: "HTTP 500",
+    });
     expect(failed.narratorLoadError).toMatch(/HTTP 500/);
     const locked = wizardReducer(failed, { type: "GLOSSARY_LOCKED" });
     expect(locked.glossaryLocked).toBe(true);
     const running = wizardReducer(locked, { type: "RUN_STARTED", job: RUNNING_JOB });
     expect(running.screen).toBe("run");
+  });
+
+  it("ignores a load, a failed load or a failed save that belongs to another job", () => {
+    // A response for the job the person left behind must never show its
+    // chapters, or its errors, on the job now open.
+    expect(wizardReducer(onGlossary, { type: "NARRATORS_LOADED", jobId: "job-0", response })).toBe(
+      onGlossary,
+    );
+    expect(
+      wizardReducer(loaded, { type: "NARRATORS_LOAD_FAILED", jobId: "job-0", message: "HTTP 500" }),
+    ).toBe(loaded);
+    expect(
+      wizardReducer(loaded, { type: "NARRATORS_SAVE_FAILED", jobId: "job-0", message: "HTTP 409" }),
+    ).toBe(loaded);
+  });
+
+  it("a new job starts with no narrator state from the previous one", () => {
+    const edited = {
+      ...wizardReducer(loaded, { type: "NARRATOR_CHAPTER_EDITED", key: "ch1.xhtml", narrator: vis }),
+      narratorBulk: { name: "Vis", gender: "masculine" as const },
+      narratorSaveError: "x",
+      narratorLoadError: "y",
+      narratorSaving: true,
+    };
+    const narratorFields = {
+      narratorChapters: initialWizardState.narratorChapters,
+      narratorDraft: initialWizardState.narratorDraft,
+      narratorBulk: initialWizardState.narratorBulk,
+      narratorLoadError: initialWizardState.narratorLoadError,
+      narratorSaveError: initialWizardState.narratorSaveError,
+      narratorSaving: initialWizardState.narratorSaving,
+    };
+
+    const created = wizardReducer(edited, { type: "JOB_CREATED", jobId: "job-2" });
+    expect(created).toMatchObject({ jobId: "job-2", ...narratorFields });
+
+    const resumed = wizardReducer(edited, { type: "RESUME_JOB", job: { ...RUNNING_JOB, id: "job-2" } });
+    expect(resumed).toMatchObject({ jobId: "job-2", ...narratorFields });
+  });
+
+  it("resuming the same job keeps its narrator state", () => {
+    const resumed = wizardReducer(loaded, { type: "RESUME_JOB", job: RUNNING_JOB });
+    expect(resumed.narratorChapters).toBe(loaded.narratorChapters);
+    expect(resumed.narratorDraft).toBe(loaded.narratorDraft);
   });
 
   it("leaves the glossary review flow untouched (and the glossary review leaves narrators alone)", () => {
@@ -1206,18 +1258,20 @@ describe("narrator load and save seams", () => {
   const edited: WizardState = {
     ...initialWizardState,
     screen: "glossary",
+    jobId: "job-1",
     narratorChapters: response.chapters,
     narratorDraft: { "ack.xhtml": null, "ch1.xhtml": vis },
   };
 
   it("loadNarrators dispatches the chapters, or why they could not be loaded", async () => {
     const dispatch = vi.fn();
-    await loadNarrators(async () => response, dispatch);
-    expect(dispatch).toHaveBeenCalledWith({ type: "NARRATORS_LOADED", response });
+    await loadNarrators("job-1", async () => response, dispatch);
+    expect(dispatch).toHaveBeenCalledWith({ type: "NARRATORS_LOADED", jobId: "job-1", response });
 
-    await loadNarrators(async () => Promise.reject(new Error("HTTP 500")), dispatch);
+    await loadNarrators("job-1", async () => Promise.reject(new Error("HTTP 500")), dispatch);
     expect(dispatch).toHaveBeenLastCalledWith({
       type: "NARRATORS_LOAD_FAILED",
+      jobId: "job-1",
       message: "Error: HTTP 500",
     });
   });
@@ -1230,7 +1284,7 @@ describe("narrator load and save seams", () => {
     expect(put).toHaveBeenCalledWith([{ key: "ch1.xhtml", name: "Vis", gender: "masculine" }]);
     expect(dispatch.mock.calls).toEqual([
       [{ type: "NARRATORS_SAVE_STARTED" }],
-      [{ type: "NARRATORS_LOADED", response: saved }],
+      [{ type: "NARRATORS_LOADED", jobId: "job-1", response: saved }],
     ]);
   });
 
@@ -1240,6 +1294,7 @@ describe("narrator load and save seams", () => {
     await saveNarrators(edited, { put, dispatch });
     expect(dispatch).toHaveBeenLastCalledWith({
       type: "NARRATORS_SAVE_FAILED",
+      jobId: "job-1",
       message: "Error: HTTP 422: unknown key",
     });
   });

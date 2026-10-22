@@ -291,13 +291,14 @@ export async function saveGlossary(
 /** Fetches the chapters and their narrators and reports them, or why they
  * could not be loaded (the rest of the screen works without them). */
 export async function loadNarrators(
+  jobId: string,
   getNarrators: () => Promise<NarratorsResponse>,
   dispatch: (action: WizardAction) => void,
 ): Promise<void> {
   try {
-    dispatch({ type: "NARRATORS_LOADED", response: await getNarrators() });
+    dispatch({ type: "NARRATORS_LOADED", jobId, response: await getNarrators() });
   } catch (err) {
-    dispatch({ type: "NARRATORS_LOAD_FAILED", message: String(err) });
+    dispatch({ type: "NARRATORS_LOAD_FAILED", jobId, message: String(err) });
   }
 }
 
@@ -310,13 +311,14 @@ export interface NarratorSaveSeams {
 /** Sends every chapter that has a narrator (the PUT replaces them all) and
  * shows what the server stored; a refused save keeps the edits. */
 export async function saveNarrators(state: WizardState, seams: NarratorSaveSeams): Promise<void> {
-  if (!state.narratorChapters) return;
+  const { jobId } = state;
+  if (!state.narratorChapters || !jobId) return;
   const payload = narratorsPayload(state.narratorChapters, state.narratorDraft);
   seams.dispatch({ type: "NARRATORS_SAVE_STARTED" });
   try {
-    seams.dispatch({ type: "NARRATORS_LOADED", response: await seams.put(payload) });
+    seams.dispatch({ type: "NARRATORS_LOADED", jobId, response: await seams.put(payload) });
   } catch (err) {
-    seams.dispatch({ type: "NARRATORS_SAVE_FAILED", message: String(err) });
+    seams.dispatch({ type: "NARRATORS_SAVE_FAILED", jobId, message: String(err) });
   }
 }
 
@@ -597,9 +599,11 @@ export type WizardAction =
     }
   | { type: "GLOSSARY_SAVE_FAILED"; message: string }
   | { type: "GLOSSARY_LOCKED" }
-  /** The chapters arrived (on entering the screen, or as a save's reply). */
-  | { type: "NARRATORS_LOADED"; response: NarratorsResponse }
-  | { type: "NARRATORS_LOAD_FAILED"; message: string }
+  /** The chapters arrived (on entering the screen, or as a save's reply).
+   * Every narrator reply names the job it was asked for: one that arrives
+   * after the person moved to another job is dropped. */
+  | { type: "NARRATORS_LOADED"; jobId: string; response: NarratorsResponse }
+  | { type: "NARRATORS_LOAD_FAILED"; jobId: string; message: string }
   | { type: "NARRATOR_BULK_CHANGED"; form: NarratorBulkForm }
   /** The bulk form's narrator goes to every chapter marked first-person. */
   | { type: "NARRATORS_APPLIED_TO_FIRST_PERSON" }
@@ -608,7 +612,7 @@ export type WizardAction =
   /** This chapter's narrator goes to every following first-person chapter. */
   | { type: "NARRATOR_APPLIED_ONWARD"; key: string }
   | { type: "NARRATORS_SAVE_STARTED" }
-  | { type: "NARRATORS_SAVE_FAILED"; message: string }
+  | { type: "NARRATORS_SAVE_FAILED"; jobId: string; message: string }
   | { type: "RUN_STARTED"; job: JobResponse }
   | { type: "RUN_START_FAILED"; message: string }
   | { type: "PROGRESS_RECEIVED"; progress: ProgressInfo }
@@ -628,6 +632,30 @@ export type WizardAction =
   | { type: "CONNECTION_LOST"; message: string }
   | { type: "RECOVER_FROM_ERROR" };
 
+type NarratorState = Pick<
+  WizardState,
+  | "narratorChapters"
+  | "narratorDraft"
+  | "narratorBulk"
+  | "narratorLoadError"
+  | "narratorSaveError"
+  | "narratorSaving"
+>;
+
+/** The narrator fields to carry into `jobId`: kept for the same job, reset
+ * for any other, so one book's chapters never show on another. */
+function narratorStateFor(state: WizardState, jobId: string): NarratorState {
+  const source = jobId === state.jobId ? state : initialWizardState;
+  return {
+    narratorChapters: source.narratorChapters,
+    narratorDraft: source.narratorDraft,
+    narratorBulk: source.narratorBulk,
+    narratorLoadError: source.narratorLoadError,
+    narratorSaveError: source.narratorSaveError,
+    narratorSaving: source.narratorSaving,
+  };
+}
+
 export function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
     case "FILE_PATH_CHANGED": {
@@ -639,7 +667,13 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       // is still rejected (defensive — the UI should not call this action
       // in that case, but the reducer must not trust callers blindly).
       if (state.fileError) return state;
-      return { ...state, jobId: action.jobId, createError: null, screen: "estimate" };
+      return {
+        ...state,
+        ...narratorStateFor(state, action.jobId),
+        jobId: action.jobId,
+        createError: null,
+        screen: "estimate",
+      };
     case "JOB_CREATE_FAILED":
       return { ...state, createError: action.message };
     case "ESTIMATE_RECEIVED":
@@ -760,6 +794,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "GLOSSARY_LOCKED":
       return { ...state, glossaryLocked: true };
     case "NARRATORS_LOADED":
+      if (action.jobId !== state.jobId) return state;
       return {
         ...state,
         narratorChapters: action.response.chapters,
@@ -769,6 +804,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
         narratorSaving: false,
       };
     case "NARRATORS_LOAD_FAILED":
+      if (action.jobId !== state.jobId) return state;
       return {
         ...state,
         narratorLoadError: `No se pudieron cargar los capítulos para indicar el narrador: ${action.message}`,
@@ -804,6 +840,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "NARRATORS_SAVE_STARTED":
       return { ...state, narratorSaving: true, narratorSaveError: null };
     case "NARRATORS_SAVE_FAILED":
+      if (action.jobId !== state.jobId) return state;
       return {
         ...state,
         narratorSaving: false,
@@ -839,6 +876,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "RESUME_JOB":
       return {
         ...state,
+        ...narratorStateFor(state, action.job.id),
         jobId: action.job.id,
         job: action.job,
         estimate: state.estimate,
