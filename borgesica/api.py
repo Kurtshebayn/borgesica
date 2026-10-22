@@ -1051,10 +1051,14 @@ class TranslatorEngine:
 
         Raises:
             JobNotFoundError: if job_id is not found.
+            JobStateError: if the job is RUNNING. The run read its narrators
+                when it started, so a change now would be stored but unused.
             NarratorRejectedError: if a key names no chapter of this job or is
                 sent twice. Nothing is persisted in that case.
         """
-        self._load_job_or_raise(job_id)
+        job = self._load_job_or_raise(job_id)
+        if job.status == JobStatus.RUNNING:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
         known = {c.key for c in list_chapters(self._checkpoint.load_chunks(job_id))}
         keys = [n.key for n in narrators]
         unknown = [k for k in keys if k not in known]

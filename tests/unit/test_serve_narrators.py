@@ -218,6 +218,23 @@ def test_put_bad_gender_is_422():
     assert store.load_narrators(job_id) == {}
 
 
+def test_put_while_the_job_is_running_is_409_and_stores_nothing():
+    # The run read its narrators when it started; a change now would be
+    # stored but not used, and the person would believe it was.
+    engine, store, _, job_id = _setup()
+    job = store.load_job(job_id)
+    store.save_job(job.model_copy(update={"status": JobStatus.RUNNING}))
+    client = _client(engine)
+
+    resp = client.put(
+        f"/jobs/{job_id}/narrators", json={"narrators": [{"key": "chapter01.xhtml", **VIS}]}
+    )
+
+    assert resp.status_code == 409
+    assert store.load_narrators(job_id) == {}
+    assert client.get(f"/jobs/{job_id}/narrators").status_code == 200
+
+
 def test_put_unknown_job_is_404():
     engine, _, _, _ = _setup()
     resp = _client(engine).put("/jobs/nope/narrators", json={"narrators": []})
