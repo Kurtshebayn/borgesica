@@ -15,7 +15,6 @@ from borgesica.domain.models import (
     Glossary,
     GlossaryEntry,
     JobConfig,
-    RollingSummary,
     SourceType,
 )
 from borgesica.domain.narrators import (
@@ -227,7 +226,7 @@ def build(narrator: NarratorFact | None) -> str:
     glossary = Glossary(entries=[GlossaryEntry(term="Vis", translation="Vis")])
     return (
         ContextManager()
-        .build_system_prompt(make_config(), glossary, RollingSummary(), narrator=narrator)
+        .build_system_prompt(make_config(), glossary, narrator=narrator)
         .text
     )
 

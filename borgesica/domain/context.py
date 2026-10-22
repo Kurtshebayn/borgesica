@@ -4,18 +4,24 @@ Dependency rule: only stdlib + pydantic + domain models/ports allowed.
 No I/O, no adapter imports.
 
 Design (M1-5):
-  build_system_prompt(config, glossary, summary) -> SystemPrompt
+  build_system_prompt(config, glossary, narrator) -> SystemPrompt
     SystemPrompt.text  = static_block + dynamic_block
 
 The static block is the natural prompt-caching boundary (it is identical for
 every chunk of a job), though no adapter applies caching today. The dynamic
-block appends glossary + rolling summary, which change per chunk.
+block appends the chapter's narrator and the glossary.
+
+There is no rolling summary: a chunk's prompt carries nothing produced by the
+chunk before it, so chunks can be translated in any order or concurrently.
+It was removed on 2026-10-22 — measured, it prevented no continuity errors
+and invented a feminine first-person narrator (6/93 outputs with it, 0/93
+without).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from borgesica.domain.models import Glossary, JobConfig, RollingSummary, SourceType
+from borgesica.domain.models import Glossary, JobConfig, SourceType
 from borgesica.domain.narrators import NarratorFact, render_narrator
 
 # ---------------------------------------------------------------------------
@@ -293,7 +299,7 @@ class ContextManager:
 
     Pure domain — no I/O, no adapter imports, and no collaborators at all:
     prompt assembly is string concatenation over the config, glossary and
-    rolling summary. It used to take a TranslationProvider, but only ever for
+    narrator. It used to take a TranslationProvider, but only ever for
     the count_tokens call behind the `cached` hint that nothing consumed; with
     that gone, "assembling a prompt makes no provider call" is guaranteed by
     the type rather than by convention.
@@ -307,7 +313,6 @@ class ContextManager:
         self,
         config: JobConfig,
         glossary: Glossary,
-        summary: RollingSummary,
         narrator: NarratorFact | None = None,
     ) -> SystemPrompt:
         """Assemble the full system prompt for a single chunk.
@@ -321,14 +326,13 @@ class ContextManager:
             [NARRATOR] first-person narrator of this chunk's chapter (only
                        when a person set one for it)
             [GLOSSARY] rendered table (config.glossary_budget_tokens)
-            [SUMMARY] rolling summary from chunk N-1 (≤ 200 tokens)
 
         Returns:
             SystemPrompt carrying the assembled .text.
         """
         static_block = self.get_static_block(config)
         dynamic_block = self.build_dynamic_block(
-            glossary, summary, config.glossary_budget_tokens, narrator=narrator
+            glossary, config.glossary_budget_tokens, narrator=narrator
         )
         return SystemPrompt(text=static_block + "\n\n" + dynamic_block)
 
@@ -354,7 +358,6 @@ class ContextManager:
     def build_dynamic_block(
         self,
         glossary: Glossary,
-        summary: RollingSummary,
         glossary_budget_tokens: int,
         narrator: NarratorFact | None = None,
     ) -> str:
@@ -373,13 +376,8 @@ class ContextManager:
         0/102). It is absent, not empty, for a chapter nobody set.
         """
         rendered_glossary = glossary.render(budget_tokens=glossary_budget_tokens)
-        summary_text = summary.text if summary.text else "No prior context."
         narrator_block = (
             f"[NARRATOR]\n{render_narrator(narrator)}\n\n" if narrator else ""
         )
 
-        return (
-            f"{narrator_block}"
-            f"[GLOSSARY]\n{rendered_glossary}\n\n"
-            f"[SUMMARY]\n{summary_text}"
-        )
+        return f"{narrator_block}[GLOSSARY]\n{rendered_glossary}"

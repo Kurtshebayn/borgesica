@@ -297,12 +297,12 @@ def test_resume_skips_done_chunks():
 
 
 # ===========================================================================
-# 6. Resume rebuilds rolling summary from highest DONE summary
-#    Chunk 2's summary must appear in chunk 3's system prompt
+# 6. Resume ignores rolling summaries an older run saved: no prompt carries
+#    a summary any more (removed 2026-10-22)
 # ===========================================================================
 
 
-def test_resume_rebuilds_summary_from_highest_done():
+def test_resume_ignores_summaries_saved_by_an_older_run():
     store = InMemoryCheckpointStore()
     provider = FakeTranslationProvider()
     orch, _, _ = make_orchestrator(provider=provider, store=store)
@@ -310,59 +310,20 @@ def test_resume_rebuilds_summary_from_highest_done():
     config = make_config()
     job = make_job(config, total=4)
     chunks = make_chunks(4)
-
-    # Mark chunks 0-2 as DONE; chunk 2 has a known summary
     for i in range(3):
         chunks[i] = chunks[i].model_copy(
             update={"status": ChunkStatus.DONE, "translated_text": f"Done {i}."}
         )
-        summary_text = f"Summary from chunk {i}"
-        store.save_summary(job.id, RollingSummary(text=summary_text, chunk_index=i))
-
-    store.save_job(job)
-    for c in chunks:
-        store.save_chunk(job.id, c)
-    store.save_glossary(job.id, Glossary())
-
-    orch.run(
-        job=job,
-        chunks=chunks,
-        glossary=Glossary(),
-        config=config,
-        on_progress=lambda p: None,
-        cancel_flag=threading.Event(),
-    )
-
-    # The system prompt for chunk 3 (index 3) must contain "Summary from chunk 2"
-    assert provider.call_count == 1
-    system_for_chunk3 = provider.call_log[0][0]  # system is first element
-    assert "Summary from chunk 2" in system_for_chunk3
-
-
-def test_resume_of_a_middle_chunk_uses_the_summary_before_it():
-    """A FAILED chunk in the middle of an otherwise finished book is retried
-    with the summary of the chunk BEFORE it, not the end-of-book summary —
-    that one describes plot the retried chunk has not reached yet."""
-    store = InMemoryCheckpointStore()
-    provider = FakeTranslationProvider()
-    orch, _, _ = make_orchestrator(provider=provider, store=store)
-
-    config = make_config()
-    job = make_job(config, total=4)
-    chunks = make_chunks(4)
-    for i in (0, 2, 3):
-        chunks[i] = chunks[i].model_copy(
-            update={"status": ChunkStatus.DONE, "translated_text": f"Done {i}."}
+        store.save_summary(
+            job.id, RollingSummary(text=f"Summary from chunk {i}", chunk_index=i)
         )
-        store.save_summary(job.id, RollingSummary(text=f"S{i}", chunk_index=i))
-    chunks[1] = chunks[1].model_copy(update={"status": ChunkStatus.FAILED})
 
     run_job(orch, job, chunks, store=store)
 
     assert provider.call_count == 1
-    system_for_chunk1 = provider.call_log[0][0]
-    assert "S0" in system_for_chunk1
-    assert "S3" not in system_for_chunk1
+    system_for_chunk3 = provider.call_log[0][0]
+    assert "Summary from chunk" not in system_for_chunk3
+    assert "[SUMMARY]" not in system_for_chunk3
 
 
 # ===========================================================================
@@ -1437,11 +1398,12 @@ def test_glossary_midrun_locked_entry_not_overridden():
 
 
 # ===========================================================================
-# 20. Rolling summary: chunk N's system prompt contains chunk N-1's summary
+# 20. No rolling summary: chunk N's prompt never carries chunk N-1's
+#     summary_update, and nothing is saved for a later chunk to read
 # ===========================================================================
 
 
-def test_rolling_summary_chunk_n_uses_n1_summary():
+def test_no_chunk_prompt_carries_the_previous_summary_update():
     store = InMemoryCheckpointStore()
 
     summaries_seen: list[str] = []
@@ -1480,43 +1442,11 @@ def test_rolling_summary_chunk_n_uses_n1_summary():
         cancel_flag=threading.Event(),
     )
 
-    # Chunk 1's system prompt must contain "Summary of chunk 0"
-    assert "Summary of chunk 0" in summaries_seen[1]
-    # Chunk 2's system prompt must contain "Summary of chunk 1"
-    assert "Summary of chunk 1" in summaries_seen[2]
-
-
-# ===========================================================================
-# 21. First chunk uses empty/placeholder summary (no prior context)
-# ===========================================================================
-
-
-def test_first_chunk_uses_placeholder_summary():
-    store = InMemoryCheckpointStore()
-    provider = FakeTranslationProvider()
-    orch, _, _ = make_orchestrator(provider=provider, store=store)
-
-    config = make_config()
-    job = make_job(config, total=1)
-    chunks = make_chunks(1)
-
-    store.save_job(job)
-    for c in chunks:
-        store.save_chunk(job.id, c)
-    store.save_glossary(job.id, Glossary())
-
-    orch.run(
-        job=job,
-        chunks=chunks,
-        glossary=Glossary(),
-        config=config,
-        on_progress=lambda p: None,
-        cancel_flag=threading.Event(),
-    )
-
-    system_for_chunk0 = provider.call_log[0][0]
-    # Either empty or the standard placeholder text from ContextManager
-    assert "No prior context." in system_for_chunk0 or "[SUMMARY]" in system_for_chunk0
+    assert len(summaries_seen) == 3
+    for system in summaries_seen:
+        assert "Summary of chunk" not in system
+        assert "[SUMMARY]" not in system
+    assert store.load_summary(job.id) == RollingSummary()
 
 
 # ===========================================================================
@@ -2640,7 +2570,7 @@ def test_project_chunk_cost_includes_system_prompt_overhead():
     # prompt, not restated as a literal (C1: the literal went stale at 500).
     dynamic_tokens = provider.count_tokens(
         orch._ctx.build_dynamic_block(
-            Glossary(), RollingSummary(), config.glossary_budget_tokens
+            Glossary(), config.glossary_budget_tokens
         ),
         config.model,
     )
@@ -2701,7 +2631,7 @@ def test_project_chunk_cost_uses_the_shared_output_model():
     )
     dynamic_tokens = provider.count_tokens(
         orch._ctx.build_dynamic_block(
-            Glossary(), RollingSummary(), config.glossary_budget_tokens
+            Glossary(), config.glossary_budget_tokens
         ),
         config.model,
     )
@@ -3883,12 +3813,11 @@ def test_budget_projection_measures_the_narrator_block():
     config = make_config().model_copy(update={"source_type": SourceType.EPUB})
     chunk = _chapter_chunk(0, "chapter01.xhtml")
 
-    plain = orch._project_chunk_cost(chunk, config, Glossary(), RollingSummary())
+    plain = orch._project_chunk_cost(chunk, config, Glossary())
     with_fact = orch._project_chunk_cost(
         chunk,
         config,
         Glossary(),
-        RollingSummary(),
         narrator=NarratorFact(name="Vis", gender="masculine"),
     )
     assert with_fact > plain

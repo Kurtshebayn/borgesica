@@ -18,7 +18,6 @@ from borgesica.domain.models import (
     Job,
     JobConfig,
     JobStatus,
-    RollingSummary,
     SourceType,
 )
 
@@ -54,7 +53,7 @@ def _empty_dynamic_tokens(provider, context_manager, config) -> int:
 
     return provider.count_tokens(
         context_manager.build_dynamic_block(
-            Glossary(), RollingSummary(), config.glossary_budget_tokens
+            Glossary(), config.glossary_budget_tokens
         ),
         config.model,
     )
@@ -276,7 +275,7 @@ def test_estimate_preserves_model_field():
 # ---------------------------------------------------------------------------
 # Per-call overhead calibration (bug: 16x under-estimate on SRT, job 0b86d4f2)
 # The estimator counted ONLY source-text tokens and a flat 150-token output.
-# Real calls pay the system prompt (static block + glossary + summary) on
+# Real calls pay the system prompt (static block + narrator + glossary) on
 # EVERY call, and the output is the full JSON envelope (translation +
 # summary_update + glossary_additions). On thin SRT chunks that overhead
 # dominates: estimate $0.0025 vs real $0.0395.
@@ -639,7 +638,7 @@ def test_estimate_overhead_measures_the_real_context_manager_block():
     comment and encoded it as a literal. Measuring the real builder means the
     two can never drift again.
     """
-    from borgesica.domain.models import Glossary, RollingSummary as _RS
+    from borgesica.domain.models import Glossary
 
     estimator, provider, ctx = _estimator_with_ctx()
     config = make_config(quality_mode="fast", glossary_budget_tokens=2500)
@@ -647,9 +646,8 @@ def test_estimate_overhead_measures_the_real_context_manager_block():
     job = make_job(config, total=1)
 
     glossary = Glossary()
-    summary = _RS(text="prior context here")
 
-    est = estimator.estimate(job, chunks, config, glossary=glossary, summary=summary)
+    est = estimator.estimate(job, chunks, config, glossary=glossary)
 
     import json as _json
 
@@ -660,7 +658,7 @@ def test_estimate_overhead_measures_the_real_context_manager_block():
         _json.dumps(translation_tool_schema(None)), config.model
     )
     dynamic_tokens = provider.count_tokens(
-        ctx.build_dynamic_block(glossary, summary, config.glossary_budget_tokens),
+        ctx.build_dynamic_block(glossary, config.glossary_budget_tokens),
         config.model,
     )
     expected_input = 2 + static_tokens + dynamic_tokens + schema_tokens

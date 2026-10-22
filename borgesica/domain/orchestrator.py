@@ -13,7 +13,8 @@ Design (continue-on-error — replaces M2-0 per-chunk flow):
          OR contains no alphabetic characters, persist the chunk DONE with
          translated_text = source_text (pass-through), make ZERO provider calls, and
          move to the next chunk. Applies identically regardless of continue_on_error.
-      4. Build system prompt via ContextManager (using current glossary + last summary).
+      4. Build system prompt via ContextManager (current glossary + the chunk's
+         chapter narrator; no rolling summary — nothing crosses chunks).
       5. PRIMARY (placeholders-in-text): tokenize_tags(source_text) replaces every
          inline tag with an opaque numbered placeholder (attributes — hrefs,
          classes, ids — never leave the orchestrator) and sends THAT to the
@@ -33,19 +34,14 @@ Design (continue-on-error — replaces M2-0 per-chunk flow):
                  FAILED (translated_text=None; writers fall back to source_text).
                - continue_on_error=False (--strict): job PAUSES immediately, stop.
       8. checkpoint.save_chunk(DONE or FAILED) — idempotent.
-      9. summary = unit.summary_update; checkpoint.save_summary(N) — skipped for
-         a FAILED chunk (no summary_update available); the next chunk reuses the
-         latest summary before it.
-     10. Merge glossary_additions (locked wins; new terms added as unlocked).
-     11. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
+      9. Merge glossary_additions (locked wins; new terms added as unlocked).
+     10. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
     After loop: job.status = DONE — even if one or more chunks ended FAILED (only
     reached when continue_on_error=True or no chunk failed; a strict-mode PAUSE
     returns early and never reaches this point).
 
 Resume semantics:
   - DONE chunks are skipped (0 provider calls for them).
-  - Each chunk gets the summary saved for the highest index BELOW it, so a
-    retried middle chunk never sees the end-of-book summary.
   - Continue from first non-DONE chunk.
   - CANCELLED / PAUSED / CREATED are all valid entry statuses for run().
   - RUNNING is the only invalid entry status → raises JobStateError.
@@ -99,7 +95,6 @@ from borgesica.domain.models import (
     JobConfig,
     JobStatus,
     Progress,
-    RollingSummary,
     TranslationUnit,
     Usage,
 )
@@ -358,11 +353,6 @@ class TranslationOrchestrator:
                 self._checkpoint.save_job(updated_job)
                 return updated_job
 
-            # Rolling summary of the chunk BEFORE this one. In a sequential run
-            # that is the summary just saved; on a resume that retries a middle
-            # chunk it is NOT the highest-index one, which describes later plot.
-            summary = self._checkpoint.load_summary(job.id, before=chunk.index)
-
             # The narrator of THIS chunk's chapter only: a book can have several
             # narrators, and a chapter nobody set gets no fact at all.
             key = chapter_key(chunk)
@@ -371,7 +361,7 @@ class TranslationOrchestrator:
             # Budget check — BEFORE the provider call.
             if config.budget_usd is not None:
                 projected = self._project_chunk_cost(
-                    chunk, config, live_glossary, summary, narrator=narrator
+                    chunk, config, live_glossary, narrator=narrator
                 )
                 if running_cost + projected > config.budget_usd:
                     paused_job = job.model_copy(
@@ -418,7 +408,7 @@ class TranslationOrchestrator:
 
             # Build system prompt for this chunk.
             system_prompt = self._ctx.build_system_prompt(
-                config, live_glossary, summary, narrator=narrator
+                config, live_glossary, narrator=narrator
             )
 
             # Fetch price once per chunk (same model throughout — no need to re-fetch per call).
@@ -470,8 +460,6 @@ class TranslationOrchestrator:
                     self._checkpoint.save_job(paused_job)
                     return paused_job
                 # continue_on_error=True: do NOT pause — proceed to the next chunk.
-                # Rolling summary is intentionally NOT updated for a FAILED chunk
-                # (no summary_update available); the next chunk reuses the latest one.
                 on_progress(
                     Progress(
                         job_id=job.id,
@@ -499,12 +487,6 @@ class TranslationOrchestrator:
             # write-only. Only real translated DONE chunks are captured — never
             # pass-through (source==translated, zero provider calls) or FAILED.
             self._capture_corpus(job.id, done_chunk, config, passed_validation)
-
-            # Update rolling summary (REPLACES prior summary).
-            self._checkpoint.save_summary(
-                job.id,
-                RollingSummary(text=final_unit.summary_update, chunk_index=chunk.index),
-            )
 
             # Merge glossary additions (locked wins; new terms added as unlocked).
             # A new term is committed at once but stays provisional: repeated
@@ -553,7 +535,6 @@ class TranslationOrchestrator:
         chunk: Chunk,
         config: JobConfig,
         glossary: Glossary | None = None,
-        summary: RollingSummary | None = None,
         narrator: NarratorFact | None = None,
     ) -> float:
         """Estimate the cost of translating a single chunk (pre-call budget GUARD only).
@@ -564,7 +545,7 @@ class TranslationOrchestrator:
         the budget guard requires it.
 
         Unlike the pre-flight CostEstimator, this runs mid-loop with the LIVE
-        glossary and summary in hand — the very objects that build the next
+        glossary and narrator in hand — the very objects that build the next
         prompt — so the dynamic block is measured exactly rather than budgeted.
         The projection therefore RISES as the glossary accumulates, which is
         when the real per-call cost rises too. A job may now pause partway
@@ -582,7 +563,6 @@ class TranslationOrchestrator:
         dynamic_tokens = self._provider.count_tokens(
             self._ctx.build_dynamic_block(
                 glossary if glossary is not None else Glossary(),
-                summary if summary is not None else RollingSummary(),
                 config.glossary_budget_tokens,
                 narrator=narrator,
             ),

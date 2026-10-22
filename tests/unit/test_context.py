@@ -16,7 +16,6 @@ from borgesica.domain.models import (
     Glossary,
     GlossaryEntry,
     JobConfig,
-    RollingSummary,
     SourceType,
 )
 
@@ -39,9 +38,8 @@ def test_system_prompt_contains_all_neutral_spanish_constraints():
     cm = ContextManager()
     config = make_config(target_lang="es-neutral")
     glossary = Glossary()
-    summary = RollingSummary()
 
-    sp = cm.build_system_prompt(config, glossary, summary)
+    sp = cm.build_system_prompt(config, glossary)
     text = sp.text
 
     # All 5 neutral-Spanish constraints must be detectable
@@ -66,9 +64,8 @@ def test_system_prompt_contains_translation_philosophy():
     cm = ContextManager()
     config = make_config()
     glossary = Glossary()
-    summary = RollingSummary()
 
-    sp = cm.build_system_prompt(config, glossary, summary)
+    sp = cm.build_system_prompt(config, glossary)
     text = sp.text
 
     # Translation philosophy detectable
@@ -245,13 +242,12 @@ def test_build_system_prompt_honors_config_glossary_budget():
 
     manager = ContextManager()
     glossary = _novel_glossary(300)
-    summary = RollingSummary()
 
     generous = manager.build_system_prompt(
-        make_config(glossary_budget_tokens=5000), glossary, summary
+        make_config(glossary_budget_tokens=5000), glossary
     )
     stingy = manager.build_system_prompt(
-        make_config(glossary_budget_tokens=30), glossary, summary
+        make_config(glossary_budget_tokens=30), glossary
     )
 
     assert "Gleaners299" in generous.text
@@ -259,41 +255,21 @@ def test_build_system_prompt_honors_config_glossary_budget():
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — rolling summary from chunk N-1 is in chunk N's system prompt
+# Test 6 — no rolling summary block: a chunk's prompt carries nothing from
+# the chunk before it (removed 2026-10-22: it added no measurable continuity
+# and invented a feminine narrator, and it forced chunks to run one by one)
 # ---------------------------------------------------------------------------
 
 
-def test_system_prompt_includes_prior_rolling_summary():
-    """Summary from chunk N-1 must be detectable in chunk N's system prompt."""
+def test_system_prompt_has_no_summary_block():
     from borgesica.domain.context import ContextManager
 
-    cm = ContextManager()
-    config = make_config()
-    glossary = Glossary()
-    summary = RollingSummary(text="Context: detective story, noir tone.", chunk_index=0)
+    sp = ContextManager().build_system_prompt(make_config(), Glossary())
 
-    sp = cm.build_system_prompt(config, glossary, summary)
-    assert "Context: detective story, noir tone." in sp.text
-
-
-# ---------------------------------------------------------------------------
-# Test 7 — first chunk (empty summary) → no exception, placeholder or empty
-# ---------------------------------------------------------------------------
-
-
-def test_system_prompt_first_chunk_no_exception():
-    """First chunk has empty summary (chunk_index=-1) → no exception, empty or placeholder."""
-    from borgesica.domain.context import ContextManager
-
-    cm = ContextManager()
-    config = make_config()
-    glossary = Glossary()
-    summary = RollingSummary()  # default: text="", chunk_index=-1
-
-    # Must not raise
-    sp = cm.build_system_prompt(config, glossary, summary)
-    # Must contain either empty summary or placeholder
-    assert "No prior context." in sp.text or sp.text.count("[SUMMARY]") >= 0
+    assert "[SUMMARY]" not in sp.text
+    assert "No prior context." not in sp.text
+    rendered = Glossary().render(budget_tokens=make_config().glossary_budget_tokens)
+    assert sp.text.endswith(f"[GLOSSARY]\n{rendered}")
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +289,7 @@ def test_system_prompt_exposes_text_only():
 
     cm = ContextManager()
 
-    sp = cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
+    sp = cm.build_system_prompt(make_config(), Glossary())
 
     assert isinstance(sp, SystemPrompt)
     assert isinstance(sp.text, str)
@@ -331,7 +307,7 @@ def test_context_manager_needs_no_provider():
 
     cm = ContextManager()
 
-    sp = cm.build_system_prompt(make_config(), Glossary(), RollingSummary())
+    sp = cm.build_system_prompt(make_config(), Glossary())
 
     assert sp.text
     assert not hasattr(cm, "_provider")
@@ -364,9 +340,8 @@ def test_system_prompt_contains_tag_preservation_instruction():
     cm = ContextManager()
     config = make_config()
     glossary = Glossary()
-    summary = RollingSummary()
 
-    sp = cm.build_system_prompt(config, glossary, summary)
+    sp = cm.build_system_prompt(config, glossary)
     text = sp.text.lower()
 
     # Must explicitly mention tag preservation / inline tags
@@ -395,9 +370,8 @@ def test_system_prompt_instructs_placeholders_kept_verbatim():
     cm = ContextManager()
     config = make_config()
     glossary = Glossary()
-    summary = RollingSummary()
 
-    sp = cm.build_system_prompt(config, glossary, summary)
+    sp = cm.build_system_prompt(config, glossary)
     text = sp.text
 
     # Must show the placeholder syntax itself so the model recognizes it.
@@ -723,7 +697,7 @@ def test_system_prompt_pins_the_dialogue_punctuation_convention():
     from borgesica.domain.context import ContextManager
 
     text = ContextManager().build_system_prompt(
-        make_config(target_lang="es-neutral"), Glossary(), RollingSummary()
+        make_config(target_lang="es-neutral"), Glossary()
     ).text
 
     assert "raya" in text.lower(), "must name the raya as the dialogue mark"
@@ -739,7 +713,6 @@ def test_dialogue_rule_survives_for_srt_jobs():
     text = ContextManager().build_system_prompt(
         make_config(target_lang="es-neutral", source_type=SourceType.SRT),
         Glossary(),
-        RollingSummary(),
     ).text
 
     assert "raya" in text.lower()
@@ -756,7 +729,7 @@ def test_dialogue_rule_states_the_conversion_not_just_the_ban():
     from borgesica.domain.context import ContextManager
 
     text = ContextManager().build_system_prompt(
-        make_config(target_lang="es-neutral"), Glossary(), RollingSummary()
+        make_config(target_lang="es-neutral"), Glossary()
     ).text
     # Scoped to rule 6 itself: "source", "double" and "replace" all occur in
     # unrelated rules, so asserting against the whole prompt passes before the
@@ -802,7 +775,7 @@ def test_summary_rules_require_naming_the_referent():
 
     rules = _summary_rules(
         ContextManager().build_system_prompt(
-            make_config(source_type=SourceType.EPUB), Glossary(), RollingSummary()
+            make_config(source_type=SourceType.EPUB), Glossary()
         ).text
     )
 
@@ -822,7 +795,7 @@ def test_summary_rules_forbid_inferring_gender():
 
     rules = _summary_rules(
         ContextManager().build_system_prompt(
-            make_config(source_type=SourceType.EPUB), Glossary(), RollingSummary()
+            make_config(source_type=SourceType.EPUB), Glossary()
         ).text
     )
 
@@ -839,7 +812,7 @@ def test_referent_naming_rule_survives_for_srt_jobs():
 
     rules = _summary_rules(
         ContextManager().build_system_prompt(
-            make_config(source_type=SourceType.SRT), Glossary(), RollingSummary()
+            make_config(source_type=SourceType.SRT), Glossary()
         ).text
     )
 
@@ -1008,7 +981,7 @@ def _addition_rules_for(source_type: SourceType) -> str:
 
     return _glossary_addition_rules(
         ContextManager().build_system_prompt(
-            make_config(source_type=source_type), Glossary(), RollingSummary()
+            make_config(source_type=source_type), Glossary()
         ).text
     )
 
