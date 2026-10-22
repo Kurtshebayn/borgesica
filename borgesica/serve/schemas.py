@@ -17,6 +17,7 @@ from borgesica.domain.models import (
     Job,
     JobStatus,
 )
+from borgesica.domain.narrators import Chapter, NarratorAssignment
 
 
 class CreateJobRequest(BaseModel):
@@ -109,6 +110,19 @@ class GlossaryResponse(BaseModel):
 
 class GlossaryUpdateRequest(BaseModel):
     entries: list[GlossaryEntry]
+
+
+class NarratorsResponse(BaseModel):
+    """Every chapter of the job, with its first-person pre-mark and the
+    narrator a person stored for it (null when none)."""
+
+    chapters: list[Chapter] = Field(default_factory=list)
+
+
+class NarratorsUpdateRequest(BaseModel):
+    """The full set of narrators: chapters left out end up with none."""
+
+    narrators: list[NarratorAssignment]
 
 
 class RunRequest(BaseModel):

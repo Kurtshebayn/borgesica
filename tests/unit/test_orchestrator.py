@@ -3807,3 +3807,88 @@ def test_reflective_prompts_share_one_placeholder_rule_source():
         "revise system prompt must embed the shared INLINE_TAG_RULES text "
         "verbatim, not a second divergent description"
     )
+
+
+# ---------------------------------------------------------------------------
+# Narrator fact: it reaches the prompt only for the chapters it covers
+# ---------------------------------------------------------------------------
+
+
+def _chapter_chunk(index: int, href: str) -> Chunk:
+    return Chunk(
+        index=index,
+        source_text=f"I walk on, chunk {index}.",
+        meta={"prose_nodes": [{"epub_item_href": href, "node_path": f"/p[{index}]"}]},
+    )
+
+
+def _run_with_narrators(narrators):
+    from borgesica.domain.narrators import NarratorFact  # noqa: F401
+
+    config = make_config().model_copy(update={"source_type": SourceType.EPUB})
+    job = make_job(config, total=4)
+    chunks = [
+        _chapter_chunk(0, "chapter01.xhtml"),
+        _chapter_chunk(1, "chapter01.xhtml"),
+        _chapter_chunk(2, "chapter02.xhtml"),
+        _chapter_chunk(3, "acknowledgments.xhtml"),
+    ]
+    orch, provider, store = make_orchestrator()
+    store.save_job(job)
+    for c in chunks:
+        store.save_chunk(job.id, c)
+    orch.run(
+        job=job,
+        chunks=chunks,
+        glossary=Glossary(),
+        config=config,
+        on_progress=lambda p: None,
+        cancel_flag=threading.Event(),
+        narrators=narrators,
+    )
+    # One call per chunk, in chunk order; the system prompt is element 0.
+    return [system for system, _user, _model in provider.call_log]
+
+
+def test_narrator_block_reaches_only_the_chunks_of_its_chapters():
+    from borgesica.domain.narrators import NarratorFact
+
+    systems = _run_with_narrators(
+        {
+            "chapter01.xhtml": NarratorFact(name="Vis", gender="masculine"),
+            "chapter02.xhtml": NarratorFact(name="Emissa", gender="feminine"),
+        }
+    )
+
+    assert len(systems) == 4
+    assert "[NARRATOR]" in systems[0] and "Vis, male" in systems[0]
+    assert "[NARRATOR]" in systems[1] and "Vis, male" in systems[1]
+    assert "[NARRATOR]" in systems[2] and "Emissa, female" in systems[2]
+    assert "Vis" not in systems[2]
+    # The acknowledgments chapter has no narrator set: no block at all.
+    assert "[NARRATOR]" not in systems[3]
+
+
+def test_run_without_narrators_sends_no_narrator_block():
+    systems = _run_with_narrators(None)
+    assert systems and all("[NARRATOR]" not in s for s in systems)
+
+
+def test_budget_projection_measures_the_narrator_block():
+    # The budget guard measures the same dynamic block the prompt is built
+    # from; a narrator fact must make the projection larger, not be ignored.
+    from borgesica.domain.narrators import NarratorFact
+
+    orch, _provider, _store = make_orchestrator()
+    config = make_config().model_copy(update={"source_type": SourceType.EPUB})
+    chunk = _chapter_chunk(0, "chapter01.xhtml")
+
+    plain = orch._project_chunk_cost(chunk, config, Glossary(), RollingSummary())
+    with_fact = orch._project_chunk_cost(
+        chunk,
+        config,
+        Glossary(),
+        RollingSummary(),
+        narrator=NarratorFact(name="Vis", gender="masculine"),
+    )
+    assert with_fact > plain

@@ -22,6 +22,8 @@ import {
   recoveryRequiresRespawn,
   runRecoveryAction,
   saveGlossary,
+  loadNarrators,
+  saveNarrators,
   sseEventToAction,
   validateFilePath,
   wizardReducer,
@@ -32,6 +34,8 @@ import type {
   GlossaryExtractionEstimate,
   GlossaryReviewResponse,
   JobResponse,
+  NarratorFact,
+  NarratorsResponse,
 } from "./apiTypes";
 
 describe("validateFilePath", () => {
@@ -1009,5 +1013,297 @@ describe("glossary save and review load seams", () => {
       type: "GLOSSARY_SAVE_FAILED",
       message: "Error: HTTP 422: rejected",
     });
+  });
+});
+
+describe("narrator review", () => {
+  const vis = { name: "Vis", gender: "masculine" as const };
+  const sira = { name: "Sira", gender: "feminine" as const };
+  function chapter(key: string, first_person: boolean, narrator: NarratorFact | null = null) {
+    return {
+      key,
+      title: key,
+      opening: "",
+      first_chunk: 0,
+      last_chunk: 0,
+      first_person,
+      first_person_per_1k: first_person ? 25 : 0,
+      narrator,
+    };
+  }
+  const response: NarratorsResponse = {
+    chapters: [
+      chapter("ack.xhtml", false),
+      chapter("ch1.xhtml", true),
+      chapter("ch2.xhtml", false),
+      chapter("ch3.xhtml", true, sira),
+    ],
+  };
+  const onGlossary: WizardState = {
+    ...initialWizardState,
+    screen: "glossary",
+    jobId: "job-1",
+    estimate: estimateWith(null),
+  };
+  const loaded = wizardReducer(onGlossary, { type: "NARRATORS_LOADED", jobId: "job-1", response });
+  const RUNNING_JOB: JobResponse = {
+    id: "job-1",
+    status: "RUNNING",
+    total_chunks: 4,
+    completed_chunks: 0,
+    cost_usd: 0,
+    best_effort_count: 0,
+    best_effort_indices: [],
+    failed_count: 0,
+    failed_indices: [],
+    glossary_extracted: false,
+  };
+
+  it("starts with nothing loaded", () => {
+    expect(initialWizardState.narratorChapters).toBeNull();
+    expect(initialWizardState.narratorLoadError).toBeNull();
+    expect(initialWizardState.narratorSaveError).toBeNull();
+  });
+
+  it("NARRATORS_LOADED keeps the chapters and makes their narrators the draft", () => {
+    expect(loaded.narratorChapters).toBe(response.chapters);
+    expect(loaded.narratorDraft).toEqual({
+      "ack.xhtml": null,
+      "ch1.xhtml": null,
+      "ch2.xhtml": null,
+      "ch3.xhtml": sira,
+    });
+  });
+
+  it("applies the bulk form's narrator to every first-person chapter", () => {
+    let next = wizardReducer(loaded, {
+      type: "NARRATOR_BULK_CHANGED",
+      form: { name: "Vis", gender: "masculine" },
+    });
+    next = wizardReducer(next, { type: "NARRATORS_APPLIED_TO_FIRST_PERSON" });
+    expect(next.narratorDraft).toEqual({
+      "ack.xhtml": null,
+      "ch1.xhtml": vis,
+      "ch2.xhtml": null,
+      "ch3.xhtml": vis,
+    });
+  });
+
+  it("applying the bulk form without a gender does nothing", () => {
+    const named = wizardReducer(loaded, {
+      type: "NARRATOR_BULK_CHANGED",
+      form: { name: "Vis", gender: null },
+    });
+    expect(wizardReducer(named, { type: "NARRATORS_APPLIED_TO_FIRST_PERSON" })).toBe(named);
+  });
+
+  it("changes or clears a single chapter", () => {
+    let next = wizardReducer(loaded, {
+      type: "NARRATOR_CHAPTER_EDITED",
+      key: "ack.xhtml",
+      narrator: vis,
+    });
+    next = wizardReducer(next, { type: "NARRATOR_CHAPTER_EDITED", key: "ch3.xhtml", narrator: null });
+    expect(next.narratorDraft).toMatchObject({ "ack.xhtml": vis, "ch3.xhtml": null, "ch1.xhtml": null });
+  });
+
+  it("applies a chapter's narrator from here onward, skipping unmarked chapters", () => {
+    let next = wizardReducer(loaded, { type: "NARRATOR_CHAPTER_EDITED", key: "ch1.xhtml", narrator: vis });
+    next = wizardReducer(next, { type: "NARRATOR_APPLIED_ONWARD", key: "ch1.xhtml" });
+    expect(next.narratorDraft).toEqual({
+      "ack.xhtml": null,
+      "ch1.xhtml": vis,
+      "ch2.xhtml": null,
+      "ch3.xhtml": vis,
+    });
+  });
+
+  it("applying onward from a chapter with no narrator does nothing", () => {
+    expect(wizardReducer(loaded, { type: "NARRATOR_APPLIED_ONWARD", key: "ch1.xhtml" })).toBe(loaded);
+  });
+
+  it("a failed save shows an error and keeps the edits", () => {
+    const edited = wizardReducer(loaded, {
+      type: "NARRATOR_CHAPTER_EDITED",
+      key: "ch1.xhtml",
+      narrator: vis,
+    });
+    const saving = wizardReducer(edited, { type: "NARRATORS_SAVE_STARTED" });
+    expect(saving.narratorSaving).toBe(true);
+    const failed = wizardReducer(saving, {
+      type: "NARRATORS_SAVE_FAILED",
+      jobId: "job-1",
+      message: "HTTP 422: bad",
+    });
+    expect(failed.narratorSaveError).toMatch(/HTTP 422: bad/);
+    expect(failed.narratorSaving).toBe(false);
+    expect(failed.narratorDraft).toEqual(edited.narratorDraft);
+  });
+
+  it("the server's response after a save replaces the draft and clears the error", () => {
+    const failed = { ...loaded, narratorSaveError: "x", narratorSaving: true };
+    const saved: NarratorsResponse = {
+      chapters: response.chapters.map((c) => ({ ...c, narrator: c.first_person ? vis : null })),
+    };
+    const next = wizardReducer(failed, { type: "NARRATORS_LOADED", jobId: "job-1", response: saved });
+    expect(next.narratorSaveError).toBeNull();
+    expect(next.narratorSaving).toBe(false);
+    expect(next.narratorDraft).toMatchObject({ "ch1.xhtml": vis, "ch3.xhtml": vis });
+  });
+
+  it("a failed load records a short error and blocks neither the glossary lock nor the run", () => {
+    const failed = wizardReducer(onGlossary, {
+      type: "NARRATORS_LOAD_FAILED",
+      jobId: "job-1",
+      message: "HTTP 500",
+    });
+    expect(failed.narratorLoadError).toMatch(/HTTP 500/);
+    const locked = wizardReducer(failed, { type: "GLOSSARY_LOCKED" });
+    expect(locked.glossaryLocked).toBe(true);
+    const running = wizardReducer(locked, { type: "RUN_STARTED", job: RUNNING_JOB });
+    expect(running.screen).toBe("run");
+  });
+
+  it("ignores a load, a failed load or a failed save that belongs to another job", () => {
+    // A response for the job the person left behind must never show its
+    // chapters, or its errors, on the job now open.
+    expect(wizardReducer(onGlossary, { type: "NARRATORS_LOADED", jobId: "job-0", response })).toBe(
+      onGlossary,
+    );
+    expect(
+      wizardReducer(loaded, { type: "NARRATORS_LOAD_FAILED", jobId: "job-0", message: "HTTP 500" }),
+    ).toBe(loaded);
+    expect(
+      wizardReducer(loaded, { type: "NARRATORS_SAVE_FAILED", jobId: "job-0", message: "HTTP 409" }),
+    ).toBe(loaded);
+  });
+
+  it("a new job starts with no narrator state from the previous one", () => {
+    const edited = {
+      ...wizardReducer(loaded, { type: "NARRATOR_CHAPTER_EDITED", key: "ch1.xhtml", narrator: vis }),
+      narratorBulk: { name: "Vis", gender: "masculine" as const },
+      narratorSaveError: "x",
+      narratorLoadError: "y",
+      narratorSaving: true,
+    };
+    const narratorFields = {
+      narratorChapters: initialWizardState.narratorChapters,
+      narratorDraft: initialWizardState.narratorDraft,
+      narratorBulk: initialWizardState.narratorBulk,
+      narratorLoadError: initialWizardState.narratorLoadError,
+      narratorSaveError: initialWizardState.narratorSaveError,
+      narratorSaving: initialWizardState.narratorSaving,
+    };
+
+    const created = wizardReducer(edited, { type: "JOB_CREATED", jobId: "job-2" });
+    expect(created).toMatchObject({ jobId: "job-2", ...narratorFields });
+
+    const resumed = wizardReducer(edited, { type: "RESUME_JOB", job: { ...RUNNING_JOB, id: "job-2" } });
+    expect(resumed).toMatchObject({ jobId: "job-2", ...narratorFields });
+  });
+
+  it("resuming the same job keeps its narrator state", () => {
+    const resumed = wizardReducer(loaded, { type: "RESUME_JOB", job: RUNNING_JOB });
+    expect(resumed.narratorChapters).toBe(loaded.narratorChapters);
+    expect(resumed.narratorDraft).toBe(loaded.narratorDraft);
+  });
+
+  it("leaves the glossary review flow untouched (and the glossary review leaves narrators alone)", () => {
+    const review: GlossaryReviewResponse = {
+      entries: [],
+      min_gender_mentions: 20,
+      min_gender_ratio: 0.7,
+    };
+    const edited = wizardReducer(loaded, {
+      type: "NARRATOR_CHAPTER_EDITED",
+      key: "ch1.xhtml",
+      narrator: vis,
+    });
+    const withReview = wizardReducer(edited, { type: "GLOSSARY_REVIEW_LOADED", review });
+    expect(withReview.narratorDraft).toBe(edited.narratorDraft);
+    expect(withReview.narratorChapters).toBe(edited.narratorChapters);
+    expect(withReview.glossaryReview).toBe(review);
+    expect(edited.glossary).toBe(onGlossary.glossary);
+    expect(edited.glossaryReview).toBe(onGlossary.glossaryReview);
+    expect(edited.glossaryLocked).toBe(false);
+  });
+});
+
+describe("narrator load and save seams", () => {
+  const vis = { name: " Vis ", gender: "masculine" as const };
+  const response: NarratorsResponse = {
+    chapters: [
+      {
+        key: "ack.xhtml",
+        title: "Agradecimientos",
+        opening: "",
+        first_chunk: 0,
+        last_chunk: 0,
+        first_person: true,
+        first_person_per_1k: 12,
+        narrator: null,
+      },
+      {
+        key: "ch1.xhtml",
+        title: "Uno",
+        opening: "",
+        first_chunk: 1,
+        last_chunk: 4,
+        first_person: true,
+        first_person_per_1k: 30,
+        narrator: null,
+      },
+    ],
+  };
+  const edited: WizardState = {
+    ...initialWizardState,
+    screen: "glossary",
+    jobId: "job-1",
+    narratorChapters: response.chapters,
+    narratorDraft: { "ack.xhtml": null, "ch1.xhtml": vis },
+  };
+
+  it("loadNarrators dispatches the chapters, or why they could not be loaded", async () => {
+    const dispatch = vi.fn();
+    await loadNarrators("job-1", async () => response, dispatch);
+    expect(dispatch).toHaveBeenCalledWith({ type: "NARRATORS_LOADED", jobId: "job-1", response });
+
+    await loadNarrators("job-1", async () => Promise.reject(new Error("HTTP 500")), dispatch);
+    expect(dispatch).toHaveBeenLastCalledWith({
+      type: "NARRATORS_LOAD_FAILED",
+      jobId: "job-1",
+      message: "Error: HTTP 500",
+    });
+  });
+
+  it("save PUTs only the chapters with a narrator and reflects the server's response", async () => {
+    const saved = { chapters: [] };
+    const put = vi.fn(async () => saved);
+    const dispatch = vi.fn();
+    await saveNarrators(edited, { put, dispatch });
+    expect(put).toHaveBeenCalledWith([{ key: "ch1.xhtml", name: "Vis", gender: "masculine" }]);
+    expect(dispatch.mock.calls).toEqual([
+      [{ type: "NARRATORS_SAVE_STARTED" }],
+      [{ type: "NARRATORS_LOADED", jobId: "job-1", response: saved }],
+    ]);
+  });
+
+  it("a refused save reports why", async () => {
+    const put = vi.fn(async () => Promise.reject(new Error("HTTP 422: unknown key")));
+    const dispatch = vi.fn();
+    await saveNarrators(edited, { put, dispatch });
+    expect(dispatch).toHaveBeenLastCalledWith({
+      type: "NARRATORS_SAVE_FAILED",
+      jobId: "job-1",
+      message: "Error: HTTP 422: unknown key",
+    });
+  });
+
+  it("does nothing before the chapters are loaded", async () => {
+    const put = vi.fn(async () => response);
+    const dispatch = vi.fn();
+    await saveNarrators({ ...initialWizardState }, { put, dispatch });
+    expect(put).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });

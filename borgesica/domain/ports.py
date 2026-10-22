@@ -20,6 +20,7 @@ from borgesica.domain.models import (
     RollingSummary,
     TranslationResult,
 )
+from borgesica.domain.narrators import NarratorFact
 
 # ---------------------------------------------------------------------------
 # Document I/O ports
@@ -169,6 +170,18 @@ class CheckpointStore(Protocol):
 
     def load_glossary_proposals(self, job_id: str) -> dict[str, tuple[str, ...]]:
         """Return the stored proposals, per-term order preserved; {} if none."""
+        ...
+
+    def save_narrators(self, job_id: str, narrators: dict[str, NarratorFact]) -> None:
+        """Replace the first-person narrator facts, keyed by chapter.
+
+        A person sets these in the review; a chapter with no entry has no
+        narrator fact. Full overwrite, like save_glossary.
+        """
+        ...
+
+    def load_narrators(self, job_id: str) -> dict[str, NarratorFact]:
+        """Return the stored narrator facts by chapter key; {} if none."""
         ...
 
     def save_summary(self, job_id: str, s: RollingSummary) -> None:

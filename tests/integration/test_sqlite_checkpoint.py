@@ -625,3 +625,65 @@ def test_max_output_tokens_defaults_to_none_on_load(tmp_path):
     store.save_job(job)
 
     assert store.load_job("nocap-job").config.max_output_tokens is None
+
+
+# ---------------------------------------------------------------------------
+# Narrators: one fact per chapter, set by a person
+# ---------------------------------------------------------------------------
+
+
+def _narrator_store(tmp_path):
+    from borgesica.adapters.checkpoints.sqlite_checkpoint import SQLiteCheckpointStore
+
+    return SQLiteCheckpointStore(str(tmp_path / "jobs.db"))
+
+
+def test_narrators_of_a_job_with_none_set_are_empty(tmp_path):
+    assert _narrator_store(tmp_path).load_narrators("job") == {}
+
+
+def test_narrators_round_trip_per_chapter(tmp_path):
+    from borgesica.domain.narrators import NarratorFact
+
+    store = _narrator_store(tmp_path)
+    narrators = {
+        "chapter01.xhtml": NarratorFact(name="Vis", gender="masculine"),
+        "chapter02.xhtml": NarratorFact(name="Emissa", gender="feminine"),
+        "chapter03.xhtml": NarratorFact(gender="feminine"),
+    }
+    store.save_narrators("job", narrators)
+
+    # A fresh store on the same file: the facts live in the database, not in
+    # the object.
+    assert _narrator_store(tmp_path).load_narrators("job") == narrators
+
+
+def test_saving_narrators_replaces_the_previous_set(tmp_path):
+    from borgesica.domain.narrators import NarratorFact
+
+    store = _narrator_store(tmp_path)
+    store.save_narrators(
+        "job",
+        {
+            "chapter01.xhtml": NarratorFact(name="Vis", gender="masculine"),
+            "acknowledgments.xhtml": NarratorFact(name="Vis", gender="masculine"),
+        },
+    )
+    store.save_narrators(
+        "job", {"chapter01.xhtml": NarratorFact(name="Vis", gender="masculine")}
+    )
+
+    assert list(store.load_narrators("job")) == ["chapter01.xhtml"]
+
+
+def test_narrators_are_kept_per_job(tmp_path):
+    from borgesica.domain.narrators import NarratorFact
+
+    store = _narrator_store(tmp_path)
+    store.save_narrators("a", {"c.xhtml": NarratorFact(name="Vis", gender="masculine")})
+    store.save_narrators("b", {})
+
+    assert store.load_narrators("a") == {
+        "c.xhtml": NarratorFact(name="Vis", gender="masculine")
+    }
+    assert store.load_narrators("b") == {}

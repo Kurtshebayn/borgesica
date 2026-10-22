@@ -15,6 +15,8 @@ import type {
   GlossaryEntry,
   GlossaryReviewResponse,
   JobResponse,
+  NarratorAssignment,
+  NarratorsResponse,
 } from "./apiTypes";
 
 const TOKEN_HEADER = "X-Borgesica-Token";
@@ -100,6 +102,34 @@ export function putGlossary(
     headers: authHeaders(token, true),
     body: JSON.stringify({ entries }),
   }).then(asJson<{ entries: GlossaryEntry[] }>);
+}
+
+/** Every chapter with its first-person mark and stored narrator. Empty
+ * `chapters` for jobs without chapters (subtitles). */
+export function getNarrators(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+): Promise<NarratorsResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}/narrators`, {
+    headers: authHeaders(token),
+  }).then(asJson<NarratorsResponse>);
+}
+
+/** Replaces every stored narrator with *narrators* (a full overwrite: a
+ * chapter left out has none afterwards) and returns the GET shape. A 422
+ * (unknown key, bad gender, duplicate key) saves nothing. */
+export function putNarrators(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+  narrators: NarratorAssignment[],
+): Promise<NarratorsResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}/narrators`, {
+    method: "PUT",
+    headers: authHeaders(token, true),
+    body: JSON.stringify({ narrators }),
+  }).then(asJson<NarratorsResponse>);
 }
 
 export function runJob(

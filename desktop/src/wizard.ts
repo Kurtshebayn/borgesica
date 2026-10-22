@@ -13,8 +13,23 @@ import type {
   GlossaryReviewResponse,
   JobResponse,
   JobStatus,
+  NarratorAssignment,
+  NarratorFact,
+  NarratorChapter,
+  NarratorsResponse,
 } from "./apiTypes";
 import { glossaryChangesToSave } from "./glossaryReview";
+import {
+  applyFromChapterOnward,
+  applyToFirstPerson,
+  bulkNarrator,
+  draftFromChapters,
+  emptyNarratorBulkForm,
+  narratorsPayload,
+  setChapterNarrator,
+  type NarratorBulkForm,
+  type NarratorDraft,
+} from "./narrators";
 
 /** "preparing" is the explicit, paid glossary extraction pass, entered only
  * from the estimate screen by a user click and left only by its end (back to
@@ -116,6 +131,18 @@ export interface WizardState {
   /** Why the last glossary save failed (nothing was saved, nothing locked). */
   glossarySaveError: string | null;
   glossaryLocked: boolean;
+  /** The chapters and narrators as last loaded or saved; null until loaded.
+   * Empty for jobs without chapters (subtitles): no narrator section. */
+  narratorChapters: NarratorChapter[] | null;
+  /** The editable narrators, by chapter key (see `narrators.ts`). */
+  narratorDraft: NarratorDraft;
+  /** The "write it once for the first-person chapters" form. */
+  narratorBulk: NarratorBulkForm;
+  /** Why the chapters could not be loaded (blocks nothing else). */
+  narratorLoadError: string | null;
+  /** Why the last save failed; the edits are kept. */
+  narratorSaveError: string | null;
+  narratorSaving: boolean;
   progress: ProgressInfo | null;
   job: JobResponse | null;
   runError: string | null;
@@ -145,6 +172,12 @@ export const initialWizardState: WizardState = {
   glossaryReviewError: null,
   glossarySaveError: null,
   glossaryLocked: false,
+  narratorChapters: null,
+  narratorDraft: {},
+  narratorBulk: emptyNarratorBulkForm,
+  narratorLoadError: null,
+  narratorSaveError: null,
+  narratorSaving: false,
   progress: null,
   job: null,
   runError: null,
@@ -252,6 +285,40 @@ export async function saveGlossary(
     seams.dispatch({ type: "GLOSSARY_LOCKED" });
   } else if (changes.length > 0) {
     await seams.loadReview();
+  }
+}
+
+/** Fetches the chapters and their narrators and reports them, or why they
+ * could not be loaded (the rest of the screen works without them). */
+export async function loadNarrators(
+  jobId: string,
+  getNarrators: () => Promise<NarratorsResponse>,
+  dispatch: (action: WizardAction) => void,
+): Promise<void> {
+  try {
+    dispatch({ type: "NARRATORS_LOADED", jobId, response: await getNarrators() });
+  } catch (err) {
+    dispatch({ type: "NARRATORS_LOAD_FAILED", jobId, message: String(err) });
+  }
+}
+
+export interface NarratorSaveSeams {
+  /** PUT /jobs/{id}/narrators with this full list (an overwrite). */
+  put: (narrators: NarratorAssignment[]) => Promise<NarratorsResponse>;
+  dispatch: (action: WizardAction) => void;
+}
+
+/** Sends every chapter that has a narrator (the PUT replaces them all) and
+ * shows what the server stored; a refused save keeps the edits. */
+export async function saveNarrators(state: WizardState, seams: NarratorSaveSeams): Promise<void> {
+  const { jobId } = state;
+  if (!state.narratorChapters || !jobId) return;
+  const payload = narratorsPayload(state.narratorChapters, state.narratorDraft);
+  seams.dispatch({ type: "NARRATORS_SAVE_STARTED" });
+  try {
+    seams.dispatch({ type: "NARRATORS_LOADED", jobId, response: await seams.put(payload) });
+  } catch (err) {
+    seams.dispatch({ type: "NARRATORS_SAVE_FAILED", jobId, message: String(err) });
   }
 }
 
@@ -532,6 +599,20 @@ export type WizardAction =
     }
   | { type: "GLOSSARY_SAVE_FAILED"; message: string }
   | { type: "GLOSSARY_LOCKED" }
+  /** The chapters arrived (on entering the screen, or as a save's reply).
+   * Every narrator reply names the job it was asked for: one that arrives
+   * after the person moved to another job is dropped. */
+  | { type: "NARRATORS_LOADED"; jobId: string; response: NarratorsResponse }
+  | { type: "NARRATORS_LOAD_FAILED"; jobId: string; message: string }
+  | { type: "NARRATOR_BULK_CHANGED"; form: NarratorBulkForm }
+  /** The bulk form's narrator goes to every chapter marked first-person. */
+  | { type: "NARRATORS_APPLIED_TO_FIRST_PERSON" }
+  /** One chapter's narrator changed; null clears it. */
+  | { type: "NARRATOR_CHAPTER_EDITED"; key: string; narrator: NarratorFact | null }
+  /** This chapter's narrator goes to every following first-person chapter. */
+  | { type: "NARRATOR_APPLIED_ONWARD"; key: string }
+  | { type: "NARRATORS_SAVE_STARTED" }
+  | { type: "NARRATORS_SAVE_FAILED"; jobId: string; message: string }
   | { type: "RUN_STARTED"; job: JobResponse }
   | { type: "RUN_START_FAILED"; message: string }
   | { type: "PROGRESS_RECEIVED"; progress: ProgressInfo }
@@ -551,6 +632,30 @@ export type WizardAction =
   | { type: "CONNECTION_LOST"; message: string }
   | { type: "RECOVER_FROM_ERROR" };
 
+type NarratorState = Pick<
+  WizardState,
+  | "narratorChapters"
+  | "narratorDraft"
+  | "narratorBulk"
+  | "narratorLoadError"
+  | "narratorSaveError"
+  | "narratorSaving"
+>;
+
+/** The narrator fields to carry into `jobId`: kept for the same job, reset
+ * for any other, so one book's chapters never show on another. */
+function narratorStateFor(state: WizardState, jobId: string): NarratorState {
+  const source = jobId === state.jobId ? state : initialWizardState;
+  return {
+    narratorChapters: source.narratorChapters,
+    narratorDraft: source.narratorDraft,
+    narratorBulk: source.narratorBulk,
+    narratorLoadError: source.narratorLoadError,
+    narratorSaveError: source.narratorSaveError,
+    narratorSaving: source.narratorSaving,
+  };
+}
+
 export function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
     case "FILE_PATH_CHANGED": {
@@ -562,7 +667,13 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       // is still rejected (defensive — the UI should not call this action
       // in that case, but the reducer must not trust callers blindly).
       if (state.fileError) return state;
-      return { ...state, jobId: action.jobId, createError: null, screen: "estimate" };
+      return {
+        ...state,
+        ...narratorStateFor(state, action.jobId),
+        jobId: action.jobId,
+        createError: null,
+        screen: "estimate",
+      };
     case "JOB_CREATE_FAILED":
       return { ...state, createError: action.message };
     case "ESTIMATE_RECEIVED":
@@ -682,6 +793,59 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
       };
     case "GLOSSARY_LOCKED":
       return { ...state, glossaryLocked: true };
+    case "NARRATORS_LOADED":
+      if (action.jobId !== state.jobId) return state;
+      return {
+        ...state,
+        narratorChapters: action.response.chapters,
+        narratorDraft: draftFromChapters(action.response.chapters),
+        narratorLoadError: null,
+        narratorSaveError: null,
+        narratorSaving: false,
+      };
+    case "NARRATORS_LOAD_FAILED":
+      if (action.jobId !== state.jobId) return state;
+      return {
+        ...state,
+        narratorLoadError: `No se pudieron cargar los capítulos para indicar el narrador: ${action.message}`,
+      };
+    case "NARRATOR_BULK_CHANGED":
+      return { ...state, narratorBulk: action.form };
+    case "NARRATORS_APPLIED_TO_FIRST_PERSON": {
+      const fact = bulkNarrator(state.narratorBulk);
+      if (!fact || !state.narratorChapters) return state;
+      return {
+        ...state,
+        narratorDraft: applyToFirstPerson(state.narratorChapters, state.narratorDraft, fact),
+      };
+    }
+    case "NARRATOR_CHAPTER_EDITED":
+      return {
+        ...state,
+        narratorDraft: setChapterNarrator(state.narratorDraft, action.key, action.narrator),
+      };
+    case "NARRATOR_APPLIED_ONWARD": {
+      const fact = state.narratorDraft[action.key];
+      if (!fact || !state.narratorChapters) return state;
+      return {
+        ...state,
+        narratorDraft: applyFromChapterOnward(
+          state.narratorChapters,
+          state.narratorDraft,
+          action.key,
+          fact,
+        ),
+      };
+    }
+    case "NARRATORS_SAVE_STARTED":
+      return { ...state, narratorSaving: true, narratorSaveError: null };
+    case "NARRATORS_SAVE_FAILED":
+      if (action.jobId !== state.jobId) return state;
+      return {
+        ...state,
+        narratorSaving: false,
+        narratorSaveError: `No se pudieron guardar los narradores: ${action.message}`,
+      };
     case "RUN_STARTED":
       // Hard guard: never run without an estimate having been shown first.
       if (!state.estimate) return state;
@@ -712,6 +876,7 @@ export function wizardReducer(state: WizardState, action: WizardAction): WizardS
     case "RESUME_JOB":
       return {
         ...state,
+        ...narratorStateFor(state, action.job.id),
         jobId: action.job.id,
         job: action.job,
         estimate: state.estimate,

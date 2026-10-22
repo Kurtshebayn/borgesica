@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   extractGlossary,
   getGlossaryReview,
+  getNarrators,
   putGlossary,
+  putNarrators,
   stopGlossaryExtraction,
 } from "./apiClient";
 
@@ -98,5 +100,58 @@ describe("putGlossary", () => {
     await expect(
       putGlossary(BASE, "secret", "job-1", [{ term: "Caten", translation: "", locked: false }]),
     ).rejects.toThrow(/HTTP 422: .*entry rejected/);
+  });
+});
+
+describe("getNarrators", () => {
+  it("GETs the job's narrators route with the session token and returns the chapters", async () => {
+    const body = {
+      chapters: [
+        {
+          key: "ch1.xhtml",
+          title: "One",
+          opening: "I woke",
+          first_chunk: 0,
+          last_chunk: 3,
+          first_person: true,
+          first_person_per_1k: 31.5,
+          narrator: { name: "Vis", gender: "masculine" },
+        },
+      ],
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await getNarrators(BASE, "secret", "job-1")).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1/narrators`, {
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+});
+
+describe("putNarrators", () => {
+  it("PUTs the full list as {narrators} with the session token and returns the GET shape", async () => {
+    const narrators = [{ key: "ch1.xhtml", name: null, gender: "feminine" as const }];
+    const body = { chapters: [] };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await putNarrators(BASE, "secret", "job-1", narrators)).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1/narrators`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Borgesica-Token": "secret" },
+      body: JSON.stringify({ narrators }),
+    });
+  });
+
+  it("rejects with the server's reason on a 422 (unknown key, bad gender, duplicate)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"detail":"unknown chapter key"}', { status: 422 })),
+    );
+
+    await expect(putNarrators(BASE, "secret", "job-1", [])).rejects.toThrow(
+      /HTTP 422: .*unknown chapter key/,
+    );
   });
 });

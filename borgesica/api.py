@@ -26,6 +26,7 @@ from borgesica.domain.errors import (
     JobNotFoundError,
     JobStateError,
     MalformedOutput,
+    NarratorRejectedError,
     ProviderError,
 )
 from borgesica.domain.glossary import (
@@ -59,6 +60,12 @@ from borgesica.domain.models import (
     JobStatus,
     SourceType,
     Usage,
+)
+from borgesica.domain.narrators import (
+    Chapter,
+    NarratorAssignment,
+    NarratorFact,
+    list_chapters,
 )
 from borgesica.domain.orchestrator import TranslationOrchestrator
 from borgesica.domain.ports import (
@@ -1017,6 +1024,59 @@ class TranslatorEngine:
         """Load a job's chunks sorted by index (store order is not a contract)."""
         return sorted(self._checkpoint.load_chunks(job_id), key=lambda c: c.index)
 
+    def get_narrators(self, job_id: str) -> list[Chapter]:
+        """Return every chapter with its first-person pre-mark and narrator.
+
+        Derived from the stored chunks on each call (a pronoun count, no
+        provider call); only the narrators themselves are persisted. A subtitle
+        job has no chapters.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        stored = self._checkpoint.load_narrators(job_id)
+        return [
+            chapter.model_copy(update={"narrator": stored.get(chapter.key)})
+            for chapter in list_chapters(self._checkpoint.load_chunks(job_id))
+        ]
+
+    def update_narrators(
+        self, job_id: str, narrators: list[NarratorAssignment]
+    ) -> list[Chapter]:
+        """Replace the job's narrator facts and return the chapter list.
+
+        Full overwrite: a chapter left out ends up with no narrator. A person
+        sets these in the review, so the update is all-or-nothing.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+            JobStateError: if the job is RUNNING. The run read its narrators
+                when it started, so a change now would be stored but unused.
+            NarratorRejectedError: if a key names no chapter of this job or is
+                sent twice. Nothing is persisted in that case.
+        """
+        job = self._load_job_or_raise(job_id)
+        if job.status == JobStatus.RUNNING:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        known = {c.key for c in list_chapters(self._checkpoint.load_chunks(job_id))}
+        keys = [n.key for n in narrators]
+        unknown = [k for k in keys if k not in known]
+        if unknown:
+            raise NarratorRejectedError(
+                job_id=job_id, reason="no such chapter", keys=unknown
+            )
+        duplicates = sorted({k for k in keys if keys.count(k) > 1})
+        if duplicates:
+            raise NarratorRejectedError(
+                job_id=job_id, reason="chapter sent more than once", keys=duplicates
+            )
+        self._checkpoint.save_narrators(
+            job_id,
+            {n.key: NarratorFact(name=n.name, gender=n.gender) for n in narrators},
+        )
+        return self.get_narrators(job_id)
+
     def _load_job_or_raise(self, job_id: str) -> Job:
         """Load job from checkpoint or raise JobNotFoundError."""
         job = self._checkpoint.load_job(job_id)
@@ -1104,6 +1164,7 @@ class TranslatorEngine:
                 config=job.config,
                 on_progress=_on_progress,
                 cancel_flag=cancel_flag,
+                narrators=self._checkpoint.load_narrators(job.id),
             )
         except Exception:
             latest = self._checkpoint.load_job(job.id)

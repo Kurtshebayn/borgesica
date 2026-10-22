@@ -39,6 +39,7 @@ from borgesica.domain.models import (
     RollingSummary,
     SourceType,
 )
+from borgesica.domain.narrators import NarratorFact
 
 # ---------------------------------------------------------------------------
 # DDL
@@ -103,6 +104,18 @@ CREATE TABLE IF NOT EXISTS chunks (
     meta_json       TEXT NOT NULL DEFAULT '{}',
     passed_validation INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (job_id, chunk_index)
+)
+"""
+
+# One first-person narrator fact per chapter (EPUB spine item), as a person set
+# it in the review. A chapter with no row has no narrator fact.
+_CREATE_NARRATORS = """
+CREATE TABLE IF NOT EXISTS narrators (
+    job_id          TEXT NOT NULL,
+    chapter_key     TEXT NOT NULL,
+    name            TEXT,
+    gender          TEXT NOT NULL,
+    PRIMARY KEY (job_id, chapter_key)
 )
 """
 
@@ -246,6 +259,7 @@ class SQLiteCheckpointStore:
             conn.execute(_CREATE_GLOSSARY_VOTES)
             conn.execute(_CREATE_GLOSSARY_PROPOSALS)
             conn.execute(_CREATE_SUMMARIES)
+            conn.execute(_CREATE_NARRATORS)
             existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
             for column, ddl in _JOBS_MIGRATIONS.items():
                 if column not in existing:
@@ -545,6 +559,29 @@ class SQLiteCheckpointStore:
             for row in rows
         ]
         return Glossary(entries=entries)
+
+    # --- CheckpointStore Protocol: Narrators ---
+
+    def save_narrators(self, job_id: str, narrators: dict[str, NarratorFact]) -> None:
+        """Replace this job's narrator facts, keyed by chapter (full overwrite)."""
+        delete_sql = "DELETE FROM narrators WHERE job_id = ?"
+        insert_sql = """
+        INSERT INTO narrators (job_id, chapter_key, name, gender)
+        VALUES (?, ?, ?, ?)
+        """
+        with self._connect() as conn:
+            conn.execute(delete_sql, (job_id,))
+            for key, fact in narrators.items():
+                conn.execute(insert_sql, (job_id, key, fact.name, fact.gender))
+
+    def load_narrators(self, job_id: str) -> dict[str, NarratorFact]:
+        sql = "SELECT chapter_key, name, gender FROM narrators WHERE job_id = ?"
+        with self._connect() as conn:
+            rows = conn.execute(sql, (job_id,)).fetchall()
+        return {
+            row["chapter_key"]: NarratorFact(name=row["name"], gender=row["gender"])
+            for row in rows
+        }
 
     # --- CheckpointStore Protocol: Summary ---
 

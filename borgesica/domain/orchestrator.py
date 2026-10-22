@@ -89,6 +89,7 @@ from borgesica.domain.markup import (
 )
 from borgesica.domain.language import detect_unexpected_script
 from borgesica.domain.prose import has_translatable_prose
+from borgesica.domain.narrators import NarratorFact, chapter_key
 from borgesica.domain.models import (
     Chunk,
     ChunkStatus,
@@ -274,6 +275,7 @@ class TranslationOrchestrator:
         config: JobConfig,
         on_progress: ProgressCallback,
         cancel_flag: threading.Event,
+        narrators: dict[str, NarratorFact] | None = None,
     ) -> Job:
         """Execute (or resume) the sequential translation loop for *job*.
 
@@ -284,6 +286,9 @@ class TranslationOrchestrator:
             config:      JobConfig (model, quality_mode, budget_usd, …).
             on_progress: Callback invoked after each chunk completes.
             cancel_flag: threading.Event; checked BEFORE each chunk.
+            narrators:   First-person narrator facts by chapter key, as a
+                         person set them in the review. A chunk gets the fact
+                         of its own chapter, or none.
 
         Returns:
             Updated Job with final status (DONE, PAUSED, or CANCELLED).
@@ -358,10 +363,15 @@ class TranslationOrchestrator:
             # chunk it is NOT the highest-index one, which describes later plot.
             summary = self._checkpoint.load_summary(job.id, before=chunk.index)
 
+            # The narrator of THIS chunk's chapter only: a book can have several
+            # narrators, and a chapter nobody set gets no fact at all.
+            key = chapter_key(chunk)
+            narrator = narrators.get(key) if narrators and key else None
+
             # Budget check — BEFORE the provider call.
             if config.budget_usd is not None:
                 projected = self._project_chunk_cost(
-                    chunk, config, live_glossary, summary
+                    chunk, config, live_glossary, summary, narrator=narrator
                 )
                 if running_cost + projected > config.budget_usd:
                     paused_job = job.model_copy(
@@ -407,7 +417,9 @@ class TranslationOrchestrator:
                 continue
 
             # Build system prompt for this chunk.
-            system_prompt = self._ctx.build_system_prompt(config, live_glossary, summary)
+            system_prompt = self._ctx.build_system_prompt(
+                config, live_glossary, summary, narrator=narrator
+            )
 
             # Fetch price once per chunk (same model throughout — no need to re-fetch per call).
             in_price, out_price = self._provider.price(config.model)
@@ -542,6 +554,7 @@ class TranslationOrchestrator:
         config: JobConfig,
         glossary: Glossary | None = None,
         summary: RollingSummary | None = None,
+        narrator: NarratorFact | None = None,
     ) -> float:
         """Estimate the cost of translating a single chunk (pre-call budget GUARD only).
 
@@ -571,6 +584,7 @@ class TranslationOrchestrator:
                 glossary if glossary is not None else Glossary(),
                 summary if summary is not None else RollingSummary(),
                 config.glossary_budget_tokens,
+                narrator=narrator,
             ),
             config.model,
         )
