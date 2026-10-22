@@ -6,8 +6,10 @@ import {
   getEstimate,
   getGlossary,
   getGlossaryReview,
+  getNarrators,
   getStatus,
   putGlossary,
+  putNarrators,
   resumeJob,
   runJob,
   stopGlossaryExtraction,
@@ -26,13 +28,17 @@ import {
   formatProgress,
   initialWizardState,
   loadGlossaryReview,
+  loadNarrators,
   runRecoveryAction,
   saveGlossary,
+  saveNarrators,
   wizardReducer,
   type Provider,
 } from "./wizard";
 import { glossaryChangesToSave } from "./glossaryReview";
+import { hasNarratorChanges } from "./narrators";
 import GlossaryTriage from "./GlossaryTriage";
+import NarratorReview from "./NarratorReview";
 import type { GlossaryEntry, JobStatus } from "./apiTypes";
 
 const JOB_STATUS_LABELS: Record<JobStatus, string> = {
@@ -103,6 +109,37 @@ export default function WizardScreen({
 
   function reloadGlossaryReview(jobId: string): Promise<void> {
     return loadGlossaryReview(() => getGlossaryReview(baseUrl, token, jobId), dispatch);
+  }
+
+  // The chapters (for the narrator section) load on the same screen, once;
+  // a failure is shown and blocks neither the glossary nor the run.
+  const needsNarrators =
+    state.screen === "glossary" &&
+    !!state.jobId &&
+    state.narratorChapters === null &&
+    !state.narratorLoadError;
+  useEffect(() => {
+    if (needsNarrators && state.jobId) {
+      const jobId = state.jobId;
+      void loadNarrators(() => getNarrators(baseUrl, token, jobId), dispatch);
+    }
+  }, [needsNarrators]);
+
+  // A run reads the narrators stored on the server, so unsaved edits would be
+  // silently left out of the translation: the run waits until they are saved.
+  const narratorsUnsaved =
+    !!state.narratorChapters &&
+    hasNarratorChanges(state.narratorChapters, state.narratorDraft);
+
+  /** The payload and the state changes are the tested `saveNarrators`; this
+   * only wires the API call. */
+  async function handleSaveNarrators() {
+    if (!state.jobId) return;
+    const jobId = state.jobId;
+    await saveNarrators(state, {
+      put: (narrators) => putNarrators(baseUrl, token, jobId, narrators),
+      dispatch,
+    });
   }
 
   async function handlePick() {
@@ -408,6 +445,22 @@ export default function WizardScreen({
             </button>
           )}
           {state.glossarySaveError && <p role="alert">{state.glossarySaveError}</p>}
+          <NarratorReview
+            chapters={state.narratorChapters}
+            loadError={state.narratorLoadError}
+            draft={state.narratorDraft}
+            bulk={state.narratorBulk}
+            saving={state.narratorSaving}
+            hasChanges={narratorsUnsaved}
+            saveError={state.narratorSaveError}
+            onBulkChange={(form) => dispatch({ type: "NARRATOR_BULK_CHANGED", form })}
+            onApplyToFirstPerson={() => dispatch({ type: "NARRATORS_APPLIED_TO_FIRST_PERSON" })}
+            onChapterChange={(key, narrator) =>
+              dispatch({ type: "NARRATOR_CHAPTER_EDITED", key, narrator })
+            }
+            onApplyOnward={(key) => dispatch({ type: "NARRATOR_APPLIED_ONWARD", key })}
+            onSave={() => void handleSaveNarrators()}
+          />
           {state.glossaryLocked && (
             <div>
               <input
@@ -416,9 +469,15 @@ export default function WizardScreen({
                 value={outPath}
                 onChange={(e) => setOutPath(e.target.value)}
               />
-              <button onClick={() => void handleStartRun()} disabled={!outPath}>
+              <button
+                onClick={() => void handleStartRun()}
+                disabled={!outPath || narratorsUnsaved}
+              >
                 Iniciar traducción
               </button>
+              {narratorsUnsaved && (
+                <p>Guarda los narradores antes de iniciar la traducción.</p>
+              )}
               {state.runError && <p role="alert">{state.runError}</p>}
             </div>
           )}

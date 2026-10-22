@@ -75,6 +75,45 @@ export interface GlossaryReviewResponse {
   min_gender_ratio: number;
 }
 
+/** The first-person narrator's gender (a narrator always has one). */
+export type NarratorGender = "masculine" | "feminine";
+
+/** Who the first-person "I" of a chapter is; the name is optional. */
+export interface NarratorFact {
+  name: string | null;
+  gender: NarratorGender;
+}
+
+/** One chapter (an EPUB spine item) as GET /jobs/{id}/narrators lists it. */
+export interface NarratorChapter {
+  /** Stable chapter id (the spine item's href); PUT refers to it. */
+  key: string;
+  title: string;
+  /** The first words of the chapter, to recognise it. */
+  opening: string;
+  first_chunk: number;
+  last_chunk: number;
+  /** Pre-marked by the server from its pronoun counts. */
+  first_person: boolean;
+  first_person_per_1k: number;
+  /** The stored narrator, or null: the chapter has no narrator fact. */
+  narrator: NarratorFact | null;
+}
+
+/** GET (and PUT) /jobs/{id}/narrators. Empty for jobs without chapters
+ * (subtitles). */
+export interface NarratorsResponse {
+  chapters: NarratorChapter[];
+}
+
+/** One element of the PUT body: a chapter with a narrator. The PUT is a full
+ * overwrite, so a chapter left out has no narrator afterwards. */
+export interface NarratorAssignment {
+  key: string;
+  name: string | null;
+  gender: NarratorGender;
+}
+
 export interface JobResponse {
   id: string;
   status: JobStatus;
