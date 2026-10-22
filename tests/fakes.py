@@ -24,6 +24,7 @@ from borgesica.domain.models import (
     TranslationUnit,
     Usage,
 )
+from borgesica.domain.narrators import NarratorFact
 
 
 # ---------------------------------------------------------------------------
@@ -134,8 +135,15 @@ class InMemoryCheckpointStore:
         self._votes: dict[str, GlossaryVotes] = {}
         self._proposals: dict[str, dict[str, tuple[str, ...]]] = {}
         self._summaries: dict[str, dict[int, RollingSummary]] = {}
+        self._narrators: dict[str, dict[str, NarratorFact]] = {}
 
     # --- CheckpointStore Protocol methods ---
+
+    def save_narrators(self, job_id: str, narrators: dict[str, NarratorFact]) -> None:
+        self._narrators[job_id] = dict(narrators)
+
+    def load_narrators(self, job_id: str) -> dict[str, NarratorFact]:
+        return dict(self._narrators.get(job_id, {}))
 
     def save_job(self, job: Job) -> None:
         self._jobs[job.id] = job

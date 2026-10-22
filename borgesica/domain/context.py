@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from borgesica.domain.models import Glossary, JobConfig, RollingSummary, SourceType
+from borgesica.domain.narrators import NarratorFact, render_narrator
 
 # ---------------------------------------------------------------------------
 # Output model
@@ -307,6 +308,7 @@ class ContextManager:
         config: JobConfig,
         glossary: Glossary,
         summary: RollingSummary,
+        narrator: NarratorFact | None = None,
     ) -> SystemPrompt:
         """Assemble the full system prompt for a single chunk.
 
@@ -316,6 +318,8 @@ class ContextManager:
             Translation philosophy (meaning+image, no calques, naturalness)
             Neutral-Spanish rules (all 5, verbatim)
           [DYNAMIC — changes per chunk]
+            [NARRATOR] first-person narrator of this chunk's chapter (only
+                       when a person set one for it)
             [GLOSSARY] rendered table (config.glossary_budget_tokens)
             [SUMMARY] rolling summary from chunk N-1 (≤ 200 tokens)
 
@@ -324,7 +328,7 @@ class ContextManager:
         """
         static_block = self.get_static_block(config)
         dynamic_block = self.build_dynamic_block(
-            glossary, summary, config.glossary_budget_tokens
+            glossary, summary, config.glossary_budget_tokens, narrator=narrator
         )
         return SystemPrompt(text=static_block + "\n\n" + dynamic_block)
 
@@ -352,6 +356,7 @@ class ContextManager:
         glossary: Glossary,
         summary: RollingSummary,
         glossary_budget_tokens: int,
+        narrator: NarratorFact | None = None,
     ) -> str:
         """Build the per-chunk dynamic section.
 
@@ -362,11 +367,19 @@ class ContextManager:
         every estimate and budget projection under-counted the per-call overhead
         by roughly 6.6x. Callers that need the size of this block must build it
         and count it — never restate its shape.
+
+        The [NARRATOR] block goes first, right before [GLOSSARY]: that is the
+        placement measured on 2026-10-06 (narrator feminine errors 3/102 →
+        0/102). It is absent, not empty, for a chapter nobody set.
         """
         rendered_glossary = glossary.render(budget_tokens=glossary_budget_tokens)
         summary_text = summary.text if summary.text else "No prior context."
+        narrator_block = (
+            f"[NARRATOR]\n{render_narrator(narrator)}\n\n" if narrator else ""
+        )
 
         return (
+            f"{narrator_block}"
             f"[GLOSSARY]\n{rendered_glossary}\n\n"
             f"[SUMMARY]\n{summary_text}"
         )

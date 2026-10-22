@@ -24,6 +24,7 @@ from borgesica.domain.errors import (
     GlossaryEntryRejectedError,
     JobNotFoundError,
     JobStateError,
+    NarratorRejectedError,
 )
 from borgesica.domain.models import GlossaryReview, JobConfig, JobStatus, SourceType
 from borgesica.serve.runner import JobRunner
@@ -33,6 +34,8 @@ from borgesica.serve.schemas import (
     GlossaryResponse,
     GlossaryUpdateRequest,
     JobResponse,
+    NarratorsResponse,
+    NarratorsUpdateRequest,
     RunRequest,
     job_to_response,
 )
@@ -123,7 +126,7 @@ def create_app(
     app.state.runner = runner  # exposed for tests/introspection
 
     # Error mapping (design endpoints table): JobNotFound->404,
-    # JobStateError->409, GlossaryEntryRejected->409, pydantic
+    # JobStateError->409, GlossaryEntryRejected->409, NarratorRejected->422, pydantic
     # validation->422 (FastAPI default), any other BorgesicaError->500.
     @app.exception_handler(JobNotFoundError)
     async def _job_not_found_handler(_request: Request, exc: JobNotFoundError) -> JSONResponse:
@@ -140,6 +143,14 @@ def create_app(
         # 409: the submitted entry conflicts with what the glossary already
         # states, and nothing was persisted.
         return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(NarratorRejectedError)
+    async def _narrator_rejected_handler(
+        _request: Request, exc: NarratorRejectedError
+    ) -> JSONResponse:
+        # 422: the request names chapters this job does not have (or names
+        # one twice); nothing was persisted.
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.exception_handler(BorgesicaError)
     async def _borgesica_error_handler(_request: Request, exc: BorgesicaError) -> JSONResponse:
@@ -205,6 +216,17 @@ def create_app(
     def put_glossary(job_id: str, payload: GlossaryUpdateRequest) -> GlossaryResponse:
         updated = engine.update_glossary(job_id, payload.entries)
         return GlossaryResponse(entries=updated.entries)
+
+    @app.get("/jobs/{job_id}/narrators", response_model=NarratorsResponse)
+    def get_narrators(job_id: str) -> NarratorsResponse:
+        """Every chapter with its first-person pre-mark (a free pronoun
+        count) and the narrator a person stored for it."""
+        return NarratorsResponse(chapters=engine.get_narrators(job_id))
+
+    @app.put("/jobs/{job_id}/narrators", response_model=NarratorsResponse)
+    def put_narrators(job_id: str, payload: NarratorsUpdateRequest) -> NarratorsResponse:
+        """Replace every narrator of the job (chapters left out get none)."""
+        return NarratorsResponse(chapters=engine.update_narrators(job_id, payload.narrators))
 
     @app.get("/jobs/{job_id}/glossary/review", response_model=GlossaryReview)
     def get_glossary_review(job_id: str) -> GlossaryReview:

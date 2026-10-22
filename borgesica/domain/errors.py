@@ -113,6 +113,22 @@ class GlossaryEntryRejectedError(BorgesicaError):
         self.rejected = rejected
 
 
+class NarratorRejectedError(BorgesicaError):
+    """Raised when a narrator update names chapters it cannot apply to.
+
+    Unknown chapter keys and keys sent twice are both refused, and nothing is
+    persisted: a narrator the person set must never be silently dropped or
+    silently overridden by a later duplicate.
+    """
+
+    def __init__(self, *, job_id: str, reason: str, keys: list[str]) -> None:
+        names = ", ".join(repr(k) for k in keys)
+        super().__init__(f"Narrators rejected for job {job_id!r}: {reason}: {names}.")
+        self.job_id = job_id
+        self.reason = reason
+        self.keys = keys
+
+
 class UnsupportedFormatError(BorgesicaError):
     """Raised when a source file format is not supported or cannot be read."""
 
