@@ -180,7 +180,27 @@ class TestSQLiteCheckpointStore:
         job = make_job()
         self.store.save_job(job)
         self.store.save_chunk(job.id, make_chunk(0))
-        assert self.store.load_chunks(job.id)[0].validation_errors is None
+        loaded = self.store.load_chunks(job.id)[0]
+        assert loaded.validation_errors is None
+        assert loaded.attempt_errors is None
+
+    def test_save_and_load_chunk_attempt_errors(self):
+        """A DONE chunk that passed after a rejected attempt keeps that
+        attempt's message across the round-trip."""
+        job = make_job()
+        self.store.save_job(job)
+        attempts = '["attempt 1: segment count mismatch (expected 2, got 3)"]'
+        chunk = make_chunk(0).model_copy(
+            update={
+                "status": ChunkStatus.DONE,
+                "translated_text": "hola",
+                "attempt_errors": attempts,
+            }
+        )
+        self.store.save_chunk(job.id, chunk)
+        loaded = self.store.load_chunks(job.id)[0]
+        assert loaded.attempt_errors == attempts
+        assert loaded.validation_errors is None
 
     def test_migrates_existing_db_without_validation_errors_column(self):
         """A jobs.db created before chunks.validation_errors existed still
@@ -219,16 +239,19 @@ class TestSQLiteCheckpointStore:
             assert len(loaded) == 1
             assert loaded[0].status == ChunkStatus.FAILED
             assert loaded[0].validation_errors is None
+            assert loaded[0].attempt_errors is None
 
             chunk = make_chunk(1).model_copy(
                 update={
                     "status": ChunkStatus.FAILED,
                     "validation_errors": '["fallback: provider error (x)"]',
+                    "attempt_errors": '["fallback: provider error (x)"]',
                 }
             )
             store.save_chunk("job-old", chunk)
             reloaded = {c.index: c for c in SQLiteCheckpointStore(db_path).load_chunks("job-old")}
             assert reloaded[1].validation_errors == '["fallback: provider error (x)"]'
+            assert reloaded[1].attempt_errors == '["fallback: provider error (x)"]'
         finally:
             os.unlink(db_path)
 

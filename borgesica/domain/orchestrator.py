@@ -200,17 +200,20 @@ _WAIT_POLL_SECONDS = 0.5
 
 def _finished_chunk(
     chunk: Chunk,
-    outcome: tuple[TranslationUnit | None, str | None, float, bool, str | None],
+    outcome: tuple[
+        TranslationUnit | None, str | None, float, bool, str | None, str | None
+    ],
 ) -> Chunk:
     """The chunk as it is saved once _translate_with_retry returned
     *outcome*: DONE with its translation, or FAILED when no attempt passed."""
-    final_unit, final_text, _, passed_validation, validation_errors = outcome
+    final_unit, final_text, _, passed_validation, validation_errors, attempt_errors = outcome
     if final_unit is None:
         return chunk.model_copy(
             update={
                 "status": ChunkStatus.FAILED,
                 "passed_validation": passed_validation,
                 "validation_errors": validation_errors,
+                "attempt_errors": attempt_errors,
             }
         )
     return chunk.model_copy(
@@ -219,8 +222,15 @@ def _finished_chunk(
             "translated_text": final_text,
             "passed_validation": passed_validation,
             "validation_errors": validation_errors,
+            "attempt_errors": attempt_errors,
         }
     )
+
+
+def _attempt_errors(issues: list[str]) -> str | None:
+    """The rejected attempts of a chunk that passed: JSON, or None when the
+    first attempt passed."""
+    return json.dumps(issues) if issues else None
 
 
 class _InlineExecutor:
@@ -571,6 +581,7 @@ class TranslationOrchestrator:
                         call_cost,
                         passed_validation,
                         validation_errors,
+                        _,
                     ) = outcome
 
                     # Accrue the real cost of ALL calls made (regardless of
@@ -900,7 +911,7 @@ class TranslationOrchestrator:
 
         Returns:
             (TranslationUnit, translated_text, total_call_cost, passed_validation,
-            validation_errors) on success. passed_validation is True for the
+            validation_errors, attempt_errors) on success. passed_validation is True for the
             happy-path first-try match AND the strip/reinsert fallback success
             (both are full placeholder/tag + segment validation passes) —
             False for the wrong-script best-effort acceptance of a prose chunk
@@ -908,14 +919,17 @@ class TranslationOrchestrator:
             when both primary and fallback are exhausted (chunk FAILED —
             caller ignores the flag's semantic weight there since
             translated_text is None, but it is still threaded consistently).
-            (None, None, total_call_cost, False, validation_errors) if both
-            primary and fallback fail.
+            (None, None, total_call_cost, False, validation_errors,
+            attempt_errors) if both primary and fallback fail.
             total_call_cost is the SUM of real usage costs from ALL calls made
             (including failed attempts and the fallback call).
             validation_errors (T4b amendment) is a JSON-serialized list of the
             validator issue messages collected across every failed/mismatched
             attempt — None whenever passed_validation ends up True (a clean
             pass discards prior transient mismatches from earlier attempts).
+            attempt_errors is the same list kept regardless of the outcome —
+            None only when the first attempt passed — so the calls spent on
+            retries of a chunk that eventually passed stay explainable.
         """
         # PRIMARY: tokenize once up front. Real tags (with attributes) live
         # ONLY in tag_registry from this point on — the provider never sees
@@ -1058,7 +1072,14 @@ class TranslationOrchestrator:
                     )
                     if foreign is None:
                         restored_text = restore_tags(translated_text, tag_registry)
-                        return unit, restored_text, total_call_cost, True, None
+                        return (
+                            unit,
+                            restored_text,
+                            total_call_cost,
+                            True,
+                            None,
+                            _attempt_errors(validation_issues),
+                        )
                     validation_issues.append(
                         f"attempt {attempt + 1}: output is in {foreign} script, "
                         f"not {config.target_lang}"
@@ -1131,6 +1152,7 @@ class TranslationOrchestrator:
                 total_call_cost,
                 False,
                 json.dumps(validation_issues),
+                json.dumps(validation_issues),
             )
         if best_effort is not None or (segment_mismatched and not placeholder_failed):
             logger.warning(
@@ -1140,7 +1162,8 @@ class TranslationOrchestrator:
                 segment_unit,
                 _MAX_TAG_RETRIES + 1,
             )
-            return None, None, total_call_cost, False, json.dumps(validation_issues)
+            issues = json.dumps(validation_issues)
+            return None, None, total_call_cost, False, issues, issues
 
         # --- FALLBACK: strip → translate plain → reinsert ---
         # All primary (placeholders-in-text) attempts exhausted.
@@ -1169,7 +1192,14 @@ class TranslationOrchestrator:
                     f"(expected {src_segs}, got {got_segs})"
                 )
             else:
-                return fallback_unit, fallback_text, total_call_cost, True, None
+                return (
+                    fallback_unit,
+                    fallback_text,
+                    total_call_cost,
+                    True,
+                    None,
+                    _attempt_errors(validation_issues),
+                )
         except (MalformedOutput, ProviderError) as exc:
             # Provider failed during the fallback call — treat as total failure
             # (chunk FAILED, job PAUSED). Any OTHER exception (a real bug in
@@ -1181,7 +1211,8 @@ class TranslationOrchestrator:
             validation_issues.append(f"fallback: provider error ({exc})")
 
         # Both primary and fallback failed.
-        return None, None, total_call_cost, False, json.dumps(validation_issues)
+        issues = json.dumps(validation_issues)
+        return None, None, total_call_cost, False, issues, issues
 
     def _translate_reflective(
         self,

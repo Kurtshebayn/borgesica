@@ -461,11 +461,14 @@ class Chunk(BaseModel):
     # Validation failure detail (JSON list of issue-message strings),
     # populated whenever passed_validation is False (best-effort or FAILED
     # paths — see orchestrator.py _translate_with_retry); None when
-    # validation passed cleanly. In-memory only — NOT persisted to the
-    # checkpoint schema (T4b amendment: the corpus hook fires at DONE
-    # within the same run, so in-memory threading suffices; no jobs.db
-    # column needed).
+    # validation passed cleanly. Persisted, so the reason a chunk FAILED
+    # outlives the run that produced it.
     validation_errors: str | None = None
+    # Every rejected attempt's message (same JSON shape), whatever the
+    # outcome: a chunk that passed on a retry keeps why the earlier attempts
+    # were rejected, which validation_errors drops on a clean pass. None
+    # when the first attempt passed.
+    attempt_errors: str | None = None
 
 
 class TranslationUnit(BaseModel):
