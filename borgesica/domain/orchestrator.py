@@ -428,6 +428,8 @@ class TranslationOrchestrator:
             if chunk.status != ChunkStatus.DONE
         ]
         next_pending = 0
+        # Chunks of this run that are finished, already-DONE ones included.
+        completed = len(ordered_chunks) - len(pending)
         # Chunks whose provider calls are running: future -> (position, chunk,
         # projected cost reserved against the budget while the call runs).
         in_flight: dict[Future, tuple[int, Chunk, float]] = {}
@@ -505,11 +507,13 @@ class TranslationOrchestrator:
                             }
                         )
                         self._checkpoint.save_chunk(job.id, passthrough_chunk)
+                        completed += 1
                         on_progress(
                             Progress(
                                 job_id=job.id,
                                 chunk_index=chunk.index,
                                 position=position,
+                                completed=completed,
                                 total_chunks=len(ordered_chunks),
                                 cost_usd=running_cost,
                                 status=JobStatus.RUNNING,
@@ -577,6 +581,7 @@ class TranslationOrchestrator:
                     finished_chunk = _finished_chunk(chunk, outcome)
                     # Persist the chunk as DONE or FAILED (idempotent upsert).
                     self._checkpoint.save_chunk(job.id, finished_chunk)
+                    completed += 1
 
                     if final_unit is None:
                         # All retries exhausted — chunk FAILED. Whether the job
@@ -591,6 +596,7 @@ class TranslationOrchestrator:
                                 job_id=job.id,
                                 chunk_index=chunk.index,
                                 position=position,
+                                completed=completed,
                                 total_chunks=len(ordered_chunks),
                                 cost_usd=running_cost,
                                 status=JobStatus.RUNNING,
@@ -628,6 +634,7 @@ class TranslationOrchestrator:
                             job_id=job.id,
                             chunk_index=chunk.index,
                             position=position,
+                            completed=completed,
                             total_chunks=len(ordered_chunks),
                             cost_usd=running_cost,
                             status=JobStatus.RUNNING,

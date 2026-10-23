@@ -87,10 +87,14 @@ class EstimateResponse(BaseModel):
     """Translation estimate, plus the glossary extraction line beside it.
 
     ``glossary_extraction`` is the cost of the explicit pre-translation pass
-    (``POST /jobs/{id}/glossary/extract``), kept apart from the translation
-    figures because it is a separate action the user decides on. Null when the
-    pass cannot run: the job is not CREATED, or its glossary was already
-    extracted.
+    (``POST /jobs/{id}/glossary/extract``). Null when the pass cannot run: the
+    job is not CREATED, or its glossary was already extracted.
+
+    ``book_usd_low``/``book_usd_high`` price the whole book: preparing the
+    glossary is its first paid step, so while that pass is still ahead they
+    are the translation plus the extraction, and the translation alone once it
+    is paid. ``within_budget`` checks ``book_usd_high`` against the job's
+    budget — the same budget both passes spend from at run time.
     """
 
     input_tokens: int
@@ -102,6 +106,8 @@ class EstimateResponse(BaseModel):
     cached: bool
     within_budget: bool
     glossary_extraction: GlossaryExtractionEstimate | None = None
+    book_usd_low: float
+    book_usd_high: float
 
 
 class GlossaryResponse(BaseModel):

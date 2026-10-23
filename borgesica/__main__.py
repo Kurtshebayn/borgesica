@@ -26,9 +26,13 @@ Subcommands:
              Prints the translation estimate as JSON, plus a
              "glossary_extraction" key: the cost of `glossary extract`, or
              null once it has run.
-    run     <job_id> [--out <path>] [--provider ...]
+    run     <job_id> [--out <path>] [--workers N] [--provider ...]
              Prints a skip-summary line if any chunks ended FAILED.
-    resume  <job_id> [--out <path>] [--provider ...]
+             --workers N translates N chunks at once (default 1). Only a job
+             whose glossary was prepared with `glossary extract` runs in
+             parallel — a parallel run never adds terms to the glossary — so
+             any other job is translated one chunk at a time, with a NOTE.
+    resume  <job_id> [--out <path>] [--workers N] [--provider ...]
              Prints a skip-summary line if any chunks ended FAILED.
     status  <job_id>
              Lists FAILED chunk indices (if any) after the JSON job dump.
@@ -73,6 +77,8 @@ Environment (per provider; only the selected provider's key is required):
     OPENAI_API_KEY     — for --provider openai
     OLLAMA_HOST        — for --provider ollama (optional; defaults to localhost:11434)
     BORGESICA_PROVIDER — optional; sets the default provider when --provider is omitted
+    BORGESICA_WORKERS  — optional; default --workers for run, resume and serve
+                         (serve defaults to 8, run and resume to 1)
 
     These are read from the real environment and, as a convenience, from a .env
     file in the current working directory (or the nearest parent that has one).
@@ -350,7 +356,7 @@ def _build_provider(provider: str, *, key_stdin: bool = False) -> Any:
 
 def _build_engine(
     *, provider: str = "anthropic", model: str = "", db_path: str = "",
-    key_stdin: bool = False, reasoning: str | None = None
+    key_stdin: bool = False, reasoning: str | None = None, workers: int = 1
 ) -> TranslatorEngine:
     """Construct a TranslatorEngine wired with real adapters for all formats.
 
@@ -359,6 +365,7 @@ def _build_engine(
         model:    Model string (persisted in JobConfig; not validated here).
         db_path:  SQLite checkpoint DB path. Defaults to ~/.borgesica/jobs.db.
                   Pass ":memory:" for ephemeral use.
+        workers:  Chunks translated at once (see TranslatorEngine).
 
     Returns:
         Fully wired TranslatorEngine (SRT/EPUB/PDF readers + writers).
@@ -412,6 +419,7 @@ def _build_engine(
         extractor=NullGlossaryExtractor(),  # default: no LLM glossary seed on CLI
         corpus_store=SQLiteCorpusStore(corpus_db_path),
         provider_name=provider,
+        workers=workers,
     )
 
 
@@ -536,6 +544,7 @@ def _print_best_effort_summary(args: argparse.Namespace, engine: TranslatorEngin
 def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         out_path = _resolve_out(args, engine)
+        _note_if_sequential(args, engine)
         print(f"Running job {args.job_id} → {out_path}")
         final_job = engine.run_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
@@ -550,6 +559,7 @@ def _cmd_run(args: argparse.Namespace, engine: TranslatorEngine) -> int:
 def _cmd_resume(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     try:
         out_path = _resolve_out(args, engine)
+        _note_if_sequential(args, engine)
         print(f"Resuming job {args.job_id} → {out_path}")
         final_job = engine.resume_job(args.job_id, out_path=out_path, on_progress=_print_progress)
         print(f"Done. Status={final_job.status}  cost=${final_job.cost_usd:.5f}")
@@ -792,6 +802,67 @@ def _default_out(job_id: str, source_type: SourceType) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Worker count (chunks translated at once). The CLI keeps the sequential
+# loop unless asked; the desktop app's server translates in parallel, since
+# its flow always prepares the glossary first. 8 sits inside what DeepSeek
+# sustained in measurement (10-12 concurrent calls) and keeps Anthropic's
+# lower tiers under their per-minute request limits at ~14 s per call.
+_WORKERS_ENV = "BORGESICA_WORKERS"
+_CLI_DEFAULT_WORKERS = 1
+_SERVE_DEFAULT_WORKERS = 8
+_TRANSLATING_COMMANDS = {
+    "run": _CLI_DEFAULT_WORKERS,
+    "resume": _CLI_DEFAULT_WORKERS,
+    "serve": _SERVE_DEFAULT_WORKERS,
+}
+
+
+def _positive_int(value: str) -> int:
+    """argparse type for --workers: an integer of at least 1."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {value!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {number}")
+    return number
+
+
+def _resolve_workers(args: argparse.Namespace) -> int:
+    """--workers, else the BORGESICA_WORKERS env var, else the command's
+    default. Commands that translate nothing get 1.
+
+    Raises:
+        ValueError: if the env var is not an integer of at least 1.
+    """
+    default = _TRANSLATING_COMMANDS.get(args.command)
+    if default is None:
+        return 1
+    if getattr(args, "workers", None) is not None:
+        return args.workers
+    raw = os.environ.get(_WORKERS_ENV)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return _positive_int(raw.strip())
+    except argparse.ArgumentTypeError as exc:
+        raise ValueError(f"{_WORKERS_ENV} {exc}") from None
+
+
+def _note_if_sequential(args: argparse.Namespace, engine: TranslatorEngine) -> None:
+    """Say so when --workers asked for parallel but the job will run one
+    chunk at a time: without a prepared glossary a parallel run would
+    translate with none, so the engine keeps such a job sequential."""
+    if args.workers > 1 and not engine.status(args.job_id).glossary_extracted:
+        print(
+            f"NOTE: translating one chunk at a time: job {args.job_id} has no "
+            "prepared glossary, and a parallel run never adds terms to it. Run "
+            f"`borgesica glossary extract {args.job_id}` first to translate "
+            f"{args.workers} chunks at once.",
+            file=sys.stderr,
+        )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="borgesica",
@@ -805,6 +876,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "Provider: anthropic/deepseek/openai/ollama. Default: auto-detect from "
         "BORGESICA_PROVIDER env or whichever API key is set."
     )
+
+    def _add_workers(p: argparse.ArgumentParser, default: int) -> None:
+        p.add_argument(
+            "--workers",
+            type=_positive_int,
+            default=None,
+            help=(
+                "How many chunks to translate at once. Default: "
+                f"{_WORKERS_ENV} env, else {default}. Only a job with a "
+                "prepared glossary (`borgesica glossary extract`) runs in "
+                "parallel; any other is translated one chunk at a time."
+            ),
+        )
 
     def _add_provider(p: argparse.ArgumentParser) -> None:
         p.add_argument("--provider", choices=provider_choices, default=None, help=provider_help)
@@ -904,12 +988,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="Run (translate) a job")
     p_run.add_argument("job_id", help="Job ID")
     p_run.add_argument("--out", default=None, help="Output file path")
+    _add_workers(p_run, _CLI_DEFAULT_WORKERS)
     _add_provider(p_run)
 
     # resume
     p_resume = sub.add_parser("resume", help="Resume a paused or cancelled job")
     p_resume.add_argument("job_id", help="Job ID")
     p_resume.add_argument("--out", default=None, help="Output file path")
+    _add_workers(p_resume, _CLI_DEFAULT_WORKERS)
     _add_provider(p_resume)
 
     # status
@@ -984,6 +1070,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument(
         "--port", type=int, default=0, help="Port to listen on (default: 0, ephemeral)"
     )
+    _add_workers(p_serve, _SERVE_DEFAULT_WORKERS)
     _add_provider(p_serve)
 
     return parser
@@ -1042,11 +1129,18 @@ def main(argv: list[str] | None = None) -> int:
     if not explicit_provider:
         _announce_inferred_provider(provider)
 
+    try:
+        args.workers = _resolve_workers(args)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
     engine = _build_engine(
         provider=provider,
         model=getattr(args, "model", ""),
         key_stdin=getattr(args, "key_stdin", False),
         reasoning=getattr(args, "reasoning", None),
+        workers=args.workers,
     )
 
     dispatch: dict[str, Any] = {

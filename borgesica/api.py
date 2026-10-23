@@ -102,6 +102,11 @@ class TranslatorEngine:
             (design decision #6); default None → zero behavior change.
         provider_name: Provenance label passed through to the orchestrator
             (design decision #6); default "unknown".
+        workers:       How many chunks a run translates at once (default 1,
+            sequential). Only a job whose glossary was prepared by
+            ``extract_glossary`` runs in parallel: a parallel run freezes the
+            glossary, so a job without one is translated sequentially, where
+            mid-run additions still build it.
     """
 
     def __init__(
@@ -115,7 +120,11 @@ class TranslatorEngine:
         corpus_store: CorpusStore | None = None,  # type: ignore[type-arg]
         provider_name: str = "unknown",
         batch_extractor: LlmGlossaryExtractor | None = None,
+        workers: int = 1,
     ) -> None:
+        if workers < 1:
+            raise ValueError(f"workers must be at least 1, got {workers}")
+        self._workers = workers
         self._provider = provider
         self._checkpoint = checkpoint
         self._readers = readers
@@ -1164,6 +1173,9 @@ class TranslatorEngine:
                 on_progress=_on_progress,
                 cancel_flag=cancel_flag,
                 narrators=self._checkpoint.load_narrators(job.id),
+                # A parallel run freezes the glossary, so only a prepared one
+                # may be frozen; without it the sequential loop builds it.
+                workers=self._workers if job.glossary_extracted else 1,
             )
         except Exception:
             latest = self._checkpoint.load_job(job.id)

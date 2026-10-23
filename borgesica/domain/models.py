@@ -745,6 +745,12 @@ class Progress(BaseModel):
     # "chunk 387/20 (1935%)". Defaults to 0 for callers that build a Progress
     # without one.
     position: int = 0
+    # How many of the run's chunks are finished (DONE or FAILED), already-DONE
+    # ones from an earlier run included. A parallel run finishes chunks out of
+    # order, so `position` jumps back and forth; `completed/total_chunks` only
+    # grows, which is what a progress bar needs. Equals `position` on a fresh
+    # sequential run.
+    completed: int = 0
     total_chunks: int
     cost_usd: float
     status: JobStatus

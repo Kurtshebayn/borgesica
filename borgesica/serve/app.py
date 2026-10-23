@@ -202,9 +202,16 @@ def create_app(
     @app.get("/jobs/{job_id}/estimate", response_model=EstimateResponse)
     def get_estimate(job_id: str) -> EstimateResponse:
         estimate = engine.estimate_cost(job_id)
+        glossary = engine.estimate_glossary_extraction(job_id)
+        book_low = estimate.usd_low + (glossary.usd if glossary else 0.0)
+        book_high = estimate.usd_high + (glossary.usd_high if glossary else 0.0)
+        budget = engine.status(job_id).config.budget_usd
         return EstimateResponse(
-            **estimate.model_dump(),
-            glossary_extraction=engine.estimate_glossary_extraction(job_id),
+            **estimate.model_dump(exclude={"within_budget"}),
+            within_budget=budget is None or book_high <= budget,
+            glossary_extraction=glossary,
+            book_usd_low=book_low,
+            book_usd_high=book_high,
         )
 
     @app.get("/jobs/{job_id}/glossary", response_model=GlossaryResponse)

@@ -15,10 +15,12 @@ Progress is bridged from the worker thread to a queue.Queue of plain dicts
 
 Translation run/resume:
     {"type": "progress", "job_id": ..., "chunk_index": ..., "position": ...,
-     "total_chunks": ..., "cost_usd": ..., "status": ...}
-Consumers must build the completion fraction from "position", not
-"chunk_index": an extract job keeps the original book indices, so chunk_index
-can exceed total_chunks.
+     "completed": ..., "total_chunks": ..., "cost_usd": ..., "status": ...}
+Consumers must build the completion fraction from "completed", not
+"chunk_index" or "position": an extract job keeps the original book indices,
+so chunk_index can exceed total_chunks, and a parallel run finishes chunks
+out of order, so position moves back and forth. "completed" (chunks of the
+run finished so far, already-DONE ones included) only grows.
     {"type": "terminal", "status": ..., "error": str | None}
 
 Glossary extraction (a different terminal type, so a client can tell the

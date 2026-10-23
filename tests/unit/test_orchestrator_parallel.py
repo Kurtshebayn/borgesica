@@ -461,3 +461,37 @@ def test_an_error_on_the_calling_thread_still_saves_the_chunks_in_flight():
     assert statuses[0] == statuses[1] == ChunkStatus.DONE
     assert statuses[2] == statuses[3] == ChunkStatus.PENDING
     assert sorted({_chunk_of(u) for u in provider.started}) == [0, 1]
+
+
+def test_progress_completed_counts_finished_chunks_monotonically():
+    """`completed` is how many of the run's chunks are finished — already-DONE
+    ones included — so a progress bar never jumps back when chunks finish
+    out of order. `position` keeps naming the chunk's place in the run."""
+    events: list[Progress] = []
+    store = InMemoryCheckpointStore()
+    job = make_job(make_config(), total=6)
+    chunks = make_chunks(6)
+    chunks[2] = chunks[2].model_copy(
+        update={"status": ChunkStatus.DONE, "translated_text": "Done 2."}
+    )
+
+    _run(
+        _orchestrator(HookedProvider(), store), store, job, chunks,
+        workers=3, on_progress=events.append,
+    )
+
+    assert [p.completed for p in events] == [2, 3, 4, 5, 6]
+    assert sorted(p.position for p in events) == [1, 2, 4, 5, 6]
+
+
+def test_sequential_progress_completed_matches_the_chunks_finished():
+    events: list[Progress] = []
+    store = InMemoryCheckpointStore()
+    job = make_job(make_config(), total=3)
+
+    _run(
+        _orchestrator(FakeTranslationProvider(), store), store, job, make_chunks(3),
+        workers=1, on_progress=events.append,
+    )
+
+    assert [(p.position, p.completed) for p in events] == [(1, 1), (2, 2), (3, 3)]
