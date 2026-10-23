@@ -62,8 +62,9 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -197,6 +198,31 @@ _INDEX_MARKER_RE = re.compile(r"^\[\d+\]\s*")
 # upper bound on signal latency: an unbounded wait cannot be interrupted by
 # Ctrl+C on Windows.
 _WAIT_POLL_SECONDS = 0.5
+
+
+def _finished_chunk(
+    chunk: Chunk,
+    outcome: tuple[TranslationUnit | None, str | None, float, bool, str | None],
+) -> Chunk:
+    """The chunk as it is saved once _translate_with_retry returned
+    *outcome*: DONE with its translation, or FAILED when no attempt passed."""
+    final_unit, final_text, _, passed_validation, validation_errors = outcome
+    if final_unit is None:
+        return chunk.model_copy(
+            update={
+                "status": ChunkStatus.FAILED,
+                "passed_validation": passed_validation,
+                "validation_errors": validation_errors,
+            }
+        )
+    return chunk.model_copy(
+        update={
+            "status": ChunkStatus.DONE,
+            "translated_text": final_text,
+            "passed_validation": passed_validation,
+            "validation_errors": validation_errors,
+        }
+    )
 
 
 class _InlineExecutor:
@@ -416,7 +442,7 @@ class TranslationOrchestrator:
             if workers > 1
             else _InlineExecutor()
         )
-        with executor:
+        with executor, self._saving_in_flight_on_error(job.id, in_flight):
             while True:
                 # Start chunks while a worker is free and nothing asked to stop.
                 while (
@@ -548,17 +574,13 @@ class TranslationOrchestrator:
                     # failed chunk accrues the cost of every attempt made.
                     running_cost += call_cost
 
+                    finished_chunk = _finished_chunk(chunk, outcome)
+                    # Persist the chunk as DONE or FAILED (idempotent upsert).
+                    self._checkpoint.save_chunk(job.id, finished_chunk)
+
                     if final_unit is None:
                         # All retries exhausted — chunk FAILED. Whether the job
                         # PAUSES is gated by JobConfig.continue_on_error.
-                        failed_chunk = chunk.model_copy(
-                            update={
-                                "status": ChunkStatus.FAILED,
-                                "passed_validation": passed_validation,
-                                "validation_errors": validation_errors,
-                            }
-                        )
-                        self._checkpoint.save_chunk(job.id, failed_chunk)
                         if not config.continue_on_error:
                             if stop is None:
                                 stop = JobStatus.PAUSED
@@ -576,21 +598,12 @@ class TranslationOrchestrator:
                         )
                         continue
 
-                    # Persist chunk as DONE (idempotent upsert).
-                    done_chunk = chunk.model_copy(
-                        update={
-                            "status": ChunkStatus.DONE,
-                            "translated_text": final_text,
-                            "passed_validation": passed_validation,
-                            "validation_errors": validation_errors,
-                        }
-                    )
-                    self._checkpoint.save_chunk(job.id, done_chunk)
-
                     # Corpus capture (design decisions #6/#10): engine-wide,
                     # best-effort, write-only. Only real translated DONE chunks
                     # are captured — never pass-through or FAILED.
-                    self._capture_corpus(job.id, done_chunk, config, passed_validation)
+                    self._capture_corpus(
+                        job.id, finished_chunk, config, passed_validation
+                    )
 
                     # Merge glossary additions (locked wins; new terms added as
                     # unlocked). A new term is committed at once but stays
@@ -722,6 +735,37 @@ class TranslationOrchestrator:
         # retry / tier-fallthrough waste factor so a chunk that could realistically
         # cost 2-3x its happy-path price does not silently blow the budget.
         return happy_path * _waste_factor(self._provider)
+
+    @contextmanager
+    def _saving_in_flight_on_error(
+        self, job_id: str, in_flight: dict[Future, tuple[int, Chunk, float]]
+    ) -> Iterator[None]:
+        """Save every chunk still in flight when the run loop itself raises.
+
+        A worker's own exception is settled by the loop. This covers the
+        calling thread raising instead — Ctrl+C, a store write or a progress
+        callback failing — while other calls are running: they finish anyway
+        (the executor waits for them), so their paid translations are saved
+        rather than retried on resume. Best-effort: a save that fails here is
+        logged and never masks the original exception.
+        """
+        try:
+            yield
+        except BaseException:
+            for future, (_, chunk, _) in list(in_flight.items()):
+                try:
+                    self._checkpoint.save_chunk(
+                        job_id, _finished_chunk(chunk, future.result())
+                    )
+                except Exception:
+                    logger.warning(
+                        "Could not save chunk %d of job %s after the run "
+                        "loop failed — it will be translated again on resume",
+                        chunk.index,
+                        job_id,
+                        exc_info=True,
+                    )
+            raise
 
     def _capture_corpus(
         self,

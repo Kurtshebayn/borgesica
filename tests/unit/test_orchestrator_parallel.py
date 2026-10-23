@@ -432,3 +432,32 @@ def test_parallel_progress_reports_each_chunk_once_on_the_calling_thread():
     assert sorted(p.chunk_index for p in events) == list(range(6))
     assert all(p.position == p.chunk_index + 1 for p in events)
     assert threads == {threading.get_ident()}
+
+
+def test_an_error_on_the_calling_thread_still_saves_the_chunks_in_flight():
+    """on_progress (or a store write) raising on the calling thread must not
+    drop a chunk whose provider call is already paid for and still running."""
+    progress_raised = threading.Event()
+
+    def before(user: str) -> None:
+        if _chunk_of(user) == 1:
+            assert progress_raised.wait(_TIMEOUT)
+
+    def on_progress(p: Progress) -> None:
+        progress_raised.set()
+        raise RuntimeError("progress sink broke")
+
+    provider = HookedProvider(before=before)
+    store = InMemoryCheckpointStore()
+    job = make_job(make_config(), total=4)
+
+    with pytest.raises(RuntimeError, match="progress sink broke"):
+        _run(
+            _orchestrator(provider, store), store, job, make_chunks(4),
+            workers=2, on_progress=on_progress,
+        )
+
+    statuses = _statuses(store, job.id)
+    assert statuses[0] == statuses[1] == ChunkStatus.DONE
+    assert statuses[2] == statuses[3] == ChunkStatus.PENDING
+    assert sorted({_chunk_of(u) for u in provider.started}) == [0, 1]
