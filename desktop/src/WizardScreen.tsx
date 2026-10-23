@@ -23,7 +23,6 @@ import {
   defaultModelForProvider,
   formatBestEffortSummary,
   formatFailureSummary,
-  formatGlossaryExtractionLine,
   formatGlossaryProgress,
   formatProgress,
   initialWizardState,
@@ -37,6 +36,7 @@ import {
 } from "./wizard";
 import { glossaryChangesToSave } from "./glossaryReview";
 import { hasNarratorChanges } from "./narrators";
+import EstimateSummary from "./EstimateSummary";
 import GlossaryTriage from "./GlossaryTriage";
 import NarratorReview from "./NarratorReview";
 import type { GlossaryEntry, JobStatus } from "./apiTypes";
@@ -340,28 +340,12 @@ export default function WizardScreen({
       )}
 
       {state.screen === "estimate" && state.estimate && (
-        <div>
-          <h2>2. Estimación</h2>
-          {state.preparationMessage && <p role="alert">{state.preparationMessage}</p>}
-          <p>
-            Costo estimado de la traducción: ${state.estimate.usd_low.toFixed(2)} – $
-            {state.estimate.usd_high.toFixed(2)}
-          </p>
-          {!state.estimate.within_budget && (
-            <p role="alert">Esta estimación supera el presupuesto configurado.</p>
-          )}
-          {state.estimate.glossary_extraction ? (
-            <div>
-              <p>{formatGlossaryExtractionLine(state.estimate.glossary_extraction)}</p>
-              <button onClick={() => void handlePrepareGlossary()}>Preparar glosario</button>
-              <button onClick={() => void handleProceedToGlossary()}>Omitir</button>
-            </div>
-          ) : (
-            <button onClick={() => void handleProceedToGlossary()}>
-              Continuar al glosario
-            </button>
-          )}
-        </div>
+        <EstimateSummary
+          estimate={state.estimate}
+          preparationMessage={state.preparationMessage}
+          onStart={() => void handlePrepareGlossary()}
+          onContinue={() => void handleProceedToGlossary()}
+        />
       )}
 
       {state.screen === "preparing" && (

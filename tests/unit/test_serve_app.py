@@ -227,6 +227,76 @@ def test_estimate_endpoint_reports_the_glossary_extraction_line(tmp_path: Path) 
     }
 
 
+def test_estimate_endpoint_prices_the_book_as_glossary_plus_translation(
+    tmp_path: Path,
+) -> None:
+    """Preparing the glossary is the first paid step of translating the book,
+    so the book's figures add it to the translation, and the budget check
+    covers both: a budget the translation alone fits but the two together
+    exceed is NOT within budget."""
+    engine, _ = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+    probe_id = client.post(
+        "/jobs", json={"source_path": srt_path, "model": "fake-model"}
+    ).json()["id"]
+    probe = client.get(f"/jobs/{probe_id}/estimate").json()
+    glossary_high = probe["glossary_extraction"]["usd_high"]
+    assert glossary_high > 0
+    budget = probe["usd_high"] + glossary_high / 2
+
+    job_id = client.post(
+        "/jobs",
+        json={"source_path": srt_path, "model": "fake-model", "budget_usd": budget},
+    ).json()["id"]
+    body = client.get(f"/jobs/{job_id}/estimate").json()
+
+    assert body["book_usd_low"] == pytest.approx(
+        body["usd_low"] + body["glossary_extraction"]["usd"]
+    )
+    assert body["book_usd_high"] == pytest.approx(
+        body["usd_high"] + body["glossary_extraction"]["usd_high"]
+    )
+    assert body["usd_high"] <= budget
+    assert body["within_budget"] is False
+
+
+def test_estimate_endpoint_book_counts_the_glossary_already_paid(
+    tmp_path: Path,
+) -> None:
+    """Once the glossary is prepared its cost is spent from the job's budget
+    (job.cost_usd, where the run's budget guard starts), so the book is what
+    was spent plus the translation still ahead — and a budget the translation
+    alone fits, but not on top of the spend, is NOT within budget."""
+    engine, checkpoint = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+    probe_id = client.post(
+        "/jobs", json={"source_path": srt_path, "model": "fake-model"}
+    ).json()["id"]
+    translation_high = client.get(f"/jobs/{probe_id}/estimate").json()["usd_high"]
+    spent = translation_high / 4
+    budget = translation_high + spent / 2
+
+    job_id = client.post(
+        "/jobs",
+        json={"source_path": srt_path, "model": "fake-model", "budget_usd": budget},
+    ).json()["id"]
+    checkpoint.save_job(
+        checkpoint.load_job(job_id).model_copy(
+            update={"glossary_extracted": True, "cost_usd": spent}
+        )
+    )
+
+    body = client.get(f"/jobs/{job_id}/estimate").json()
+
+    assert body["glossary_extraction"] is None
+    assert body["book_usd_low"] == pytest.approx(spent + body["usd_low"])
+    assert body["book_usd_high"] == pytest.approx(spent + body["usd_high"])
+    assert body["usd_high"] <= budget
+    assert body["within_budget"] is False
+
+
 def test_estimate_endpoint_glossary_extraction_is_null_once_extracted(
     tmp_path: Path,
 ) -> None:

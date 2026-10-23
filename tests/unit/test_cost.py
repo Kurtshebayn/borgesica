@@ -18,7 +18,6 @@ from borgesica.domain.models import (
     Job,
     JobConfig,
     JobStatus,
-    RollingSummary,
     SourceType,
 )
 
@@ -54,7 +53,7 @@ def _empty_dynamic_tokens(provider, context_manager, config) -> int:
 
     return provider.count_tokens(
         context_manager.build_dynamic_block(
-            Glossary(), RollingSummary(), config.glossary_budget_tokens
+            Glossary(), config.glossary_budget_tokens
         ),
         config.model,
     )
@@ -276,7 +275,7 @@ def test_estimate_preserves_model_field():
 # ---------------------------------------------------------------------------
 # Per-call overhead calibration (bug: 16x under-estimate on SRT, job 0b86d4f2)
 # The estimator counted ONLY source-text tokens and a flat 150-token output.
-# Real calls pay the system prompt (static block + glossary + summary) on
+# Real calls pay the system prompt (static block + narrator + glossary) on
 # EVERY call, and the output is the full JSON envelope (translation +
 # summary_update + glossary_additions). On thin SRT chunks that overhead
 # dominates: estimate $0.0025 vs real $0.0395.
@@ -432,7 +431,9 @@ def test_usd_equals_low_and_high_applies_provider_waste_factor():
     job = make_job(config, total=3)
     chunks = [make_chunk(i, text="hello world foo") for i in range(3)]
 
-    est = estimator.estimate(job, chunks, config)
+    # A pinned output size gives both bounds the same tokens, so the only
+    # thing left between them is the waste factor.
+    est = estimator.estimate(job, chunks, config, output_tokens_per_chunk=50)
 
     assert est.usd == pytest.approx(est.usd_low)
     assert est.usd_high == pytest.approx(est.usd_low * 4.0)
@@ -639,7 +640,7 @@ def test_estimate_overhead_measures_the_real_context_manager_block():
     comment and encoded it as a literal. Measuring the real builder means the
     two can never drift again.
     """
-    from borgesica.domain.models import Glossary, RollingSummary as _RS
+    from borgesica.domain.models import Glossary
 
     estimator, provider, ctx = _estimator_with_ctx()
     config = make_config(quality_mode="fast", glossary_budget_tokens=2500)
@@ -647,9 +648,8 @@ def test_estimate_overhead_measures_the_real_context_manager_block():
     job = make_job(config, total=1)
 
     glossary = Glossary()
-    summary = _RS(text="prior context here")
 
-    est = estimator.estimate(job, chunks, config, glossary=glossary, summary=summary)
+    est = estimator.estimate(job, chunks, config, glossary=glossary)
 
     import json as _json
 
@@ -660,7 +660,7 @@ def test_estimate_overhead_measures_the_real_context_manager_block():
         _json.dumps(translation_tool_schema(None)), config.model
     )
     dynamic_tokens = provider.count_tokens(
-        ctx.build_dynamic_block(glossary, summary, config.glossary_budget_tokens),
+        ctx.build_dynamic_block(glossary, config.glossary_budget_tokens),
         config.model,
     )
     expected_input = 2 + static_tokens + dynamic_tokens + schema_tokens
@@ -924,44 +924,22 @@ def test_default_output_prices_translation_expansion_not_source_parity():
     )
 
 
-def test_output_envelope_is_not_smaller_than_the_summary_it_carries():
-    """The envelope must fit the rolling summary the model is asked to emit.
+def test_output_envelope_is_the_measured_json_scaffolding():
+    """No summary_update is requested any more, so the envelope is what was
+    measured beside it: ~45 tokens of glossary_additions and JSON on prose,
+    89 on a 25-cue SRT batch (the summary was the other ~215 / ~221)."""
+    from borgesica.domain.cost import output_model
+    from borgesica.domain.models import SourceType
 
-    _OUTPUT_ENVELOPE_TOKENS was 150 while _SUMMARY_BUDGET_WORDS in the same
-    file priced that same summary at 200 WORDS on the input side — and 200
-    words of Spanish is ~342 tokens on its own, before glossary_additions or a
-    single JSON key. Measured summaries came back at 215 tokens median.
-    """
-    from borgesica.domain.cost import _OUTPUT_ENVELOPE_TOKENS, _SUMMARY_BUDGET_WORDS
-
-    spanish_tokens_per_word = 1.710
-    measured_summary_tokens = 215
-
-    assert _OUTPUT_ENVELOPE_TOKENS >= measured_summary_tokens, (
-        f"The envelope ({_OUTPUT_ENVELOPE_TOKENS}) must cover the measured "
-        f"summary ({measured_summary_tokens} tok) plus JSON keys."
-    )
-    assert _SUMMARY_BUDGET_WORDS * spanish_tokens_per_word > _OUTPUT_ENVELOPE_TOKENS, (
-        "The CEILING summary budget is the high-side allowance; if the floor "
-        "envelope already covered it there would be no band left to widen."
-    )
+    assert output_model(SourceType.EPUB).envelope == 45
+    assert output_model(SourceType.PDF).envelope == 45
+    assert output_model(SourceType.SRT).envelope == 89
 
 
-def test_output_ceiling_prices_the_summary_at_its_declared_word_budget():
-    """usd_high must price the summary with the same budget the input side uses.
-
-    The floor carries the measured summary; the ceiling carries the full
-    _SUMMARY_BUDGET_WORDS allowance, priced through the SAME _word_budget_tokens
-    helper the input block already uses. Pricing one side in words and the
-    other in an invented token constant is what produced the 150-vs-200
-    contradiction.
-    """
-    from borgesica.domain.cost import (
-        _SUMMARY_BUDGET_WORDS,
-        CostEstimator,
-        _word_budget_tokens,
-        output_model,
-    )
+def test_output_ceiling_widens_only_by_the_p90_expansion():
+    """Floor and ceiling share the measured envelope; nothing uncalibrated is
+    added on top for a summary the model no longer writes."""
+    from borgesica.domain.cost import CostEstimator, output_model
 
     provider = FakeTranslationProvider()
     estimator = CostEstimator(provider=provider)
@@ -971,11 +949,8 @@ def test_output_ceiling_prices_the_summary_at_its_declared_word_budget():
 
     est = estimator.estimate(job, [make_chunk(0, text="w " * 400)], config)
 
-    ceiling_envelope = (
-        _word_budget_tokens(provider, _SUMMARY_BUDGET_WORDS, config.model)
-        + m.json_scaffolding
-    )
-    assert est.output_tokens_high == round(400 * m.expansion_high) + ceiling_envelope
+    assert est.output_tokens == round(400 * m.expansion) + m.envelope
+    assert est.output_tokens_high == round(400 * m.expansion_high) + m.envelope
 
 
 def test_output_ceiling_exceeds_the_output_floor():

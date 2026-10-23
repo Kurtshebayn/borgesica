@@ -136,7 +136,7 @@ describe("providerRequiresKey", () => {
 describe("formatProgress", () => {
   it("renders chunk counter and cost", () => {
     expect(
-      formatProgress({ chunkIndex: 4, totalChunks: 10, costUsd: 1.5 }),
+      formatProgress({ completed: 4, totalChunks: 10, costUsd: 1.5 }),
     ).toBe("Fragmento 4/10 — $1.5000");
   });
 });
@@ -210,19 +210,23 @@ describe("extractSseData", () => {
 });
 
 describe("sseEventToAction", () => {
-  it("maps a progress event to PROGRESS_RECEIVED", () => {
+  it("maps a progress event to PROGRESS_RECEIVED, counting finished chunks", () => {
+    // A parallel run finishes chunks out of order: chunk 7 can be the third
+    // one done. The bar follows `completed`, never the chunk's own index.
     expect(
       sseEventToAction({
         type: "progress",
         job_id: "abc",
-        chunk_index: 2,
-        total_chunks: 5,
+        chunk_index: 7,
+        position: 8,
+        completed: 3,
+        total_chunks: 10,
         cost_usd: 0.2,
         status: "RUNNING",
       }),
     ).toEqual({
       type: "PROGRESS_RECEIVED",
-      progress: { chunkIndex: 2, totalChunks: 5, costUsd: 0.2 },
+      progress: { completed: 3, totalChunks: 10, costUsd: 0.2 },
     });
   });
 
@@ -297,6 +301,8 @@ describe("wizardReducer", () => {
         cached: false,
         within_budget: true,
         glossary_extraction: null,
+        book_usd_low: 0.5,
+        book_usd_high: 1.5,
       },
     };
     const next = wizardReducer(withEstimate, { type: "PROCEED_TO_GLOSSARY" });
@@ -549,6 +555,8 @@ function estimateWith(
     cached: false,
     within_budget: true,
     glossary_extraction,
+    book_usd_low: 0.5,
+    book_usd_high: 1.5,
   };
 }
 
@@ -566,9 +574,9 @@ const preparing: WizardState = {
 };
 
 describe("formatGlossaryExtractionLine", () => {
-  it("shows the cost range and the number of calls, apart from the translation", () => {
+  it("shows the glossary's share of the book: cost range and number of calls", () => {
     expect(formatGlossaryExtractionLine(EXTRACTION_LINE)).toBe(
-      "Preparación del glosario: $0.12 – $0.57, 57 llamadas",
+      "Incluye la preparación del glosario: $0.12 – $0.57, 57 llamadas",
     );
   });
 

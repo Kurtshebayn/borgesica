@@ -80,7 +80,7 @@ El núcleo es una **arquitectura hexagonal**. La regla concreta que la sostiene:
 
 > `borgesica/domain/` no importa nada de `borgesica/adapters/`.
 
-El dominio — chunking, glosario, resumen rodante, orquestación, costos — no sabe
+El dominio — chunking, glosario, narradores, orquestación, costos — no sabe
 qué proveedor ni qué formato hay del otro lado. Todo entra y sale por puertos
 (`DocumentReader`, `DocumentWriter`, `TranslationProvider`, `Checkpoint`). Hoy esa
 frontera está limpia; verifícalo antes de commitear:

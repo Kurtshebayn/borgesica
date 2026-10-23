@@ -4,18 +4,24 @@ Dependency rule: only stdlib + pydantic + domain models/ports allowed.
 No I/O, no adapter imports.
 
 Design (M1-5):
-  build_system_prompt(config, glossary, summary) -> SystemPrompt
+  build_system_prompt(config, glossary, narrator) -> SystemPrompt
     SystemPrompt.text  = static_block + dynamic_block
 
 The static block is the natural prompt-caching boundary (it is identical for
 every chunk of a job), though no adapter applies caching today. The dynamic
-block appends glossary + rolling summary, which change per chunk.
+block appends the chapter's narrator and the glossary.
+
+There is no rolling summary: a chunk's prompt carries nothing produced by the
+chunk before it, so chunks can be translated in any order or concurrently.
+It was removed on 2026-10-22 — measured, it prevented no continuity errors
+and invented a feminine first-person narrator (6/93 outputs with it, 0/93
+without).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from borgesica.domain.models import Glossary, JobConfig, RollingSummary, SourceType
+from borgesica.domain.models import Glossary, JobConfig, SourceType
 from borgesica.domain.narrators import NarratorFact, render_narrator
 
 # ---------------------------------------------------------------------------
@@ -156,28 +162,11 @@ Spanish (es-neutral).
 Return your response as a valid JSON object with EXACTLY the following fields:
   {
     "translation": "<translated text>",
-    "summary_update": "<3–5 sentence narrative summary of what happened or \
-was discussed in this chunk — REPLACES the prior summary, does NOT append>",
     "glossary_additions": [
       {"term": "<source term>", "translation": "<Spanish equivalent>", \
 "locked": false, "note": "<optional context>"}
     ]
   }
-
-Rules for summary_update:
-- Write 3–5 sentences maximum.
-- Capture narrative arc, tone, setting, and any new characters.
-- This summary REPLACES the previous one — do NOT include prior context verbatim.
-- NAME the character you are referring to whenever more than one character is \
-in play: write "Ada recuerda" (name + verb), never "ella recuerda". Use a \
-pronoun ONLY when \
-exactly one candidate antecedent exists in the summary you are writing.
-- NEVER infer or invent a character's gender. A first-person narrator ("I") is \
-genderless in the English source, so refer to that narrator BY NAME. Do not \
-reach for a gendered pronoun in order to tell two characters apart — naming \
-them is always available, and a Spanish verb does not mark the subject's \
-gender, so a named referent commits you to nothing you were not told.
-- Keep it under 200 tokens.
 
 Rules for glossary_additions:
 - Add ONLY proper nouns, invented terms, or domain-specific vocabulary first \
@@ -231,8 +220,6 @@ imperative):
 Return your response as a valid JSON object with EXACTLY the following fields:
   {
     "translations": ["<segment 1 translated>", "<segment 2 translated>", ...],
-    "summary_update": "<3–5 sentence narrative summary of what happened or \
-was discussed in this chunk — REPLACES the prior summary, does NOT append>",
     "glossary_additions": [
       {"term": "<source term>", "translation": "<Spanish equivalent>", \
 "locked": false, "note": "<optional context>"}
@@ -245,21 +232,6 @@ Rules for translations:
 continues across segments, each fragment must stay its own array item.
 - Do not add or remove segments to "fix" the formatting; the segmentation \
 carries subtitle timing and is not negotiable.
-
-Rules for summary_update:
-- Write 3–5 sentences maximum.
-- Capture narrative arc, tone, setting, and any new characters.
-- This summary REPLACES the previous one — do NOT include prior context verbatim.
-- NAME the character you are referring to whenever more than one character is \
-in play: write "Ada recuerda" (name + verb), never "ella recuerda". Use a \
-pronoun ONLY when \
-exactly one candidate antecedent exists in the summary you are writing.
-- NEVER infer or invent a character's gender. A first-person narrator ("I") is \
-genderless in the English source, so refer to that narrator BY NAME. Do not \
-reach for a gendered pronoun in order to tell two characters apart — naming \
-them is always available, and a Spanish verb does not mark the subject's \
-gender, so a named referent commits you to nothing you were not told.
-- Keep it under 200 tokens.
 
 Rules for glossary_additions:
 - Add ONLY proper nouns, invented terms, or domain-specific vocabulary first \
@@ -293,7 +265,7 @@ class ContextManager:
 
     Pure domain — no I/O, no adapter imports, and no collaborators at all:
     prompt assembly is string concatenation over the config, glossary and
-    rolling summary. It used to take a TranslationProvider, but only ever for
+    narrator. It used to take a TranslationProvider, but only ever for
     the count_tokens call behind the `cached` hint that nothing consumed; with
     that gone, "assembling a prompt makes no provider call" is guaranteed by
     the type rather than by convention.
@@ -307,7 +279,6 @@ class ContextManager:
         self,
         config: JobConfig,
         glossary: Glossary,
-        summary: RollingSummary,
         narrator: NarratorFact | None = None,
     ) -> SystemPrompt:
         """Assemble the full system prompt for a single chunk.
@@ -321,14 +292,13 @@ class ContextManager:
             [NARRATOR] first-person narrator of this chunk's chapter (only
                        when a person set one for it)
             [GLOSSARY] rendered table (config.glossary_budget_tokens)
-            [SUMMARY] rolling summary from chunk N-1 (≤ 200 tokens)
 
         Returns:
             SystemPrompt carrying the assembled .text.
         """
         static_block = self.get_static_block(config)
         dynamic_block = self.build_dynamic_block(
-            glossary, summary, config.glossary_budget_tokens, narrator=narrator
+            glossary, config.glossary_budget_tokens, narrator=narrator
         )
         return SystemPrompt(text=static_block + "\n\n" + dynamic_block)
 
@@ -354,7 +324,6 @@ class ContextManager:
     def build_dynamic_block(
         self,
         glossary: Glossary,
-        summary: RollingSummary,
         glossary_budget_tokens: int,
         narrator: NarratorFact | None = None,
     ) -> str:
@@ -373,13 +342,8 @@ class ContextManager:
         0/102). It is absent, not empty, for a chapter nobody set.
         """
         rendered_glossary = glossary.render(budget_tokens=glossary_budget_tokens)
-        summary_text = summary.text if summary.text else "No prior context."
         narrator_block = (
             f"[NARRATOR]\n{render_narrator(narrator)}\n\n" if narrator else ""
         )
 
-        return (
-            f"{narrator_block}"
-            f"[GLOSSARY]\n{rendered_glossary}\n\n"
-            f"[SUMMARY]\n{summary_text}"
-        )
+        return f"{narrator_block}[GLOSSARY]\n{rendered_glossary}"

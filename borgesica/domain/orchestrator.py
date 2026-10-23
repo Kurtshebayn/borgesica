@@ -1,19 +1,30 @@
-"""TranslationOrchestrator — sequential per-chunk translation loop.
+"""TranslationOrchestrator — per-chunk translation loop, sequential or parallel.
 
 Dependency rule: only stdlib + pydantic + domain models/ports/helpers.
 No I/O, no adapter imports.
 
+Concurrency (run(workers=N)): with N > 1, up to N chunks have provider calls
+running at once on worker threads. Only _translate_with_retry runs there;
+the calling thread keeps the budget check, prompt assembly, every checkpoint
+write and every progress callback, so the store is never written from two
+threads. The budget guard reserves each in-flight chunk's projection, and the
+glossary is frozen for the run. The numbered steps below describe one chunk.
+
 Design (continue-on-error — replaces M2-0 per-chunk flow):
-  TranslationOrchestrator.run(job, chunks, glossary, config, on_progress, cancel_flag)
-    For each PENDING chunk (in index order):
+  TranslationOrchestrator.run(job, chunks, glossary, config, on_progress, cancel_flag,
+                              narrators, workers)
+    For each PENDING chunk (started in index order):
       1. Check cancel_flag BEFORE the chunk (cooperative, not mid-chunk).
-      2. Budget check: if cost_so_far + projected_cost > budget_usd → raise BudgetExceeded
-         (PAUSES the job unconditionally — unaffected by continue_on_error).
+      2. Budget check: if cost_so_far + in-flight projections + projected_cost
+         > budget_usd → wait for the chunks in flight and re-check; with none
+         in flight, raise BudgetExceeded (PAUSES the job unconditionally —
+         unaffected by continue_on_error).
       3. Prose guard: strip(source_text); if the stripped result is empty/whitespace-only
          OR contains no alphabetic characters, persist the chunk DONE with
          translated_text = source_text (pass-through), make ZERO provider calls, and
          move to the next chunk. Applies identically regardless of continue_on_error.
-      4. Build system prompt via ContextManager (using current glossary + last summary).
+      4. Build system prompt via ContextManager (current glossary + the chunk's
+         chapter narrator; no rolling summary — nothing crosses chunks).
       5. PRIMARY (placeholders-in-text): tokenize_tags(source_text) replaces every
          inline tag with an opaque numbered placeholder (attributes — hrefs,
          classes, ids — never leave the orchestrator) and sends THAT to the
@@ -33,19 +44,14 @@ Design (continue-on-error — replaces M2-0 per-chunk flow):
                  FAILED (translated_text=None; writers fall back to source_text).
                - continue_on_error=False (--strict): job PAUSES immediately, stop.
       8. checkpoint.save_chunk(DONE or FAILED) — idempotent.
-      9. summary = unit.summary_update; checkpoint.save_summary(N) — skipped for
-         a FAILED chunk (no summary_update available); the next chunk reuses the
-         latest summary before it.
-     10. Merge glossary_additions (locked wins; new terms added as unlocked).
-     11. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
+      9. Merge glossary_additions (locked wins; new terms added as unlocked).
+     10. job.cost_usd += chunk cost; emit on_progress(Progress(...)).
     After loop: job.status = DONE — even if one or more chunks ended FAILED (only
     reached when continue_on_error=True or no chunk failed; a strict-mode PAUSE
     returns early and never reaches this point).
 
 Resume semantics:
   - DONE chunks are skipped (0 provider calls for them).
-  - Each chunk gets the summary saved for the highest index BELOW it, so a
-    retried middle chunk never sees the end-of-book summary.
   - Continue from first non-DONE chunk.
   - CANCELLED / PAUSED / CREATED are all valid entry statuses for run().
   - RUNNING is the only invalid entry status → raises JobStateError.
@@ -56,7 +62,11 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import Any
 
 from borgesica.domain.context import INLINE_TAG_RULES, ContextManager
 from borgesica.domain.cost import (
@@ -99,7 +109,6 @@ from borgesica.domain.models import (
     JobConfig,
     JobStatus,
     Progress,
-    RollingSummary,
     TranslationUnit,
     Usage,
 )
@@ -144,7 +153,6 @@ suggest removing it in your critique. Judge the surrounding prose only.
 Return a JSON object:
   {{
     "translation": "<your critique notes, NOT the translation>",
-    "summary_update": "Critique complete.",
     "glossary_additions": []
   }}"""
 
@@ -159,7 +167,6 @@ the critique while remaining faithful to the source.
 Return a JSON object:
   {{
     "translation": "<revised translation>",
-    "summary_update": "<3-5 sentence narrative summary — REPLACES prior summary>",
     "glossary_additions": []
   }}"""
 
@@ -184,6 +191,56 @@ mid-sentence must stay mid-sentence."""
 
 # Leading "[k]" echo of the index markers in a returned translation item.
 _INDEX_MARKER_RE = re.compile(r"^\[\d+\]\s*")
+
+# How long a parallel run blocks waiting for a chunk before looping. Only an
+# upper bound on signal latency: an unbounded wait cannot be interrupted by
+# Ctrl+C on Windows.
+_WAIT_POLL_SECONDS = 0.5
+
+
+def _finished_chunk(
+    chunk: Chunk,
+    outcome: tuple[TranslationUnit | None, str | None, float, bool, str | None],
+) -> Chunk:
+    """The chunk as it is saved once _translate_with_retry returned
+    *outcome*: DONE with its translation, or FAILED when no attempt passed."""
+    final_unit, final_text, _, passed_validation, validation_errors = outcome
+    if final_unit is None:
+        return chunk.model_copy(
+            update={
+                "status": ChunkStatus.FAILED,
+                "passed_validation": passed_validation,
+                "validation_errors": validation_errors,
+            }
+        )
+    return chunk.model_copy(
+        update={
+            "status": ChunkStatus.DONE,
+            "translated_text": final_text,
+            "passed_validation": passed_validation,
+            "validation_errors": validation_errors,
+        }
+    )
+
+
+class _InlineExecutor:
+    """Executor for workers=1: runs each call at once on the calling thread,
+    so a sequential run makes its provider calls exactly where it always did.
+    The returned future is already done."""
+
+    def __enter__(self) -> _InlineExecutor:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future:
+        future: Future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
 
 
 def _add_usage(a: Usage, b: Usage) -> Usage:
@@ -228,7 +285,7 @@ def _segmented_text(
 
 
 class TranslationOrchestrator:
-    """Sequential per-chunk translation loop.
+    """Per-chunk translation loop, sequential or parallel (see run's workers).
 
     Pure domain — knows only ports and domain helpers.
     No I/O, no adapter imports.
@@ -276,8 +333,9 @@ class TranslationOrchestrator:
         on_progress: ProgressCallback,
         cancel_flag: threading.Event,
         narrators: dict[str, NarratorFact] | None = None,
+        workers: int = 1,
     ) -> Job:
-        """Execute (or resume) the sequential translation loop for *job*.
+        """Execute (or resume) the translation loop for *job*.
 
         Args:
             job:         The Job entity (status must NOT be RUNNING).
@@ -289,14 +347,28 @@ class TranslationOrchestrator:
             narrators:   First-person narrator facts by chapter key, as a
                          person set them in the review. A chunk gets the fact
                          of its own chapter, or none.
+            workers:     How many chunks may be translated at once. 1 (the
+                         default) is the sequential loop, with the provider
+                         called on this thread. Above 1, worker threads make
+                         the provider calls while this thread keeps every
+                         budget check, checkpoint write and progress callback,
+                         and the glossary stays as given (mid-run additions
+                         are not applied). A stop — cancel, budget, strict
+                         failure — starts no new chunk and lets the running
+                         ones finish and be saved first.
 
         Returns:
             Updated Job with final status (DONE, PAUSED, or CANCELLED).
 
         Raises:
+            ValueError:     if workers < 1.
             JobStateError:  if job.status == RUNNING on entry.
-            BudgetExceeded: if projected cost for the next chunk would exceed budget.
+            BudgetExceeded: if projected cost for the next chunk would exceed
+                            the budget left after the chunks in flight.
         """
+        if workers < 1:
+            raise ValueError(f"workers must be at least 1, got {workers}")
+
         # Guard: RUNNING is the only invalid entry state.
         if job.status == JobStatus.RUNNING:
             raise JobStateError(
@@ -338,200 +410,264 @@ class TranslationOrchestrator:
         # instead of restarting every term's vote from scratch.
         live_votes = self._checkpoint.load_votes(job.id)
 
-        # Process each chunk in order. `position` is 1-based within this run:
-        # extracted chunks keep their ORIGINAL book indices, so chunk.index is
-        # not a fraction of total_chunks and must never be used as one.
-        for position, chunk in enumerate(ordered_chunks, start=1):
-            # Skip already-DONE chunks (resume semantics).
-            if chunk.status == ChunkStatus.DONE:
-                continue
+        # A parallel run translates from the glossary a person reviewed before
+        # the run: chunks finish in any order, so an addition merged mid-run
+        # would reach an arbitrary subset of the chunks still to come. A
+        # sequential run keeps merging them as it always did.
+        freeze_glossary = workers > 1
 
-            # Cooperative cancel check — BEFORE the chunk.
-            if cancel_flag.is_set():
-                updated_job = job.model_copy(
+        # `position` is 1-based within this run: extracted chunks keep their
+        # ORIGINAL book indices, so chunk.index is not a fraction of
+        # total_chunks and must never be used as one. Already-DONE chunks are
+        # skipped (resume semantics).
+        pending = [
+            (position, chunk)
+            for position, chunk in enumerate(ordered_chunks, start=1)
+            if chunk.status != ChunkStatus.DONE
+        ]
+        next_pending = 0
+        # Chunks of this run that are finished, already-DONE ones included.
+        completed = len(ordered_chunks) - len(pending)
+        # Chunks whose provider calls are running: future -> (position, chunk,
+        # projected cost reserved against the budget while the call runs).
+        in_flight: dict[Future, tuple[int, Chunk, float]] = {}
+        # Why no further chunk may start. The first reason wins: a cancel
+        # followed by a strict failure still ends CANCELLED.
+        stop: JobStatus | None = None
+        budget_exceeded = False
+        error: Exception | None = None
+
+        executor = (
+            ThreadPoolExecutor(max_workers=workers, thread_name_prefix="borgesica-chunk")
+            if workers > 1
+            else _InlineExecutor()
+        )
+        with executor, self._saving_in_flight_on_error(
+            job, in_flight, spent=lambda: running_cost
+        ):
+            while True:
+                # Start chunks while a worker is free and nothing asked to stop.
+                while (
+                    stop is None
+                    and error is None
+                    and len(in_flight) < workers
+                    and next_pending < len(pending)
+                ):
+                    position, chunk = pending[next_pending]
+
+                    # Cooperative cancel check — BEFORE the chunk.
+                    if cancel_flag.is_set():
+                        stop = JobStatus.CANCELLED
+                        break
+
+                    # The narrator of THIS chunk's chapter only: a book can have
+                    # several narrators, and a chapter nobody set gets no fact.
+                    key = chapter_key(chunk)
+                    narrator = narrators.get(key) if narrators and key else None
+
+                    # Budget check — BEFORE the provider call. Every chunk in
+                    # flight holds its projection until its real cost is known,
+                    # so concurrent calls cannot jointly overshoot the budget.
+                    projected = 0.0
+                    if config.budget_usd is not None:
+                        projected = self._project_chunk_cost(
+                            chunk, config, live_glossary, narrator=narrator
+                        )
+                        reserved = sum(p for _, _, p in in_flight.values())
+                        if running_cost + reserved + projected > config.budget_usd:
+                            if in_flight:
+                                # Real costs land below their projections, so
+                                # the room may reappear: re-check once the
+                                # running calls have settled.
+                                break
+                            stop = JobStatus.PAUSED
+                            budget_exceeded = True
+                            break
+                    next_pending += 1
+
+                    # Prose guard: chunks with no translatable prose (empty/
+                    # whitespace-only after stripping ALL markup, or made only of
+                    # digits, strict roman numerals, and punctuation — front-matter
+                    # page lists like "i ii iii 1 2 3") pass through verbatim with
+                    # ZERO provider calls and ZERO cost. strip_all_tags (not strip)
+                    # so void/unknown tags don't count as prose: an <img> nested in
+                    # a <p> serializes into source_text and its src/alt letters
+                    # used to defeat the guard — a real cover burned provider
+                    # calls. This is deliberately conservative — one prose token
+                    # anywhere makes the chunk translatable, so this guard has zero
+                    # false positives (never silently skips a translatable
+                    # sentence). Applies identically regardless of
+                    # continue_on_error.
+                    stripped_text = strip_all_tags(chunk.source_text)
+                    if not has_translatable_prose(stripped_text):
+                        passthrough_chunk = chunk.model_copy(
+                            update={
+                                "status": ChunkStatus.DONE,
+                                "translated_text": chunk.source_text,
+                            }
+                        )
+                        self._checkpoint.save_chunk(job.id, passthrough_chunk)
+                        completed += 1
+                        on_progress(
+                            Progress(
+                                job_id=job.id,
+                                chunk_index=chunk.index,
+                                position=position,
+                                completed=completed,
+                                total_chunks=len(ordered_chunks),
+                                cost_usd=running_cost,
+                                status=JobStatus.RUNNING,
+                            )
+                        )
+                        continue
+
+                    # Build system prompt for this chunk.
+                    system_prompt = self._ctx.build_system_prompt(
+                        config, live_glossary, narrator=narrator
+                    )
+
+                    # Fetch price once per chunk (same model throughout).
+                    in_price, out_price = self._provider.price(config.model)
+                    cache_price = self._provider.cache_price(config.model)
+
+                    # PRIMARY: send source_text WITH tags (do NOT strip up front).
+                    # The system prompt instructs the model to carry every tag
+                    # with its word. FALLBACK (if primary exhausted): strip →
+                    # translate plain → reinsert. Only this runs on a worker.
+                    future = executor.submit(
+                        self._translate_with_retry,
+                        chunk=chunk,
+                        system=system_prompt.text,
+                        config=config,
+                        in_price=in_price,
+                        out_price=out_price,
+                        cache_price=cache_price,
+                    )
+                    in_flight[future] = (position, chunk, projected)
+
+                if not in_flight:
+                    break
+
+                # A bounded wait, so Ctrl+C still reaches a CLI run on Windows.
+                done, _ = wait(
+                    in_flight, timeout=_WAIT_POLL_SECONDS, return_when=FIRST_COMPLETED
+                )
+                # Settle in book order when several finish together, so the
+                # saves and progress events of one wake-up are deterministic.
+                for future in sorted(done, key=lambda f: in_flight[f][0]):
+                    position, chunk, _ = in_flight.pop(future)
+                    try:
+                        outcome = future.result()
+                    except Exception as exc:
+                        # Not a provider failure (those end the chunk FAILED):
+                        # a bug. Start nothing more, save what is still
+                        # running, then let it surface.
+                        if error is None:
+                            error = exc
+                        continue
+                    (
+                        final_unit,
+                        final_text,
+                        call_cost,
+                        passed_validation,
+                        validation_errors,
+                    ) = outcome
+
+                    # Accrue the real cost of ALL calls made (regardless of
+                    # success or failure): reflective charges 3 calls, and a
+                    # failed chunk accrues the cost of every attempt made.
+                    running_cost += call_cost
+
+                    finished_chunk = _finished_chunk(chunk, outcome)
+                    # Persist the chunk as DONE or FAILED (idempotent upsert).
+                    self._checkpoint.save_chunk(job.id, finished_chunk)
+                    completed += 1
+
+                    if final_unit is None:
+                        # All retries exhausted — chunk FAILED. Whether the job
+                        # PAUSES is gated by JobConfig.continue_on_error.
+                        if not config.continue_on_error:
+                            if stop is None:
+                                stop = JobStatus.PAUSED
+                            continue
+                        # continue_on_error=True: do NOT pause — keep going.
+                        on_progress(
+                            Progress(
+                                job_id=job.id,
+                                chunk_index=chunk.index,
+                                position=position,
+                                completed=completed,
+                                total_chunks=len(ordered_chunks),
+                                cost_usd=running_cost,
+                                status=JobStatus.RUNNING,
+                            )
+                        )
+                        continue
+
+                    # Corpus capture (design decisions #6/#10): engine-wide,
+                    # best-effort, write-only. Only real translated DONE chunks
+                    # are captured — never pass-through or FAILED.
+                    self._capture_corpus(
+                        job.id, finished_chunk, config, passed_validation
+                    )
+
+                    # Merge glossary additions (locked wins; new terms added as
+                    # unlocked). A new term is committed at once but stays
+                    # provisional: repeated proposals are tallied and the
+                    # plurality replaces it at quorum, so one draw at
+                    # temperature > 0 no longer fixes the rendering for the rest
+                    # of the book.
+                    if final_unit.glossary_additions and not freeze_glossary:
+                        live_glossary, live_votes = apply_additions(
+                            live_glossary, live_votes, final_unit.glossary_additions
+                        )
+                        # Anchor whatever just arrived. Cheap: a dict lookup per
+                        # unclassified entry against evidence counted once above.
+                        live_glossary = seed_character_gender(
+                            live_glossary, gender_evidence
+                        )
+                        self._checkpoint.save_glossary(job.id, live_glossary)
+                        self._checkpoint.save_votes(job.id, live_votes)
+
+                    on_progress(
+                        Progress(
+                            job_id=job.id,
+                            chunk_index=chunk.index,
+                            position=position,
+                            completed=completed,
+                            total_chunks=len(ordered_chunks),
+                            cost_usd=running_cost,
+                            status=JobStatus.RUNNING,
+                        )
+                    )
+
+        if error is not None:
+            # Persist what was paid — the chunks drained after the error
+            # included — so a resume's budget guard starts from the real
+            # spend, and the job is never left RUNNING.
+            self._checkpoint.save_job(
+                job.model_copy(
                     update={
-                        "status": JobStatus.CANCELLED,
+                        "status": JobStatus.PAUSED,
                         "cost_usd": running_cost,
                         "updated_at": datetime.now(UTC),
                     }
                 )
-                self._checkpoint.save_job(updated_job)
-                return updated_job
-
-            # Rolling summary of the chunk BEFORE this one. In a sequential run
-            # that is the summary just saved; on a resume that retries a middle
-            # chunk it is NOT the highest-index one, which describes later plot.
-            summary = self._checkpoint.load_summary(job.id, before=chunk.index)
-
-            # The narrator of THIS chunk's chapter only: a book can have several
-            # narrators, and a chapter nobody set gets no fact at all.
-            key = chapter_key(chunk)
-            narrator = narrators.get(key) if narrators and key else None
-
-            # Budget check — BEFORE the provider call.
-            if config.budget_usd is not None:
-                projected = self._project_chunk_cost(
-                    chunk, config, live_glossary, summary, narrator=narrator
-                )
-                if running_cost + projected > config.budget_usd:
-                    paused_job = job.model_copy(
-                        update={
-                            "status": JobStatus.PAUSED,
-                            "cost_usd": running_cost,
-                            "updated_at": datetime.now(UTC),
-                        }
-                    )
-                    self._checkpoint.save_job(paused_job)
-                    raise BudgetExceeded(job_id=job.id, cost_so_far=running_cost)
-
-            # Prose guard: chunks with no translatable prose (empty/whitespace-only
-            # after stripping ALL markup, or made only of digits, strict roman
-            # numerals, and punctuation — front-matter page lists like "i ii iii
-            # 1 2 3") pass through verbatim with ZERO provider calls and ZERO cost.
-            # strip_all_tags (not strip) so void/unknown tags don't count as prose:
-            # an <img> nested in a <p> serializes into source_text and its src/alt
-            # letters used to defeat the guard — a real cover burned provider calls.
-            # This is deliberately conservative — one prose token anywhere makes the
-            # chunk translatable, so this guard has zero false positives (never
-            # silently skips a translatable sentence). Applies identically
-            # regardless of continue_on_error.
-            stripped_text = strip_all_tags(chunk.source_text)
-            if not has_translatable_prose(stripped_text):
-                passthrough_chunk = chunk.model_copy(
-                    update={
-                        "status": ChunkStatus.DONE,
-                        "translated_text": chunk.source_text,
-                    }
-                )
-                self._checkpoint.save_chunk(job.id, passthrough_chunk)
-                on_progress(
-                    Progress(
-                        job_id=job.id,
-                        chunk_index=chunk.index,
-                        position=position,
-                        total_chunks=len(ordered_chunks),
-                        cost_usd=running_cost,
-                        status=JobStatus.RUNNING,
-                    )
-                )
-                continue
-
-            # Build system prompt for this chunk.
-            system_prompt = self._ctx.build_system_prompt(
-                config, live_glossary, summary, narrator=narrator
             )
+            raise error
 
-            # Fetch price once per chunk (same model throughout — no need to re-fetch per call).
-            in_price, out_price = self._provider.price(config.model)
-            cache_price = self._provider.cache_price(config.model)
-
-            # PRIMARY: send source_text WITH tags (do NOT strip up front).
-            # The system prompt instructs the model to carry every tag with its word.
-            # FALLBACK (if primary exhausted): strip → translate plain → reinsert.
-            (
-                final_unit,
-                final_text,
-                call_cost,
-                passed_validation,
-                validation_errors,
-            ) = self._translate_with_retry(
-                chunk=chunk,
-                system=system_prompt.text,
-                config=config,
-                in_price=in_price,
-                out_price=out_price,
-                cache_price=cache_price,
-            )
-
-            # Accrue the real cost of ALL calls made (regardless of success or failure).
-            # This fixes both Bug-1 (reflective charges 3 calls) and Bug-2 (failed
-            # chunks charged 0 — now they accrue the cost of every attempt made).
-            running_cost += call_cost
-
-            if final_unit is None:
-                # All retries exhausted — chunk FAILED. Whether the job PAUSES
-                # is gated by JobConfig.continue_on_error.
-                failed_chunk = chunk.model_copy(
-                    update={
-                        "status": ChunkStatus.FAILED,
-                        "passed_validation": passed_validation,
-                        "validation_errors": validation_errors,
-                    }
-                )
-                self._checkpoint.save_chunk(job.id, failed_chunk)
-                if not config.continue_on_error:
-                    paused_job = job.model_copy(
-                        update={
-                            "status": JobStatus.PAUSED,
-                            "cost_usd": running_cost,
-                            "updated_at": datetime.now(UTC),
-                        }
-                    )
-                    self._checkpoint.save_job(paused_job)
-                    return paused_job
-                # continue_on_error=True: do NOT pause — proceed to the next chunk.
-                # Rolling summary is intentionally NOT updated for a FAILED chunk
-                # (no summary_update available); the next chunk reuses the latest one.
-                on_progress(
-                    Progress(
-                        job_id=job.id,
-                        chunk_index=chunk.index,
-                        position=position,
-                        total_chunks=len(ordered_chunks),
-                        cost_usd=running_cost,
-                        status=JobStatus.RUNNING,
-                    )
-                )
-                continue
-
-            # Persist chunk as DONE (idempotent upsert).
-            done_chunk = chunk.model_copy(
+        if stop is not None:
+            stopped_job = job.model_copy(
                 update={
-                    "status": ChunkStatus.DONE,
-                    "translated_text": final_text,
-                    "passed_validation": passed_validation,
-                    "validation_errors": validation_errors,
+                    "status": stop,
+                    "cost_usd": running_cost,
+                    "updated_at": datetime.now(UTC),
                 }
             )
-            self._checkpoint.save_chunk(job.id, done_chunk)
-
-            # Corpus capture (design decisions #6/#10): engine-wide, best-effort,
-            # write-only. Only real translated DONE chunks are captured — never
-            # pass-through (source==translated, zero provider calls) or FAILED.
-            self._capture_corpus(job.id, done_chunk, config, passed_validation)
-
-            # Update rolling summary (REPLACES prior summary).
-            self._checkpoint.save_summary(
-                job.id,
-                RollingSummary(text=final_unit.summary_update, chunk_index=chunk.index),
-            )
-
-            # Merge glossary additions (locked wins; new terms added as unlocked).
-            # A new term is committed at once but stays provisional: repeated
-            # proposals are tallied and the plurality replaces it at quorum, so
-            # one draw at temperature > 0 no longer fixes the rendering for the
-            # rest of the book.
-            if final_unit.glossary_additions:
-                live_glossary, live_votes = apply_additions(
-                    live_glossary, live_votes, final_unit.glossary_additions
-                )
-                # Anchor whatever just arrived. Cheap: a dict lookup per
-                # unclassified entry against evidence counted once above.
-                live_glossary = seed_character_gender(live_glossary, gender_evidence)
-                self._checkpoint.save_glossary(job.id, live_glossary)
-                self._checkpoint.save_votes(job.id, live_votes)
-
-            # Emit progress callback.
-            on_progress(
-                Progress(
-                    job_id=job.id,
-                    chunk_index=chunk.index,
-                    position=position,
-                    total_chunks=len(ordered_chunks),
-                    cost_usd=running_cost,
-                    status=JobStatus.RUNNING,
-                )
-            )
+            self._checkpoint.save_job(stopped_job)
+            if budget_exceeded:
+                raise BudgetExceeded(job_id=job.id, cost_so_far=running_cost)
+            return stopped_job
 
         # All chunks processed (or all were already DONE).
         done_job = job.model_copy(
@@ -553,7 +689,6 @@ class TranslationOrchestrator:
         chunk: Chunk,
         config: JobConfig,
         glossary: Glossary | None = None,
-        summary: RollingSummary | None = None,
         narrator: NarratorFact | None = None,
     ) -> float:
         """Estimate the cost of translating a single chunk (pre-call budget GUARD only).
@@ -564,7 +699,7 @@ class TranslationOrchestrator:
         the budget guard requires it.
 
         Unlike the pre-flight CostEstimator, this runs mid-loop with the LIVE
-        glossary and summary in hand — the very objects that build the next
+        glossary and narrator in hand — the very objects that build the next
         prompt — so the dynamic block is measured exactly rather than budgeted.
         The projection therefore RISES as the glossary accumulates, which is
         when the real per-call cost rises too. A job may now pause partway
@@ -582,7 +717,6 @@ class TranslationOrchestrator:
         dynamic_tokens = self._provider.count_tokens(
             self._ctx.build_dynamic_block(
                 glossary if glossary is not None else Glossary(),
-                summary if summary is not None else RollingSummary(),
                 config.glossary_budget_tokens,
                 narrator=narrator,
             ),
@@ -620,6 +754,63 @@ class TranslationOrchestrator:
         # retry / tier-fallthrough waste factor so a chunk that could realistically
         # cost 2-3x its happy-path price does not silently blow the budget.
         return happy_path * _waste_factor(self._provider)
+
+    @contextmanager
+    def _saving_in_flight_on_error(
+        self,
+        job: Job,
+        in_flight: dict[Future, tuple[int, Chunk, float]],
+        spent: Callable[[], float],
+    ) -> Iterator[None]:
+        """Save every chunk still in flight when the run loop itself raises.
+
+        A worker's own exception is settled by the loop. This covers the
+        calling thread raising instead — Ctrl+C, a store write or a progress
+        callback failing — while other calls are running: they finish anyway
+        (the executor waits for them), so their paid translations are saved
+        rather than retried on resume, and the job is saved PAUSED with
+        *spent* (the run's cost so far) plus what those calls cost, so a
+        resume's budget guard starts from the real spend. Best-effort: a save
+        that fails here is logged and never masks the original exception.
+        """
+        try:
+            yield
+        except BaseException:
+            cost = spent()
+            for future, (_, chunk, _) in list(in_flight.items()):
+                try:
+                    # Bounded, like the run loop's wait: a second Ctrl+C
+                    # still gets through on Windows.
+                    while not future.done():
+                        wait([future], timeout=_WAIT_POLL_SECONDS)
+                    outcome = future.result()
+                    cost += outcome[2]
+                    self._checkpoint.save_chunk(job.id, _finished_chunk(chunk, outcome))
+                except Exception:
+                    logger.warning(
+                        "Could not save chunk %d of job %s after the run "
+                        "loop failed — it will be translated again on resume",
+                        chunk.index,
+                        job.id,
+                        exc_info=True,
+                    )
+            try:
+                self._checkpoint.save_job(
+                    job.model_copy(
+                        update={
+                            "status": JobStatus.PAUSED,
+                            "cost_usd": cost,
+                            "updated_at": datetime.now(UTC),
+                        }
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "Could not save the cost of job %s after the run loop failed",
+                    job.id,
+                    exc_info=True,
+                )
+            raise
 
     def _capture_corpus(
         self,

@@ -487,7 +487,6 @@ class TranslationUnit(BaseModel):
 
     translation: str = ""
     translations: list[str] | None = None
-    summary_update: str  # 3-5 sentences, REPLACES prior summary
     glossary_additions: list[GlossaryEntry] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -513,8 +512,9 @@ def translation_tool_schema(segment_count: int | None = None) -> dict[str, Any]:
     the cue-boundary contract instead of a typographic "\\n\\n" convention.
 
     Adapters (the only schema consumers) pass the result verbatim as the
-    tool/function parameter schema; pydantic-generated pieces (summary_update,
-    glossary_additions, $defs) are reused as-is.
+    tool/function parameter schema; pydantic-generated pieces
+    (glossary_additions, $defs) are reused as-is. There is no summary field:
+    the rolling summary was removed, so the model is not asked to write one.
     """
     schema = TranslationUnit.model_json_schema()
     props = schema["properties"]
@@ -531,7 +531,7 @@ def translation_tool_schema(segment_count: int | None = None) -> dict[str, Any]:
 
     if segment_count is None:
         props["translation"].pop("default", None)
-        schema["required"] = ["translation", "summary_update"]
+        schema["required"] = ["translation"]
         return schema
 
     props.pop("translation")
@@ -549,7 +549,7 @@ def translation_tool_schema(segment_count: int | None = None) -> dict[str, Any]:
         },
         **props,
     }
-    schema["required"] = ["translations", "summary_update"]
+    schema["required"] = ["translations"]
     return schema
 
 
@@ -745,6 +745,12 @@ class Progress(BaseModel):
     # "chunk 387/20 (1935%)". Defaults to 0 for callers that build a Progress
     # without one.
     position: int = 0
+    # How many of the run's chunks are finished (DONE or FAILED), already-DONE
+    # ones from an earlier run included. A parallel run finishes chunks out of
+    # order, so `position` jumps back and forth; `completed/total_chunks` only
+    # grows, which is what a progress bar needs. Equals `position` on a fresh
+    # sequential run.
+    completed: int = 0
     total_chunks: int
     cost_usd: float
     status: JobStatus

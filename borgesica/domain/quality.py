@@ -18,7 +18,6 @@ Design note (TranslationUnit-as-carrier):
     # its evaluation as a JSON object with the four QualityScore fields.  The model
     # serialises that JSON into the `translation` field of the returned TranslationUnit;
     # the harness then parses it with QualityScore.model_validate_json().
-    # The `summary_update` field carries a one-line rationale (ignored by the harness).
     #
     # This is intentional and DOES NOT modify the TranslationProvider Protocol, which
     # would ripple to AnthropicProvider and the upcoming OpenAICompatibleProvider.
@@ -126,7 +125,6 @@ Dimensions:
 Output ONLY a JSON object with these four keys and integer values — NO prose, NO markdown fences.
 Example: {"accuracy": 4, "fluency": 5, "neutral_register": 4, "glossary_consistency": 5}
 
-Use the `summary_update` field for a ONE-LINE rationale (required by the output schema).
 """.strip()
 
 _BACK_TRANSLATE_SYSTEM_PROMPT = """\

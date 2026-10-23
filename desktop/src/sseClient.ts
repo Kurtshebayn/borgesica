@@ -128,7 +128,7 @@ export function subscribeToJobEvents(
           dispatch({
             type: "PROGRESS_RECEIVED",
             progress: {
-              chunkIndex: job.completed_chunks,
+              completed: job.completed_chunks,
               totalChunks: job.total_chunks,
               costUsd: job.cost_usd,
             },
