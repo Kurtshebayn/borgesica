@@ -578,6 +578,13 @@ def _cmd_status(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         failed = engine.failed_chunk_indices(args.job_id)
         if failed:
             print(f"Failed chunks: {failed}")
+            errors = engine.failed_chunk_errors(args.job_id)
+            for index in failed:
+                label = f"  chunk {index}: "
+                messages = errors.get(index) or ["no reason recorded"]
+                print(label + messages[0])
+                for message in messages[1:]:
+                    print(" " * len(label) + message)
         return 0
     except JobNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

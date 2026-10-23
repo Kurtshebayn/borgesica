@@ -1019,6 +1019,7 @@ class TranslationOrchestrator:
                 # real usage on the exception — accrue it so the budget guard sees
                 # the true spend of failed chunks (previously charged $0).
                 total_call_cost += usage_cost(exc.usage, in_price, out_price, cache_price)
+                validation_issues.append(f"attempt {attempt + 1}: provider error ({exc})")
                 continue
 
             # Segmented contract: an aligned translations array becomes the

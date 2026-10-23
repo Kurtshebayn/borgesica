@@ -56,6 +56,9 @@ class JobResponse(BaseModel):
     best_effort_indices: list[int]
     failed_count: int
     failed_indices: list[int]
+    # Each FAILED chunk's validator messages (why it failed), keyed by index;
+    # [] when none were recorded.
+    failed_errors: dict[int, list[str]]
     # True once the explicit pre-translation glossary pass has run, so the
     # wizard can tell an empty glossary that was never extracted from one
     # that was.
@@ -66,9 +69,11 @@ def job_to_response(
     job: Job,
     best_effort_indices: list[int],
     failed_indices: list[int] | None = None,
+    failed_errors: dict[int, list[str]] | None = None,
 ) -> JobResponse:
     """Pure mapping from Job + best-effort/failed indices to JobResponse."""
     failed_indices = failed_indices or []
+    failed_errors = failed_errors or {}
     return JobResponse(
         id=job.id,
         status=job.status,
@@ -79,6 +84,7 @@ def job_to_response(
         best_effort_indices=best_effort_indices,
         failed_count=len(failed_indices),
         failed_indices=failed_indices,
+        failed_errors=failed_errors,
         glossary_extracted=job.glossary_extracted,
     )
 

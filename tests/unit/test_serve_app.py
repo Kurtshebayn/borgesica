@@ -184,6 +184,39 @@ def test_status_endpoint_reports_failed_chunks(tmp_path: Path) -> None:
     body = resp.json()
     assert body["failed_count"] == 1
     assert body["failed_indices"] == [failed_chunk.index]
+    # No messages recorded for this chunk: present, but empty.
+    assert body["failed_errors"] == {str(failed_chunk.index): []}
+
+
+def test_status_endpoint_reports_why_failed_chunks_failed(tmp_path: Path) -> None:
+    """The status payload carries each FAILED chunk's validator messages,
+    keyed by chunk index, so the desktop UI can say why a chunk failed."""
+    import json
+
+    engine, checkpoint = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path, num_cues=2)
+    client = _client(engine)
+
+    job_id = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"}).json()["id"]
+    reason = ["attempt 1: placeholder mismatch (missing ⟦1⟧)"]
+    chunk = checkpoint.load_chunks(job_id)[0].model_copy(
+        update={"status": ChunkStatus.FAILED, "validation_errors": json.dumps(reason)}
+    )
+    checkpoint.save_chunk(job_id, chunk)
+
+    body = client.get(f"/jobs/{job_id}").json()
+
+    assert body["failed_errors"] == {str(chunk.index): reason}
+
+
+def test_create_response_reports_no_failed_errors(tmp_path: Path) -> None:
+    engine, _ = _make_engine()
+    srt_path = _make_srt_fixture(tmp_path)
+    client = _client(engine)
+
+    body = client.post("/jobs", json={"source_path": srt_path, "model": "fake-model"}).json()
+
+    assert body["failed_errors"] == {}
 
 
 # ---------------------------------------------------------------------------

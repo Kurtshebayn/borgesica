@@ -901,6 +901,32 @@ def test_segment_mismatch_all_attempts_fails_chunk():
     assert "segment count mismatch" in (saved[0].validation_errors or "")
 
 
+def test_provider_errors_on_every_attempt_are_recorded_per_attempt():
+    """A chunk whose every call raises ends FAILED with one message per
+    attempt, not only the fallback's — a provider error on attempt 1 followed
+    by mismatches would otherwise vanish from the recorded reason."""
+    import json
+
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(fail_on={0, 1, 2, 3})
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+
+    run_job(orch, job, [Chunk(index=0, source_text="Hello.")], config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.FAILED
+    issues = json.loads(saved.validation_errors or "[]")
+    assert [issue.split(":")[0] for issue in issues] == [
+        "attempt 1",
+        "attempt 2",
+        "attempt 3",
+        "fallback",
+    ]
+    assert all("provider error (Malformed provider output" in i for i in issues)
+
+
 def test_segment_mismatch_pauses_job_by_default_and_resume_recovers():
     """Default config (continue_on_error=False): a chunk that never aligns
     PAUSES the job instead of finishing it with misplaced paragraphs, and a

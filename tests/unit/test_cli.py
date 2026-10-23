@@ -634,6 +634,7 @@ def test_cmd_status_lists_failed_chunks_when_present(capsys: pytest.CaptureFixtu
         engine = MagicMock()
         engine.status.return_value = MagicMock(model_dump_json=lambda **k: "{}")
         engine.failed_chunk_indices.return_value = [3]
+        engine.failed_chunk_errors.return_value = {3: []}
         mock_build.return_value = engine
 
         code = main(["status", "job-1"])
@@ -642,6 +643,37 @@ def test_cmd_status_lists_failed_chunks_when_present(capsys: pytest.CaptureFixtu
     assert code == 0
     assert "3" in out
     assert "Failed chunks" in out
+
+
+def test_cmd_status_prints_why_each_failed_chunk_failed(capsys: pytest.CaptureFixture) -> None:
+    """status prints each FAILED chunk's recorded validator messages under the
+    index list, and says so when a chunk has none recorded."""
+    from unittest.mock import MagicMock
+
+    from borgesica.__main__ import main
+
+    with patch("borgesica.__main__._build_engine") as mock_build:
+        engine = MagicMock()
+        engine.status.return_value = MagicMock(model_dump_json=lambda **k: "{}")
+        engine.failed_chunk_indices.return_value = [3, 7]
+        engine.failed_chunk_errors.return_value = {
+            3: [
+                "attempt 1: segment count mismatch (expected 2, got 3)",
+                "fallback: provider error (Provider error (HTTP 503))",
+            ],
+            7: [],
+        }
+        mock_build.return_value = engine
+
+        code = main(["status", "job-1"])
+
+    out, _ = capsys.readouterr()
+    assert code == 0
+    assert out.splitlines()[-3:] == [
+        "  chunk 3: attempt 1: segment count mismatch (expected 2, got 3)",
+        "           fallback: provider error (Provider error (HTTP 503))",
+        "  chunk 7: no reason recorded",
+    ]
 
 
 def test_cmd_status_no_failed_chunk_line_when_none(capsys: pytest.CaptureFixture) -> None:

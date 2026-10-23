@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     status          TEXT NOT NULL,
     meta_json       TEXT NOT NULL DEFAULT '{}',
     passed_validation INTEGER NOT NULL DEFAULT 1,
+    validation_errors TEXT,
     PRIMARY KEY (job_id, chunk_index)
 )
 """
@@ -126,6 +127,10 @@ CREATE TABLE IF NOT EXISTS narrators (
 # validated (design decision #8).
 _CHUNKS_MIGRATIONS = {
     "passed_validation": "INTEGER NOT NULL DEFAULT 1",
+    # Nullable with no default: NULL means "no validator messages recorded",
+    # which is the honest state for every row written before the column
+    # existed. A FAILED chunk keeps the reason it failed across processes.
+    "validation_errors": "TEXT",
 }
 
 _CREATE_GLOSSARY = """
@@ -406,18 +411,19 @@ class SQLiteCheckpointStore:
         sql = """
         INSERT INTO chunks (
             job_id, chunk_index, source_text, translated_text, status, meta_json,
-            passed_validation
+            passed_validation, validation_errors
         )
         VALUES (
             :job_id, :chunk_index, :source_text, :translated_text, :status, :meta_json,
-            :passed_validation
+            :passed_validation, :validation_errors
         )
         ON CONFLICT(job_id, chunk_index) DO UPDATE SET
             source_text=excluded.source_text,
             translated_text=excluded.translated_text,
             status=excluded.status,
             meta_json=excluded.meta_json,
-            passed_validation=excluded.passed_validation
+            passed_validation=excluded.passed_validation,
+            validation_errors=excluded.validation_errors
         """
         with self._connect() as conn:
             conn.execute(sql, {
@@ -428,6 +434,7 @@ class SQLiteCheckpointStore:
                 "status": str(chunk.status),
                 "meta_json": json.dumps(chunk.meta),
                 "passed_validation": 1 if chunk.passed_validation else 0,
+                "validation_errors": chunk.validation_errors,
             })
 
     def load_chunks(self, job_id: str) -> list[Chunk]:
@@ -443,6 +450,7 @@ class SQLiteCheckpointStore:
                 status=ChunkStatus(row["status"]),
                 meta=json.loads(row["meta_json"]),
                 passed_validation=bool(row["passed_validation"]),
+                validation_errors=row["validation_errors"],
             )
             for row in rows
         ]

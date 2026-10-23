@@ -157,6 +157,81 @@ class TestSQLiteCheckpointStore:
         finally:
             os.unlink(db_path)
 
+    # --- validation_errors round-trip: why a chunk ended FAILED or best-effort ---
+    def test_save_and_load_chunk_validation_errors(self):
+        """A FAILED chunk's validator messages survive the round-trip, so the
+        reason it failed is still known after the run that produced it."""
+        job = make_job()
+        self.store.save_job(job)
+        errors = '["attempt 1: segment count mismatch (expected 2, got 3)"]'
+        chunk = make_chunk(0).model_copy(
+            update={
+                "status": ChunkStatus.FAILED,
+                "passed_validation": False,
+                "validation_errors": errors,
+            }
+        )
+        self.store.save_chunk(job.id, chunk)
+        loaded = self.store.load_chunks(job.id)
+        assert loaded[0].validation_errors == errors
+
+    def test_save_and_load_chunk_validation_errors_none_by_default(self):
+        """A chunk saved without validation messages loads None, not ''."""
+        job = make_job()
+        self.store.save_job(job)
+        self.store.save_chunk(job.id, make_chunk(0))
+        assert self.store.load_chunks(job.id)[0].validation_errors is None
+
+    def test_migrates_existing_db_without_validation_errors_column(self):
+        """A jobs.db created before chunks.validation_errors existed still
+        opens: old rows load None (nothing was recorded) and new rows persist
+        their messages."""
+        import os
+        import sqlite3
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        old_chunks_ddl = """
+        CREATE TABLE chunks (
+            job_id          TEXT NOT NULL,
+            chunk_index     INTEGER NOT NULL,
+            source_text     TEXT NOT NULL,
+            translated_text TEXT,
+            status          TEXT NOT NULL,
+            meta_json       TEXT NOT NULL DEFAULT '{}',
+            passed_validation INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (job_id, chunk_index)
+        )
+        """
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(old_chunks_ddl)
+            conn.execute(
+                "INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
+                ("job-old", 0, "hello world", None, str(ChunkStatus.FAILED), "{}", 0),
+            )
+            conn.commit()
+            conn.close()
+
+            store = SQLiteCheckpointStore(db_path)
+            loaded = store.load_chunks("job-old")
+            assert len(loaded) == 1
+            assert loaded[0].status == ChunkStatus.FAILED
+            assert loaded[0].validation_errors is None
+
+            chunk = make_chunk(1).model_copy(
+                update={
+                    "status": ChunkStatus.FAILED,
+                    "validation_errors": '["fallback: provider error (x)"]',
+                }
+            )
+            store.save_chunk("job-old", chunk)
+            reloaded = {c.index: c for c in SQLiteCheckpointStore(db_path).load_chunks("job-old")}
+            assert reloaded[1].validation_errors == '["fallback: provider error (x)"]'
+        finally:
+            os.unlink(db_path)
+
     # --- Test 3: save_chunk twice with same (job_id, chunk.index) → exactly 1 row, no error ---
     def test_save_chunk_idempotent_no_duplicate(self):
         job = make_job()

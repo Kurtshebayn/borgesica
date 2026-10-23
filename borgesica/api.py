@@ -595,6 +595,29 @@ class TranslatorEngine:
         return sorted(c.index for c in chunks if c.status == ChunkStatus.FAILED)
 
     # ------------------------------------------------------------------
+    # failed_chunk_errors
+    # ------------------------------------------------------------------
+
+    def failed_chunk_errors(self, job_id: str) -> dict[int, list[str]]:
+        """Return each FAILED chunk's validator messages, keyed by index.
+
+        The messages are the ones ``_translate_with_retry`` collected across
+        every attempt (segment/placeholder mismatch, wrong script, provider
+        error), as persisted on the chunk. A FAILED chunk with none recorded
+        (a row written before they were persisted) maps to ``[]``.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        chunks = self._checkpoint.load_chunks(job_id)
+        return {
+            c.index: json.loads(c.validation_errors) if c.validation_errors else []
+            for c in sorted(chunks, key=lambda c: c.index)
+            if c.status == ChunkStatus.FAILED
+        }
+
+    # ------------------------------------------------------------------
     # best_effort_chunk_indices
     # ------------------------------------------------------------------
 
