@@ -511,3 +511,49 @@ def test_sequential_progress_completed_matches_the_chunks_finished():
     )
 
     assert [(p.position, p.completed) for p in events] == [(1, 1), (2, 2), (3, 3)]
+
+
+def test_sequential_run_saves_its_cost_paused_before_an_unexpected_error_surfaces():
+    """workers=1 (the CLI default) routes the provider call through the inline
+    executor: a bug in a call after some chunks were paid still leaves the job
+    PAUSED with that spend recorded, and the error still surfaces."""
+
+    def before(user: str) -> None:
+        if _chunk_of(user) == 2:
+            raise RuntimeError("a bug, not a provider failure")
+
+    provider = HookedProvider(before=before)
+    store = InMemoryCheckpointStore()
+    job = make_job(make_config(), total=4)
+
+    with pytest.raises(RuntimeError, match="a bug"):
+        _run(_orchestrator(provider, store), store, job, make_chunks(4), workers=1)
+
+    statuses = _statuses(store, job.id)
+    assert statuses[0] == statuses[1] == ChunkStatus.DONE
+    assert statuses[2] == statuses[3] == ChunkStatus.PENDING
+    assert [_chunk_of(u) for u in provider.started] == [0, 1, 2]
+    saved = store.load_job(job.id)
+    assert saved.status == JobStatus.PAUSED
+    assert saved.cost_usd == pytest.approx(_sequential_cost(make_chunks(2)))
+
+
+def test_sequential_run_saves_its_cost_paused_when_progress_raises():
+    def on_progress(p: Progress) -> None:
+        if p.chunk_index == 1:
+            raise RuntimeError("progress sink broke")
+
+    provider = FakeTranslationProvider()
+    store = InMemoryCheckpointStore()
+    job = make_job(make_config(), total=4)
+
+    with pytest.raises(RuntimeError, match="progress sink broke"):
+        _run(
+            _orchestrator(provider, store), store, job, make_chunks(4),
+            workers=1, on_progress=on_progress,
+        )
+
+    assert provider.call_count == 2
+    saved = store.load_job(job.id)
+    assert saved.status == JobStatus.PAUSED
+    assert saved.cost_usd == pytest.approx(_sequential_cost(make_chunks(2)))

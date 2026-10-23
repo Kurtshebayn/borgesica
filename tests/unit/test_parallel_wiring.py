@@ -96,27 +96,62 @@ def test_invalid_workers_env_var_is_an_error(
     mock_build.assert_not_called()
 
 
-def test_run_says_when_a_job_without_glossary_runs_one_chunk_at_a_time(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
-) -> None:
+def _cli_stderr(
+    argv: list[str],
+    *,
+    glossary_extracted: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> str:
     from borgesica.__main__ import main
 
     monkeypatch.delenv("BORGESICA_WORKERS", raising=False)
     with patch("borgesica.__main__._build_engine") as mock_build:
         engine = MagicMock()
         engine.status.return_value = MagicMock(
-            config=MagicMock(source_type="SRT"), glossary_extracted=False
+            config=MagicMock(source_type="SRT"), glossary_extracted=glossary_extracted
         )
         engine.run_job.return_value = MagicMock(status=JobStatus.DONE, cost_usd=0.0)
+        engine.resume_job.return_value = MagicMock(status=JobStatus.DONE, cost_usd=0.0)
         engine.failed_chunk_indices.return_value = []
         engine.best_effort_chunk_indices.return_value = []
         mock_build.return_value = engine
-        code = main(["run", "job-1", "--out", "o.srt", "--workers", "4"])
+        assert main(argv) == 0
+    return capsys.readouterr().err
 
-    assert code == 0
-    err = capsys.readouterr().err
+
+@pytest.mark.parametrize("command", ["run", "resume"])
+def test_cli_says_when_a_job_without_glossary_runs_one_chunk_at_a_time(
+    command: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    err = _cli_stderr(
+        [command, "job-1", "--out", "o.srt", "--workers", "4"],
+        glossary_extracted=False, monkeypatch=monkeypatch, capsys=capsys,
+    )
     assert "one chunk at a time" in err
     assert "borgesica glossary extract job-1" in err
+
+
+@pytest.mark.parametrize(
+    ("argv", "glossary_extracted"),
+    [
+        (["resume", "job-1", "--out", "o.srt", "--workers", "4"], True),
+        (["run", "job-1", "--out", "o.srt", "--workers", "4"], True),
+        (["resume", "job-1", "--out", "o.srt"], False),
+    ],
+)
+def test_cli_says_nothing_when_the_run_is_what_was_asked(
+    argv: list[str],
+    glossary_extracted: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A prepared glossary runs in parallel as asked, and a sequential run was
+    never asked to be parallel: neither gets the NOTE."""
+    err = _cli_stderr(
+        argv, glossary_extracted=glossary_extracted, monkeypatch=monkeypatch, capsys=capsys
+    )
+    assert "one chunk at a time" not in err
 
 
 # ---------------------------------------------------------------------------
