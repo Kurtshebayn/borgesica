@@ -22,6 +22,8 @@ const ESTIMATE = {
     usd: 0.1,
     usd_high: 0.2,
   },
+  book_usd_low: 0.6,
+  book_usd_high: 1.7,
 };
 
 const ENTRIES = [{ term: "Vis", translation: "Vis", locked: false, note: null }];
@@ -220,6 +222,7 @@ describe("subscribeToJobEvents", () => {
             job_id: "job-1",
             chunk_index: 0,
             position: 1,
+            completed: 1,
             total_chunks: 2,
             cost_usd: 0.1,
             status: "RUNNING",
@@ -239,7 +242,7 @@ describe("subscribeToJobEvents", () => {
     expect(dispatch.mock.calls.map(([action]) => action)).toEqual([
       {
         type: "PROGRESS_RECEIVED",
-        progress: { chunkIndex: 0, totalChunks: 2, costUsd: 0.1 },
+        progress: { completed: 1, totalChunks: 2, costUsd: 0.1 },
       },
       { type: "RUN_TERMINAL", status: "DONE", error: null, job: JOB },
     ]);

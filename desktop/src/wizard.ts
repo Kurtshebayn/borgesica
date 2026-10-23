@@ -78,7 +78,9 @@ export function providerRequiresKey(provider: Provider): boolean {
 }
 
 export interface ProgressInfo {
-  chunkIndex: number;
+  /** Chunks of the run finished so far, already-translated ones included.
+   * Only grows, even when a parallel run finishes chunks out of order. */
+  completed: number;
   totalChunks: number;
   costUsd: number;
 }
@@ -364,15 +366,30 @@ export function formatFailureSummary(
 }
 
 export function formatProgress(progress: ProgressInfo): string {
-  return `Fragmento ${progress.chunkIndex}/${progress.totalChunks} — $${progress.costUsd.toFixed(4)}`;
+  return `Fragmento ${progress.completed}/${progress.totalChunks} — $${progress.costUsd.toFixed(4)}`;
 }
 
-/** The estimate screen's glossary preparation line, shown apart from the
- * translation estimate: it is a separate paid step the user must start. */
+/** The estimate screen's headline: what translating the whole book costs,
+ * glossary preparation included while it is still ahead. */
+export function formatBookEstimate(estimate: EstimateResponse): string {
+  return (
+    `Costo estimado del libro: $${estimate.book_usd_low.toFixed(2)} – ` +
+    `$${estimate.book_usd_high.toFixed(2)}`
+  );
+}
+
+/** Shown beside the button that starts the glossary preparation, so a
+ * person knows that clicking it starts spending on the book. */
+export const START_TRANSLATION_NOTE =
+  "Traducir el libro empieza por preparar su glosario: es el primer paso pago. " +
+  "Después podrá revisarlo, y el texto se traduce cuando usted lo confirme.";
+
+/** The glossary's share of the book estimate. Preparing it is not optional:
+ * it is the first paid step of the translation. */
 export function formatGlossaryExtractionLine(estimate: GlossaryExtractionEstimate): string {
   const calls = estimate.batches === 1 ? "1 llamada" : `${estimate.batches} llamadas`;
   return (
-    `Preparación del glosario: $${estimate.usd.toFixed(2)} – ` +
+    `Incluye la preparación del glosario: $${estimate.usd.toFixed(2)} – ` +
     `$${estimate.usd_high.toFixed(2)}, ${calls}`
   );
 }
@@ -425,6 +442,10 @@ export interface SseProgressEvent {
   type: "progress";
   job_id: string;
   chunk_index: number;
+  /** The chunk's place in the run. Out of order on a parallel run. */
+  position: number;
+  /** Chunks of the run finished so far — what the progress bar follows. */
+  completed: number;
   total_chunks: number;
   cost_usd: number;
   status: string;
@@ -549,7 +570,7 @@ export function sseEventToAction(event: SseParsedEvent): WizardAction {
     return {
       type: "PROGRESS_RECEIVED",
       progress: {
-        chunkIndex: event.chunk_index,
+        completed: event.completed,
         totalChunks: event.total_chunks,
         costUsd: event.cost_usd,
       },
