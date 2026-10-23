@@ -90,11 +90,11 @@ class EstimateResponse(BaseModel):
     (``POST /jobs/{id}/glossary/extract``). Null when the pass cannot run: the
     job is not CREATED, or its glossary was already extracted.
 
-    ``book_usd_low``/``book_usd_high`` price the whole book: preparing the
-    glossary is its first paid step, so while that pass is still ahead they
-    are the translation plus the extraction, and the translation alone once it
-    is paid. ``within_budget`` checks ``book_usd_high`` against the job's
-    budget — the same budget both passes spend from at run time.
+    ``book_usd_low``/``book_usd_high`` price the whole book: what the job has
+    already spent (``cost_usd`` — a prepared glossary, an earlier partial run)
+    plus what is still ahead, the extraction included while it has not run.
+    ``within_budget`` checks ``book_usd_high`` against the job's budget — the
+    same budget both passes spend from, and where the run's guard starts.
     """
 
     input_tokens: int

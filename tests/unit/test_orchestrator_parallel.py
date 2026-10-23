@@ -100,6 +100,14 @@ def _run(
     )
 
 
+def _sequential_cost(chunks: list[Chunk]) -> float:
+    """What translating *chunks* costs on a clean sequential run."""
+    provider = FakeTranslationProvider()
+    store = InMemoryCheckpointStore()
+    job = make_job(make_config(), total=len(chunks))
+    return _run(_orchestrator(provider, store), store, job, chunks, workers=1).cost_usd
+
+
 def _chunk_of(user: str) -> int:
     """The chunk index a fake prompt belongs to ("Chunk {i} text.")."""
     return int(user.split()[1])
@@ -365,6 +373,11 @@ def test_unexpected_error_saves_in_flight_chunks_then_propagates():
     assert statuses[1] == ChunkStatus.DONE
     assert statuses[0] == ChunkStatus.PENDING
     assert sorted({_chunk_of(u) for u in provider.started}) == [0, 1]
+    # The drained chunk's call is paid: the saved job carries its cost, so a
+    # resume's budget guard starts from the real spend.
+    saved = store.load_job(job.id)
+    assert saved.status == JobStatus.PAUSED
+    assert saved.cost_usd == pytest.approx(_sequential_cost(make_chunks(2)[1:]))
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +474,9 @@ def test_an_error_on_the_calling_thread_still_saves_the_chunks_in_flight():
     assert statuses[0] == statuses[1] == ChunkStatus.DONE
     assert statuses[2] == statuses[3] == ChunkStatus.PENDING
     assert sorted({_chunk_of(u) for u in provider.started}) == [0, 1]
+    saved = store.load_job(job.id)
+    assert saved.status == JobStatus.PAUSED
+    assert saved.cost_usd == pytest.approx(_sequential_cost(make_chunks(2)))
 
 
 def test_progress_completed_counts_finished_chunks_monotonically():

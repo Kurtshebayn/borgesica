@@ -444,7 +444,9 @@ class TranslationOrchestrator:
             if workers > 1
             else _InlineExecutor()
         )
-        with executor, self._saving_in_flight_on_error(job.id, in_flight):
+        with executor, self._saving_in_flight_on_error(
+            job, in_flight, spent=lambda: running_cost
+        ):
             while True:
                 # Start chunks while a worker is free and nothing asked to stop.
                 while (
@@ -642,6 +644,18 @@ class TranslationOrchestrator:
                     )
 
         if error is not None:
+            # Persist what was paid — the chunks drained after the error
+            # included — so a resume's budget guard starts from the real
+            # spend, and the job is never left RUNNING.
+            self._checkpoint.save_job(
+                job.model_copy(
+                    update={
+                        "status": JobStatus.PAUSED,
+                        "cost_usd": running_cost,
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
+            )
             raise error
 
         if stop is not None:
@@ -745,7 +759,10 @@ class TranslationOrchestrator:
 
     @contextmanager
     def _saving_in_flight_on_error(
-        self, job_id: str, in_flight: dict[Future, tuple[int, Chunk, float]]
+        self,
+        job: Job,
+        in_flight: dict[Future, tuple[int, Chunk, float]],
+        spent: Callable[[], float],
     ) -> Iterator[None]:
         """Save every chunk still in flight when the run loop itself raises.
 
@@ -753,25 +770,48 @@ class TranslationOrchestrator:
         calling thread raising instead — Ctrl+C, a store write or a progress
         callback failing — while other calls are running: they finish anyway
         (the executor waits for them), so their paid translations are saved
-        rather than retried on resume. Best-effort: a save that fails here is
-        logged and never masks the original exception.
+        rather than retried on resume, and the job is saved PAUSED with
+        *spent* (the run's cost so far) plus what those calls cost, so a
+        resume's budget guard starts from the real spend. Best-effort: a save
+        that fails here is logged and never masks the original exception.
         """
         try:
             yield
         except BaseException:
+            cost = spent()
             for future, (_, chunk, _) in list(in_flight.items()):
                 try:
-                    self._checkpoint.save_chunk(
-                        job_id, _finished_chunk(chunk, future.result())
-                    )
+                    # Bounded, like the run loop's wait: a second Ctrl+C
+                    # still gets through on Windows.
+                    while not future.done():
+                        wait([future], timeout=_WAIT_POLL_SECONDS)
+                    outcome = future.result()
+                    cost += outcome[2]
+                    self._checkpoint.save_chunk(job.id, _finished_chunk(chunk, outcome))
                 except Exception:
                     logger.warning(
                         "Could not save chunk %d of job %s after the run "
                         "loop failed — it will be translated again on resume",
                         chunk.index,
-                        job_id,
+                        job.id,
                         exc_info=True,
                     )
+            try:
+                self._checkpoint.save_job(
+                    job.model_copy(
+                        update={
+                            "status": JobStatus.PAUSED,
+                            "cost_usd": cost,
+                            "updated_at": datetime.now(UTC),
+                        }
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "Could not save the cost of job %s after the run loop failed",
+                    job.id,
+                    exc_info=True,
+                )
             raise
 
     def _capture_corpus(

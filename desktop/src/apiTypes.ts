@@ -157,8 +157,9 @@ export interface EstimateResponse {
   /** Null when the pass cannot run: the job is not CREATED, or its glossary
    * was already extracted. */
   glossary_extraction: GlossaryExtractionEstimate | null;
-  /** The whole book: the translation plus the glossary preparation while it
-   * is still ahead. `within_budget` checks `book_usd_high`. */
+  /** The whole book: what the job already spent plus the translation, and the
+   * glossary preparation while it is still ahead. `within_budget` checks
+   * `book_usd_high`. */
   book_usd_low: number;
   book_usd_high: number;
 }
