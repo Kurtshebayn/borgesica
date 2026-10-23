@@ -250,16 +250,19 @@ def test_budget_reserves_in_flight_projections_before_starting_a_chunk():
     store = InMemoryCheckpointStore()
     orch = _orchestrator(provider, store)
     projected = _projection(orch, make_job(make_config(), total=1))
-    # Every chunk's real cost is far below its projection (the projection
-    # carries the retry-waste factor), so the budget fits all four calls
-    # made one at a time, but never two projections at once.
-    job = make_job(make_config(budget_usd=projected * 1.9), total=4)
+    # Every chunk's real cost is below its projection (the projection carries
+    # the retry-waste factor): room for the third projection after two paid
+    # calls fits all three made one at a time, but never two projections at once.
+    paid = _sequential_cost(make_chunks(1))
+    budget = 2 * paid + projected
+    assert budget < 2 * projected, "precondition: two projections must not fit"
+    job = make_job(make_config(budget_usd=budget), total=3)
 
-    result = _run(orch, store, job, make_chunks(4), workers=4)
+    result = _run(orch, store, job, make_chunks(3), workers=3)
 
     assert result.status == JobStatus.DONE
     assert provider.max_in_flight == 1
-    assert provider.call_count == 4
+    assert provider.call_count == 3
     assert result.cost_usd <= job.config.budget_usd
 
 

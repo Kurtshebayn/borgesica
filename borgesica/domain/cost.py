@@ -42,11 +42,6 @@ from borgesica.domain.ports import TranslationProvider
 if TYPE_CHECKING:
     from borgesica.domain.context import ContextManager
 
-# Allowance, in WORDS, for the `summary_update` the model still EMITS on every
-# call, used only for the output CEILING. No prompt carries it back any more
-# (the rolling summary was removed 2026-10-22), so the input side prices none.
-_SUMMARY_BUDGET_WORDS = 200
-
 # Filler token used to price a WORD budget. Glossary budgets are expressed in
 # words (Glossary.render counts len(line.split())) but cost math needs tokens,
 # so a budget of N words is priced by asking the provider to count N words.
@@ -99,31 +94,24 @@ _OUTPUT_EXPANSION_HIGH = 1.48
 _SRT_OUTPUT_EXPANSION = 1.32
 _SRT_OUTPUT_EXPANSION_HIGH = 1.51
 
-# Output tokens BEYOND the translation itself: the provider returns the full
-# JSON envelope — summary_update (3-5 sentences) + glossary_additions + keys.
+# Output tokens BEYOND the translation itself: the JSON envelope —
+# glossary_additions plus the keys, braces and escaping.
 #
-# This was 150, which contradicted _SUMMARY_BUDGET_WORDS in this same file: the
-# SAME rolling summary was priced at 200 WORDS on the input side but expected
-# to fit in 150 TOKENS on the output side, alongside glossary_additions and
-# every JSON key. At the calibrated Spanish rate those 200 words are ~342
-# tokens on their own. Measured on the 20 calls above: 260 median, 271 mean,
-# 351 p90 (summary ~215, JSON scaffolding ~45).
-_OUTPUT_ENVELOPE_TOKENS = 260
+# Measured on the 20 calls above: the envelope was 260 median, 271 mean,
+# 351 p90, of which the rolling summary_update was ~215 and the JSON
+# scaffolding ~45. The summary is no longer requested (removed 2026-10-23,
+# a day after it stopped being read back), so the envelope is the scaffolding
+# that was measured alongside it. It prices BOTH bounds: no uncalibrated
+# headroom is invented for the ceiling, whose band now comes from the p90
+# expansion and the retry-waste factor. Re-measure it on the next
+# instrumented run (see cost instrumentation in project memory).
+_OUTPUT_ENVELOPE_TOKENS = 45
 
-# The non-summary part of the envelope: glossary_additions plus the JSON keys,
-# braces, and escaping. Split out from _OUTPUT_ENVELOPE_TOKENS so the CEILING
-# can price the summary through _word_budget_tokens at the same
-# _SUMMARY_BUDGET_WORDS the input block already uses, instead of restating that
-# budget as a second invented token constant — the exact mistake that produced
-# the 150-vs-200 contradiction above.
-_OUTPUT_JSON_SCAFFOLDING_TOKENS = 45
-
-# SRT counterparts of the two constants above, measured on the same 20
-# cue-batch calls. The scaffolding is double prose's because a `translations`
-# array of 25 strings pays brackets, quotes and commas 25 times over, where
-# prose pays them once around a single blob.
-_SRT_OUTPUT_ENVELOPE_TOKENS = 310
-_SRT_OUTPUT_JSON_SCAFFOLDING_TOKENS = 89
+# SRT counterpart, measured on the same 20 cue-batch calls (310 median with
+# the summary, 89 without it). Double prose's because a `translations` array
+# of 25 strings pays brackets, quotes and commas 25 times over, where prose
+# pays them once around a single blob.
+_SRT_OUTPUT_ENVELOPE_TOKENS = 89
 
 
 class _OutputModel(NamedTuple):
@@ -137,20 +125,17 @@ class _OutputModel(NamedTuple):
     expansion: float
     expansion_high: float
     envelope: int
-    json_scaffolding: int
 
 
 _PROSE_OUTPUT_MODEL = _OutputModel(
     expansion=_OUTPUT_EXPANSION,
     expansion_high=_OUTPUT_EXPANSION_HIGH,
     envelope=_OUTPUT_ENVELOPE_TOKENS,
-    json_scaffolding=_OUTPUT_JSON_SCAFFOLDING_TOKENS,
 )
 _SRT_OUTPUT_MODEL = _OutputModel(
     expansion=_SRT_OUTPUT_EXPANSION,
     expansion_high=_SRT_OUTPUT_EXPANSION_HIGH,
     envelope=_SRT_OUTPUT_ENVELOPE_TOKENS,
-    json_scaffolding=_SRT_OUTPUT_JSON_SCAFFOLDING_TOKENS,
 )
 
 
@@ -344,8 +329,8 @@ class CostEstimator:
           usd_low  — the dynamic block the job has RIGHT NOW (empty on a fresh
                      job, the accumulated glossary on a resumed one).
           usd_high — a full `config.glossary_budget_tokens` glossary on every
-                     call, the p90 output expansion, and a full-budget
-                     summary_update EMITTED, times the retry-waste factor.
+                     call and the p90 output expansion, times the retry-waste
+                     factor.
 
         The band is therefore genuinely wide on a fresh job. That is honest:
         the floor is what the first chunk costs, the ceiling is what the last
@@ -439,13 +424,7 @@ class CostEstimator:
         total_input_high = 0
         total_output = 0
         total_output_high = 0
-        # Ceiling allowance for the summary_update the model EMITS, priced
-        # through the same word-budget helper the glossary uses.
         out_model = output_model(config.source_type)
-        output_envelope_high = (
-            _word_budget_tokens(self._provider, _SUMMARY_BUDGET_WORDS, config.model)
-            + out_model.json_scaffolding
-        )
         # Input tokens the provider can serve from its prompt cache on the
         # happy path. Caching matches the longest common PREFIX of a request,
         # and only two parts of a call are invariant across a whole job: the
@@ -467,15 +446,11 @@ class CostEstimator:
                 chunk_output = chunk_output_high = output_tokens_per_chunk
             else:
                 chunk_output = chunk_output_tokens(chunk_input, config.source_type)
+                # Same measured envelope as the floor; the p90 expansion is
+                # what widens the band, so it can never invert.
                 chunk_output_high = (
-                    round(chunk_input * out_model.expansion_high) + output_envelope_high
+                    round(chunk_input * out_model.expansion_high) + out_model.envelope
                 )
-                # The ceiling envelope is a WORD budget converted by the
-                # provider's own counter, while the floor is a measured TOKEN
-                # constant; a provider whose counter reads low enough can price
-                # the 200-word budget under the measured floor and invert the
-                # band. Same guard, same reason, as dynamic_low above.
-                chunk_output_high = max(chunk_output_high, chunk_output)
             # The tool schema is per-call input overhead like the system prompt,
             # so it is gated on context_manager presence (bare token-math mode
             # counts neither — same backward-compat contract as `cached`).

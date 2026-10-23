@@ -87,7 +87,6 @@ across a long document.
 Return your response as a JSON object with EXACTLY the following fields:
   {
     "translation": \"""" + _EXTRACTION_PLACEHOLDER + """\",
-    "summary_update": "Terminology extraction complete.",
     "glossary_additions": [
       {"term": "<source term>", "translation": "<Spanish rendering, or the \
 term itself when it must not be translated>", "locked": false, \

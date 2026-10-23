@@ -113,7 +113,7 @@ def _translation_tool(segment_count: int | None = None) -> list[dict[str, Any]]:
             "name": _TOOL_NAME,
             "description": (
                 "Submit the structured translation result. "
-                "Use this tool to return the translation, a summary update, "
+                "Use this tool to return the translation "
                 "and any new glossary terms discovered."
             ),
             "input_schema": translation_tool_schema(segment_count),

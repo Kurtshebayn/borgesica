@@ -153,7 +153,6 @@ suggest removing it in your critique. Judge the surrounding prose only.
 Return a JSON object:
   {{
     "translation": "<your critique notes, NOT the translation>",
-    "summary_update": "Critique complete.",
     "glossary_additions": []
   }}"""
 
@@ -168,7 +167,6 @@ the critique while remaining faithful to the source.
 Return a JSON object:
   {{
     "translation": "<revised translation>",
-    "summary_update": "<3-5 sentence narrative summary — REPLACES prior summary>",
     "glossary_additions": []
   }}"""
 

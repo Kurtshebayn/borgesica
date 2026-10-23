@@ -152,8 +152,9 @@ def test_tool_schema_default_requires_translation_string() -> None:
     schema = translation_tool_schema()
     assert "translation" in schema["properties"]
     assert "translations" not in schema["properties"]
-    assert "translation" in schema["required"]
-    assert "summary_update" in schema["required"]
+    assert schema["required"] == ["translation"]
+    # No rolling summary any more: nothing asks the model to write one.
+    assert "summary_update" not in schema["properties"]
 
 
 def test_tool_schema_segmented_requires_exact_array() -> None:
@@ -169,8 +170,8 @@ def test_tool_schema_segmented_requires_exact_array() -> None:
     assert arr["items"] == {"type": "string"}
     assert arr["minItems"] == 25
     assert arr["maxItems"] == 25
-    assert "translations" in schema["required"]
-    assert "summary_update" in schema["required"]
+    assert schema["required"] == ["translations"]
+    assert "summary_update" not in props
 
 
 def test_tool_schema_segmented_validates_against_unit() -> None:

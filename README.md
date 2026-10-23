@@ -20,10 +20,11 @@ borgésica lo resuelve con tres mecanismos coordinados:
 
 - **Chunking que respeta unidades naturales** — los subtítulos nunca se parten; la prosa se corta en límites de párrafo y capítulo.
 - **Glosario** — traducciones fijas para nombres propios y términos recurrentes, inyectadas en cada chunk. El usuario revisa y aprueba el glosario *antes* de traducir.
-- **Resumen rodante** — un registro compacto de tono, registro y trama que acompaña cada chunk, para que la voz no derive a lo largo de la obra.
+- **Narrador por capítulo** — quien dice «yo» en cada capítulo (nombre y género), fijado por una persona en la revisión, para que la concordancia del narrador no se invente fragmento a fragmento.
 
 Además:
 
+- **Traducción en paralelo** — con el glosario ya preparado, varios fragmentos se traducen a la vez (8 por defecto en la app), sin pasar el presupuesto: en una prueba con 24 fragmentos, 83 s contra 451 s de a uno, al mismo costo.
 - **Reanudable** — checkpointing en SQLite: si el trabajo se corta en la página 300 de 400, se reanuda sin re-traducir (ni re-pagar) lo ya hecho.
 - **Estimación de costo previa** — el costo se conoce antes de gastar un centavo, con tope de presupuesto configurable.
 - **Round-trip fiel** — un EPUB entra y un EPUB válido sale, con capítulos, formato e imágenes intactos, listo para Send to Kindle. Un SRT conserva tiempos, índices y etiquetas.
@@ -39,7 +40,7 @@ El motor funciona de punta a punta y hoy tiene dos formas de usarlo: una **CLI**
 | Libros EPUB → EPUB | ✅ Funcional (incluye tabla de contenidos traducida) |
 | Libros PDF | ✅ Funcional (PDFs digitales, sin OCR) |
 | Providers: Anthropic, OpenAI-compatible (DeepSeek, OpenRouter…), Ollama (local) | ✅ |
-| Glosario + resumen rodante | ✅ |
+| Glosario + narrador por capítulo | ✅ |
 | Checkpointing y reanudación | ✅ |
 | CLI | ✅ Funcional |
 | API HTTP local (`serve`, FastAPI, autenticada por token de sesión) | ✅ Funcional |
@@ -123,7 +124,7 @@ python -m borgesica create libro.epub --model deepseek-v4-flash --extract 20 --f
 
 ## Arquitectura
 
-Motor primero, UI después. El núcleo es una arquitectura hexagonal: el dominio (chunking, glosario, resumen rodante, orquestación, costos) no conoce ningún proveedor ni formato concreto — todo entra y sale por puertos (`DocumentReader`, `DocumentWriter`, `TranslationProvider`, `Checkpoint`) con adaptadores intercambiables. La API pública es `TranslatorEngine`. La CLI, la API HTTP y la app de escritorio son tres formas distintas de llegar al mismo motor.
+Motor primero, UI después. El núcleo es una arquitectura hexagonal: el dominio (chunking, glosario, narradores, orquestación, costos) no conoce ningún proveedor ni formato concreto — todo entra y sale por puertos (`DocumentReader`, `DocumentWriter`, `TranslationProvider`, `Checkpoint`) con adaptadores intercambiables. La API pública es `TranslatorEngine`. La CLI, la API HTTP y la app de escritorio son tres formas distintas de llegar al mismo motor.
 
 ```
 borgesica/
