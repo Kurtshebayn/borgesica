@@ -358,6 +358,20 @@ def test_system_prompt_contains_tag_preservation_instruction():
     )
 
 
+def test_system_prompt_explains_standalone_markers_have_no_close():
+    """Page-break markers reach the model as a lone ⟦N⟧ with no ⟦/N⟧. The
+    rules used to say every marker's close must appear exactly once, which
+    told the model to invent one; they must now say a lone marker stays lone
+    and stays at its point in the sentence."""
+    from borgesica.domain.context import ContextManager
+
+    text = ContextManager().build_system_prompt(make_config(), Glossary()).text
+
+    assert "stands alone" in text
+    assert "never add a closing marker" in text
+    assert "its matching close (⟦/N⟧) must also appear exactly once" not in text
+
+
 def test_system_prompt_instructs_placeholders_kept_verbatim():
     """M2-1 (placeholder rework): the static block no longer describes raw
     HTML-like tags — it describes the numbered placeholder markers the

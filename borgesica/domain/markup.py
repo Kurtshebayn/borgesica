@@ -246,8 +246,9 @@ def validate_segments(original: str, translated: str) -> bool:
 # that set: they pass through the text verbatim and never enter the registry.
 # A SELF-CLOSING span/a (EPUB pagebreak markers: <span epub:type="pagebreak"
 # .../>) does match, so it becomes a single standalone "⟦N⟧" registered with
-# an empty close; validate_placeholders expects exactly one open and no close
-# for every empty-close id, and restore_tags puts the original tag back.
+# an empty close; validate_placeholders expects exactly one open and at most
+# one close for every empty-close id, and restore_tags puts the original tag
+# back (an invented close restores to its empty registered close).
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_OPEN_RE = re.compile(r"⟦(\d+)⟧")
@@ -390,7 +391,10 @@ def validate_placeholders(
     expected_ids = set(registry.keys())
     # Ids registered with an empty close (self-closing tags, or an opening
     # tag the source never closed) are emitted by tokenize_tags as a single
-    # standalone "⟦N⟧": expect exactly one open and no close.
+    # standalone "⟦N⟧": expect exactly one open. A single invented "⟦/N⟧" is
+    # tolerated — models given a lone marker often close it, the open still
+    # says where the tag goes, and restore_tags turns that close into the
+    # empty string it was registered with. It is ignored for nesting.
     standalone_ids = {tag_id for tag_id, (_, close) in registry.items() if not close}
 
     open_counts: dict[int, int] = {}
@@ -403,8 +407,13 @@ def validate_placeholders(
     for tag_id in sorted(expected_ids):
         opens = open_counts.get(tag_id, 0)
         closes = close_counts.get(tag_id, 0)
-        expected_closes = 0 if tag_id in standalone_ids else 1
-        if opens != 1 or closes != expected_closes:
+        if tag_id in standalone_ids:
+            expected_closes = 0
+            closes_ok = closes <= 1
+        else:
+            expected_closes = 1
+            closes_ok = closes == 1
+        if opens != 1 or not closes_ok:
             multiset_ok = False
             issues.append(
                 f"placeholder {tag_id}: expected exactly 1 open + "
@@ -421,9 +430,10 @@ def validate_placeholders(
     nesting_ok = True
     stack: list[int] = []
     for tag_id, is_close in events:
+        if tag_id in standalone_ids:
+            continue
         if not is_close:
-            if tag_id not in standalone_ids:
-                stack.append(tag_id)
+            stack.append(tag_id)
             continue
         if stack and stack[-1] == tag_id:
             stack.pop()
