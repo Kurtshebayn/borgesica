@@ -17,6 +17,7 @@ exercises the full handshake, so a regression in either gap fails here.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -51,6 +52,8 @@ def _read_ready_port(proc: subprocess.Popen[str]) -> int:
 
 @pytest.mark.integration
 def test_serve_sidecar_handshake(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
     proc = subprocess.Popen(
         [sys.executable, "-m", "borgesica", "serve", "--port", "0", "--key-stdin"],
         stdin=subprocess.PIPE,
@@ -59,7 +62,13 @@ def test_serve_sidecar_handshake(tmp_path: Path) -> None:
         # child once the OS buffer fills (the RES-003 failure mode). We assert
         # nothing on stderr, so DEVNULL is both safe and correct.
         stderr=subprocess.DEVNULL,
-        cwd=tmp_path,  # keep jobs.db/corpus.db out of the repo
+        # serve has no db-path option: _build_engine always opens
+        # Path.home()/.borgesica/jobs.db (and corpus.db beside it), whatever
+        # the cwd. Point the child's home at a temp dir, or every test run
+        # opens and migrates the user's real job DB. Windows' Path.home()
+        # reads USERPROFILE; POSIX reads HOME.
+        env={**os.environ, "USERPROFILE": str(home), "HOME": str(home)},
+        cwd=tmp_path,
         text=True,
         bufsize=1,
     )
@@ -95,6 +104,11 @@ def test_serve_sidecar_handshake(tmp_path: Path) -> None:
         )
         with urllib.request.urlopen(shutdown, timeout=5) as resp:
             assert resp.status == 200
+
+        # The checkpoint DB landed in the sentinel home, so the child never
+        # opened (or migrated) the user's real ~/.borgesica/jobs.db.
+        assert (home / ".borgesica" / "jobs.db").is_file()
+        assert not (tmp_path / "jobs.db").exists()
     finally:
         proc.terminate()
         try:
