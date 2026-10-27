@@ -164,14 +164,24 @@ def usage_cost(
     DeepSeek bill 2.04x, and because this figure is what the budget guard
     accrues, a job with ``budget_usd`` set would raise BudgetExceeded at
     roughly half the budget it had actually spent.
+
+    ``cache_write_input_tokens`` is the subset written to the cache, billed at
+    ``_CACHE_WRITE_MULTIPLIER`` times ``in_price``. Only Anthropic reports
+    writes; every other provider leaves the field at 0 and prices as before.
     """
     cached = min(usage.cached_input_tokens, usage.input_tokens)
-    missed = usage.input_tokens - cached
+    written = min(usage.cache_write_input_tokens, usage.input_tokens - cached)
+    missed = usage.input_tokens - cached - written
     return (
         missed / 1_000_000 * in_price
+        + written / 1_000_000 * in_price * _CACHE_WRITE_MULTIPLIER
         + cached / 1_000_000 * cache_price
         + usage.output_tokens / 1_000_000 * out_price
     )
+
+
+# Anthropic's published rate for a 5-minute (default TTL) cache write.
+_CACHE_WRITE_MULTIPLIER = 1.25
 
 
 # Output tokens per SOURCE token of one glossary-extraction call. Measured on
@@ -193,8 +203,9 @@ _FAST_PASSES = 1
 # Anthropic will not cache a prompt prefix below this many tokens. Only the
 # static block is a caching candidate (it is identical for every chunk of a
 # job); the narrator and glossary change per chunk. Used solely to fill
-# the informational CostEstimate.cached — no adapter applies prompt caching, so
-# nothing behavioural depends on this number.
+# the informational CostEstimate.cached. The Anthropic adapter caches the whole
+# system prompt and reports real reads and writes in Usage, so nothing
+# behavioural depends on this number.
 _ANTHROPIC_CACHE_MIN_TOKENS = 1024
 
 # Retry-waste ceiling: the point estimate models the HAPPY PATH (1 billed call

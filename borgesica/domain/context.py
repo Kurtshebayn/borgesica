@@ -38,8 +38,8 @@ class SystemPrompt:
 
     Previously also carried a ``cached`` hint — True when the static block met
     Anthropic's 1024-token prompt-cache minimum. No adapter ever read it
-    (``translate`` takes ``system`` as a plain string and nothing sets
-    ``cache_control``), so computing it spent a ``count_tokens`` call per chunk
+    (the Anthropic adapter now caches the whole system prompt without asking),
+    so computing it spent a ``count_tokens`` call per chunk
     on a boolean nobody looked at. ``CostEstimate.cached`` is a different field
     and still exists: that one is shown to the user by ``estimate``.
     """
