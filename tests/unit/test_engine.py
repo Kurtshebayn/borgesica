@@ -739,6 +739,49 @@ def test_failed_chunk_indices_returns_sorted_failed_indices(tmp_path: Path) -> N
     assert engine.failed_chunk_indices(job.id) == [2, 5]
 
 
+def test_failed_chunk_errors_maps_failed_indices_to_their_messages() -> None:
+    """failed_chunk_errors returns each FAILED chunk's decoded validator
+    messages, [] for a FAILED chunk with none recorded (rows written before
+    they were persisted), and leaves DONE chunks out."""
+    import json
+
+    checkpoint = InMemoryCheckpointStore()
+    engine, _, _ = _make_engine(checkpoint=checkpoint)
+    job = Job(
+        id="job-errors",
+        config=_make_config(),
+        source_path="x.srt",
+        status=JobStatus.DONE,
+        total_chunks=3,
+        completed_chunks=3,
+        cost_usd=0.0,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    checkpoint.save_job(job)
+    reason = ["attempt 1: segment count mismatch (expected 2, got 3)"]
+    for chunk in [
+        Chunk(index=0, source_text="a", status=ChunkStatus.DONE, translated_text="a"),
+        Chunk(
+            index=1,
+            source_text="b",
+            status=ChunkStatus.FAILED,
+            passed_validation=False,
+            validation_errors=json.dumps(reason),
+        ),
+        Chunk(index=2, source_text="c", status=ChunkStatus.FAILED),
+    ]:
+        checkpoint.save_chunk(job.id, chunk)
+
+    assert engine.failed_chunk_errors(job.id) == {1: reason, 2: []}
+
+
+def test_failed_chunk_errors_raises_for_unknown_job_id() -> None:
+    engine, _, _ = _make_engine()
+    with pytest.raises(JobNotFoundError):
+        engine.failed_chunk_errors("unknown-id")
+
+
 def test_failed_chunk_indices_raises_for_unknown_job_id() -> None:
     """failed_chunk_indices raises JobNotFoundError for an unknown job_id."""
     engine, _, _ = _make_engine()

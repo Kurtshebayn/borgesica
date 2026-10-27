@@ -581,13 +581,46 @@ def test_self_closing_span_translation_keeping_its_single_marker_is_valid() -> N
     )
 
 
-def test_self_closing_span_marker_dropped_or_closed_is_invalid() -> None:
+def test_self_closing_span_marker_dropped_is_invalid() -> None:
     source = f"{_PAGEBREAK}Chapter one."
     placeholder_text, registry = tokenize_tags(source)
     dropped = validate_placeholders(placeholder_text, "Capitulo uno.", registry)
     assert dropped.valid is False
-    closed = validate_placeholders(placeholder_text, "⟦1⟧Capitulo uno.⟦/1⟧", registry)
-    assert closed.valid is False
+
+
+@pytest.mark.parametrize(
+    "translated",
+    ["⟦1⟧⟦/1⟧Capitulo uno.", "⟦1⟧Capitulo uno.⟦/1⟧"],
+    ids=["empty-close", "close-around-text"],
+)
+def test_self_closing_span_marker_given_one_invented_close_is_valid(translated: str) -> None:
+    """A real run on DeepSeek: 10 of 23 page-break rejections were the model
+    adding a ⟦/N⟧ to a standalone marker. The open marker still says where
+    the page break goes, and restore_tags drops the invented close (its
+    registered close is empty), so the output restores to the original tag."""
+    source = f"{_PAGEBREAK}Chapter one."
+    placeholder_text, registry = tokenize_tags(source)
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is True, result.issues
+    assert restore_tags(translated, registry) == f"{_PAGEBREAK}Capitulo uno."
+
+
+def test_self_closing_span_marker_closed_twice_is_invalid() -> None:
+    source = f"{_PAGEBREAK}Chapter one."
+    placeholder_text, registry = tokenize_tags(source)
+    twice = validate_placeholders(placeholder_text, "⟦1⟧⟦/1⟧Capitulo⟦/1⟧ uno.", registry)
+    assert twice.valid is False
+
+
+def test_invented_close_of_a_nested_standalone_does_not_break_the_outer_pair() -> None:
+    source = f'<span class="a">before {_PAGEBREAK}after</span> tail'
+    placeholder_text, registry = tokenize_tags(source)
+    translated = "⟦1⟧antes ⟦2⟧después⟦/2⟧⟦/1⟧ cola"
+    result = validate_placeholders(placeholder_text, translated, registry)
+    assert result.valid is True, result.issues
+    assert restore_tags(translated, registry) == (
+        f'<span class="a">antes {_PAGEBREAK}después</span> cola'
+    )
 
 
 def test_self_closing_span_nested_in_span_does_not_steal_the_outer_close() -> None:

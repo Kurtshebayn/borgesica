@@ -901,6 +901,108 @@ def test_segment_mismatch_all_attempts_fails_chunk():
     assert "segment count mismatch" in (saved[0].validation_errors or "")
 
 
+def test_provider_errors_on_every_attempt_are_recorded_per_attempt():
+    """A chunk whose every call raises ends FAILED with one message per
+    attempt, not only the fallback's — a provider error on attempt 1 followed
+    by mismatches would otherwise vanish from the recorded reason."""
+    import json
+
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(fail_on={0, 1, 2, 3})
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+
+    run_job(orch, job, [Chunk(index=0, source_text="Hello.")], config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.FAILED
+    issues = json.loads(saved.validation_errors or "[]")
+    assert [issue.split(":")[0] for issue in issues] == [
+        "attempt 1",
+        "attempt 2",
+        "attempt 3",
+        "fallback",
+    ]
+    assert all("provider error (Malformed provider output" in i for i in issues)
+
+
+def test_page_break_marker_given_an_invented_close_passes_on_the_first_attempt():
+    """The model closes the lone page-break marker. The chunk is DONE after
+    one call, with the original self-closing tag restored once and no
+    stray close; before, every such reply was rejected and retried."""
+    pagebreak = '<span epub:type="pagebreak" id="page3"/>'
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(
+        canned_unit=TranslationUnit(translation="Hola ⟦1⟧⟦/1⟧mundo.")
+    )
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+
+    run_job(
+        orch, job, [Chunk(index=0, source_text=f"Hello {pagebreak}world.")],
+        config=config, store=store,
+    )
+
+    saved = store.load_chunks(job.id)[0]
+    assert len(provider.call_log) == 1
+    assert saved.status == ChunkStatus.DONE
+    assert saved.passed_validation is True
+    assert saved.attempt_errors is None
+    assert saved.translated_text == f"Hola {pagebreak}mundo."
+
+
+def test_recovered_chunk_records_its_rejected_attempts():
+    """A chunk that passes on attempt 2 keeps validation_errors None (it
+    passed) but records why attempt 1 was rejected in attempt_errors, so
+    the calls spent on retries can be explained."""
+    import json
+
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(fail_on={0})
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+
+    run_job(orch, job, [Chunk(index=0, source_text="Hello.")], config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.DONE
+    assert saved.passed_validation is True
+    assert saved.validation_errors is None
+    issues = json.loads(saved.attempt_errors or "[]")
+    assert len(issues) == 1
+    assert issues[0].startswith("attempt 1: provider error (Malformed provider output")
+
+
+def test_first_try_pass_records_no_rejected_attempts():
+    store = InMemoryCheckpointStore()
+    orch, _, _ = make_orchestrator(store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+
+    run_job(orch, job, [Chunk(index=0, source_text="Hello.")], config=config, store=store)
+
+    assert store.load_chunks(job.id)[0].attempt_errors is None
+
+
+def test_failed_chunk_records_every_rejected_attempt():
+    """A FAILED chunk's attempt_errors holds the same messages as its
+    validation_errors: every attempt was rejected."""
+    store = InMemoryCheckpointStore()
+    provider = FakeTranslationProvider(fail_on={0, 1, 2, 3})
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+
+    run_job(orch, job, [Chunk(index=0, source_text="Hello.")], config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.FAILED
+    assert saved.attempt_errors == saved.validation_errors
+
+
 def test_segment_mismatch_pauses_job_by_default_and_resume_recovers():
     """Default config (continue_on_error=False): a chunk that never aligns
     PAUSES the job instead of finishing it with misplaced paragraphs, and a

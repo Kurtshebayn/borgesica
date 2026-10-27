@@ -127,7 +127,10 @@ INLINE_TAG_RULES = """\
 The source text may contain numbered placeholder markers such as ⟦1⟧, \
 ⟦/1⟧, ⟦2⟧, ⟦/2⟧, and so on. Each marker stands in for an \
 inline formatting tag (italics, bold, a link, ...) that has been removed from \
-the text you see — you are never shown the real tag or its attributes.
+the text you see — you are never shown the real tag or its attributes. Some \
+markers stand alone, with no closing marker anywhere in the source (for \
+example a page break inside a sentence): such a marker stands alone in your \
+output too.
 
 You MUST keep every placeholder marker VERBATIM:
 1. Keep every placeholder marker in the output, character for character — do \
@@ -137,11 +140,13 @@ You MUST keep every placeholder marker VERBATIM:
    number.
 2. Move each marker pair WITH the word(s) it wraps: if ⟦1⟧word⟦/1⟧ \
    translates to ⟦1⟧palabra⟦/1⟧, keep the SAME pair of markers \
-   (opening ⟦1⟧ and closing ⟦/1⟧) around the translated word.
+   (opening ⟦1⟧ and closing ⟦/1⟧) around the translated word. A marker \
+   that stands alone goes at the same point of the translated sentence; \
+   never drop it, and never add a closing marker for it.
 3. Preserve every marker EXACTLY ONCE: each numbered marker that opens \
-   (⟦N⟧) must appear exactly once, and its matching close (⟦/N⟧) \
-   must also appear exactly once. Any marker that is dropped, duplicated, or \
-   invented is a critical error.
+   (⟦N⟧) must appear exactly once, and, when the source closes it, its \
+   matching close (⟦/N⟧) must also appear exactly once. Any marker that is \
+   dropped, duplicated, or invented is a critical error.
 4. Preserve nesting: if markers are nested in the source, maintain the same \
    nesting in the translation.
 5. You MAY reorder sibling marker pairs relative to each other if the target \
