@@ -165,13 +165,21 @@ class AnthropicProvider:
     # --- TranslationProvider Protocol ---
 
     def translate(
-        self, system: str, user: str, model: str, segment_count: int | None = None
+        self,
+        system: str,
+        user: str,
+        model: str,
+        segment_count: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> TranslationResult:
         """Return a TranslationResult with a validated TranslationUnit and real Usage.
 
         segment_count: when given (SRT cue batches), the tool input_schema
         requests the SEGMENTED shape — a translations array of exactly
         segment_count strings — instead of the legacy single string.
+
+        max_output_tokens: a per-job output cap, sent as `max_tokens`; None
+        keeps the _MAX_OUTPUT_TOKENS default.
 
         Strategy:
           1. Use tool-calling: request the model to call `submit_translation`.
@@ -192,12 +200,13 @@ class AnthropicProvider:
         """
         last_error: Exception | None = None
         wasted = Usage()  # accumulated usage of billed-but-failed attempts
+        max_tokens = max_output_tokens if max_output_tokens is not None else _MAX_OUTPUT_TOKENS
 
         for attempt in range(self._max_retries):
             try:
                 response = self._client.messages.create(
                     model=model,
-                    max_tokens=_MAX_OUTPUT_TOKENS,
+                    max_tokens=max_tokens,
                     system=system,
                     messages=[{"role": "user", "content": user}],
                     tools=_translation_tool(segment_count),
