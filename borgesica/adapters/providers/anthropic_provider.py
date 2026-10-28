@@ -98,6 +98,9 @@ _PRICE_TABLE: dict[str, tuple[float, float]] = {
 
 _DEFAULT_PRICE: tuple[float, float] = (3.0, 15.0)
 
+# Anthropic's published cache-read rate, as a fraction of the input price.
+_CACHE_READ_MULTIPLIER = 0.1
+
 # The tool definition sent to Anthropic for structured output.
 _TOOL_NAME = "submit_translation"
 
@@ -207,7 +210,7 @@ class AnthropicProvider:
                 response = self._client.messages.create(
                     model=model,
                     max_tokens=max_tokens,
-                    system=system,
+                    system=_cached_system(system),
                     messages=[{"role": "user", "content": user}],
                     tools=_translation_tool(segment_count),
                     tool_choice={"type": "auto"},
@@ -288,9 +291,8 @@ class AnthropicProvider:
         one: CostEstimator compares this against the 1024-token Anthropic cache
         threshold, and for the EPUB static block the heuristic lands close
         enough to flip that comparison. That only affects the informational
-        `cached` field on CostEstimate — no adapter applies prompt caching, so
-        nothing behavioural rides on it today. Wiring caching up will need a
-        sharper measurement than this.
+        `cached` field on CostEstimate: translate() always sets the cache
+        breakpoint, and the real Usage reports what was actually cached.
         """
         # Whitespace-only text counts as nothing. Character counting would
         # otherwise bill blank padding, and callers (the orchestrator prose
@@ -307,30 +309,34 @@ class AnthropicProvider:
         return self._price_table.get(model, _DEFAULT_PRICE)
 
     def cache_price(self, model: str) -> float:
-        """Return the ordinary input price — no cache rate has been measured.
+        """Return the cache-read price: 0.1x the input price.
 
-        This adapter never sets ``cache_control`` on a request, so no call it
-        makes can produce a cache hit and ``Usage.cached_input_tokens`` is
-        always 0 here; the value is therefore unused today. Returning the full
-        input price keeps it safe if that changes: an unmeasured rate must
-        never make a job look cheaper than it is.
+        That is Anthropic's published read rate. The 1.25x write premium is
+        charged separately, from ``Usage.cache_write_input_tokens``.
         """
-        return self.price(model)[0]
+        return self.price(model)[0] * _CACHE_READ_MULTIPLIER
 
     # --- Internal helpers ---
 
     def _extract_usage(self, response: Any) -> Usage:
         """Extract real token usage from an Anthropic response.
 
-        Anthropic SDK returns a Usage object on response.usage with
-        input_tokens and output_tokens fields.  If the attribute is missing
-        (e.g. a fake client in tests), fall back to zero Usage.
+        Anthropic's ``input_tokens`` is only the UNCACHED remainder of the
+        prompt: the cached part arrives as ``cache_read_input_tokens`` and
+        ``cache_creation_input_tokens``. Usage counts every prompt token in
+        ``input_tokens`` and marks those two as subsets of it. If the
+        attribute is missing (e.g. a fake client in tests), fall back to zero
+        Usage.
         """
         try:
             raw = response.usage
+            read = _token_count(getattr(raw, "cache_read_input_tokens", None))
+            written = _token_count(getattr(raw, "cache_creation_input_tokens", None))
             return Usage(
-                input_tokens=int(raw.input_tokens),
+                input_tokens=int(raw.input_tokens) + read + written,
                 output_tokens=int(raw.output_tokens),
+                cached_input_tokens=read,
+                cache_write_input_tokens=written,
             )
         except (AttributeError, TypeError, ValueError):
             return Usage()
@@ -378,7 +384,24 @@ def _sum_usage(a: Usage, b: Usage) -> Usage:
         input_tokens=a.input_tokens + b.input_tokens,
         output_tokens=a.output_tokens + b.output_tokens,
         cached_input_tokens=a.cached_input_tokens + b.cached_input_tokens,
+        cache_write_input_tokens=a.cache_write_input_tokens + b.cache_write_input_tokens,
     )
+
+
+def _cached_system(system: str) -> list[dict[str, Any]]:
+    """Wrap the system prompt as one text block with a cache breakpoint.
+
+    Tools render before system, so the breakpoint caches the tool schema and
+    the system prompt together. Both are identical across a job's chunks
+    while the glossary stays the same; only the chunk text, in the user
+    message, varies.
+    """
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+
+def _token_count(value: Any) -> int:
+    """A usage field as an int: the SDK sends None when it has no figure."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _get_retry_after(exc: Any) -> float | None:

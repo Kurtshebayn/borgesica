@@ -733,6 +733,44 @@ def test_usage_cost_without_cached_tokens_is_unchanged():
     assert cost == pytest.approx(1000 / 1e6 * 0.14 + 100 / 1e6 * 0.28)
 
 
+def test_usage_cost_prices_cache_writes_at_the_write_premium():
+    """Anthropic bills a 5-minute cache write at 1.25x the input price."""
+    from borgesica.domain.models import Usage
+    from borgesica.domain.cost import usage_cost
+
+    usage = Usage(
+        input_tokens=1000,
+        output_tokens=100,
+        cached_input_tokens=600,
+        cache_write_input_tokens=300,
+    )
+
+    cost = usage_cost(usage, in_price=1.0, out_price=5.0, cache_price=0.1)
+
+    expected = (
+        100 / 1e6 * 1.0
+        + 300 / 1e6 * 1.25
+        + 600 / 1e6 * 0.1
+        + 100 / 1e6 * 5.0
+    )
+    assert cost == pytest.approx(expected)
+
+
+def test_add_usage_keeps_cache_writes():
+    """The reflective path folds usages together; a write must not vanish."""
+    from borgesica.domain.models import Usage
+    from borgesica.domain.orchestrator import _add_usage
+
+    total = _add_usage(
+        Usage(input_tokens=10, cached_input_tokens=4, cache_write_input_tokens=3),
+        Usage(input_tokens=20, cached_input_tokens=5, cache_write_input_tokens=6),
+    )
+
+    assert total == Usage(
+        input_tokens=30, cached_input_tokens=9, cache_write_input_tokens=9
+    )
+
+
 def test_usage_cost_reproduces_the_measured_dashboard_bill():
     """The real 1,114-request workload must price to what DeepSeek charged."""
     from borgesica.domain.models import Usage

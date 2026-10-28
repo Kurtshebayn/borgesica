@@ -574,6 +574,12 @@ class Usage(BaseModel):
     rate. Pricing them as misses overstated that bill 2.04x — and the same
     figure feeds the budget guard, which would then pause a job at about half
     the budget it had really spent."""
+    cache_write_input_tokens: int = 0
+    """The SUBSET of ``input_tokens`` written to the provider's prompt cache.
+
+    Only Anthropic reports it: a 5-minute cache write is billed at 1.25x the
+    input price, so pricing it as an ordinary miss would understate the call.
+    Providers whose cache writes are free leave it at 0."""
 
 
 class TranslationResult(BaseModel):

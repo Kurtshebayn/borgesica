@@ -773,3 +773,94 @@ class TestMaxTokensTruncation:
         assert result.unit.translation == "Hola mundo"
         assert result.usage.input_tokens == 12000
         assert result.usage.output_tokens == 8192 + 900
+
+
+# ---------------------------------------------------------------------------
+# Prompt caching: the system prompt is the per-job invariant prefix
+# ---------------------------------------------------------------------------
+
+
+def _cached_response(
+    input_tokens: int, read: int | None, written: int | None, output_tokens: int = 50
+) -> object:
+    msg = _valid_tool_use_response()
+    msg.usage = MagicMock(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=read,
+        cache_creation_input_tokens=written,
+    )
+    return msg
+
+
+class TestPromptCaching:
+    def test_system_prompt_is_sent_as_one_cached_block(self):
+        client = make_fake_client([_valid_tool_use_response()])
+        provider = AnthropicProvider(client=client)
+
+        provider.translate("SYSTEM PROMPT", "Hello", "claude-haiku-4-5")
+
+        _, kwargs = client.messages.create.call_args
+        assert kwargs["system"] == [
+            {
+                "type": "text",
+                "text": "SYSTEM PROMPT",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        # The chunk text stays outside the cached prefix.
+        assert kwargs["messages"] == [{"role": "user", "content": "Hello"}]
+
+    def test_cache_reads_are_reported_as_cached_input(self):
+        client = make_fake_client([_cached_response(200, read=5000, written=0)])
+        provider = AnthropicProvider(client=client)
+
+        result = provider.translate("system", "Hello", "claude-haiku-4-5")
+
+        # Anthropic's input_tokens is only the uncached remainder; Usage
+        # counts every prompt token and marks the cached subset.
+        assert result.usage.input_tokens == 5200
+        assert result.usage.cached_input_tokens == 5000
+        assert result.usage.cache_write_input_tokens == 0
+        assert result.usage.output_tokens == 50
+
+    def test_cache_writes_are_reported_as_written_input(self):
+        client = make_fake_client([_cached_response(200, read=0, written=5000)])
+        provider = AnthropicProvider(client=client)
+
+        result = provider.translate("system", "Hello", "claude-haiku-4-5")
+
+        assert result.usage.input_tokens == 5200
+        assert result.usage.cached_input_tokens == 0
+        assert result.usage.cache_write_input_tokens == 5000
+
+    def test_absent_cache_fields_count_as_zero(self):
+        client = make_fake_client([_cached_response(200, read=None, written=None)])
+        provider = AnthropicProvider(client=client)
+
+        result = provider.translate("system", "Hello", "claude-haiku-4-5")
+
+        assert result.usage.input_tokens == 200
+        assert result.usage.cached_input_tokens == 0
+        assert result.usage.cache_write_input_tokens == 0
+
+    def test_retries_sum_cache_reads_and_writes(self):
+        truncated = _cached_response(200, read=0, written=5000, output_tokens=8192)
+        truncated.stop_reason = "max_tokens"
+        client = make_fake_client(
+            [truncated, _cached_response(200, read=5000, written=0)]
+        )
+        provider = AnthropicProvider(client=client)
+
+        result = provider.translate("system", "Hello", "claude-haiku-4-5")
+
+        assert result.usage.input_tokens == 10400
+        assert result.usage.cached_input_tokens == 5000
+        assert result.usage.cache_write_input_tokens == 5000
+        assert result.usage.output_tokens == 8192 + 50
+
+    def test_cache_price_is_a_tenth_of_the_input_price(self):
+        provider = AnthropicProvider(client=MagicMock())
+
+        assert provider.cache_price("claude-sonnet-5") == pytest.approx(0.3)
+        assert provider.cache_price("unknown-model") == pytest.approx(0.3)
