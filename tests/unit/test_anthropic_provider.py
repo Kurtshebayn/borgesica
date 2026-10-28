@@ -326,6 +326,32 @@ class TestMaxOutputTokens:
         assert kwargs["max_tokens"] == _MAX_OUTPUT_TOKENS
         assert _MAX_OUTPUT_TOKENS == 8192
 
+    def test_translate_sends_per_job_max_output_tokens_as_max_tokens(self):
+        """A per-job cap (the orchestrator passes it whenever a job sets
+        max_output_tokens) is accepted and sent as the SDK's `max_tokens`.
+        """
+        responses = [_valid_tool_use_response("Buenos días")]
+        client = make_fake_client(responses)
+        provider = AnthropicProvider(client=client)
+        result = provider.translate(
+            "system", "Good morning", "claude-3-5-haiku-20241022", max_output_tokens=2048
+        )
+
+        _, kwargs = client.messages.create.call_args
+        assert kwargs["max_tokens"] == 2048
+        assert result.unit.translation == "Buenos días"
+
+    def test_translate_with_max_output_tokens_none_keeps_default(self):
+        responses = [_valid_tool_use_response("Buenos días")]
+        client = make_fake_client(responses)
+        provider = AnthropicProvider(client=client)
+        provider.translate(
+            "system", "Good morning", "claude-3-5-haiku-20241022", max_output_tokens=None
+        )
+
+        _, kwargs = client.messages.create.call_args
+        assert kwargs["max_tokens"] == _MAX_OUTPUT_TOKENS
+
 
 # ---------------------------------------------------------------------------
 # Test 3 (see above): all 3 tiers fail → MalformedOutput (covered above)
