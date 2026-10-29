@@ -38,9 +38,9 @@ export const FLAG_TEXT: Record<GlossaryRiskFlag, { label: string; explanation: s
   possible_gloss: {
     label: "Posible traducción libre (señal débil)",
     explanation:
-      "La traducción no comparte ninguna palabra con el original. Suele ser correcta " +
-      "(Academy → la Academia); solo hay que corregirla si un nombre inventado quedó " +
-      "reemplazado por una explicación.",
+      "La traducción no comparte ninguna palabra con el original. Casi siempre está " +
+      "bien; solo hay que corregirla si un nombre inventado quedó reemplazado por una " +
+      "explicación.",
   },
   undecided_gender: {
     label: "Género sin decidir",
