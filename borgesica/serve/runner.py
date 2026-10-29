@@ -72,6 +72,8 @@ class RunHandle:
     terminal: dict | None = None
     # Set to ask a glossary extraction to stop before its next batch call.
     stop: threading.Event = field(default_factory=threading.Event)
+    # Where a translation run writes its output; None for an extraction.
+    out_path: str | None = None
 
 
 class JobRunner:
@@ -84,7 +86,11 @@ class JobRunner:
         self._active_job_id: str | None = None
 
     def _spawn(
-        self, job_id: str, kind: str, work: Callable[[RunHandle], dict]
+        self,
+        job_id: str,
+        kind: str,
+        work: Callable[[RunHandle], dict],
+        out_path: str | None = None,
     ) -> None:
         """Take the single active slot for *job_id* and run *work* on a thread;
         *work* returns the terminal event to emit.
@@ -116,6 +122,7 @@ class JobRunner:
             thread=threading.Thread(target=_worker, daemon=True),
             events=queue.Queue(),
             kind=kind,
+            out_path=out_path,
         )
         with self._lock:
             if self._active_job_id is not None:
@@ -146,7 +153,13 @@ class JobRunner:
             except Exception as exc:  # noqa: BLE001 — surface any failure as a terminal event
                 return {"type": "terminal", "status": "FAILED", "error": str(exc)}
 
-        self._spawn(job_id, TRANSLATION, _work)
+        self._spawn(job_id, TRANSLATION, _work, out_path=out_path)
+
+    def out_path_for(self, job_id: str) -> str | None:
+        """Where job_id's latest translation run in this process writes its
+        output; None if none has started (an extraction has no output)."""
+        handle = self._handles.get(job_id)
+        return handle.out_path if handle is not None else None
 
     def start_glossary_extraction(self, job_id: str) -> None:
         """Spawn a background thread running the glossary pass for *job_id*.

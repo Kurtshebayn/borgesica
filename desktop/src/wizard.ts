@@ -365,6 +365,18 @@ export function formatFailureSummary(
   );
 }
 
+/** The done screen's "where is my file" line. The engine writes the output
+ * beside the source only when the run finishes (DONE), so a stopped run, or
+ * one whose write failed (runError), names no file. */
+export function formatOutputLocation(
+  status: JobStatus,
+  outPath: string | null,
+  runError: string | null,
+): string | null {
+  if (status !== "DONE" || runError || !outPath) return null;
+  return `La traducción quedó en: ${outPath}`;
+}
+
 export function formatProgress(progress: ProgressInfo): string {
   return `Fragmento ${progress.completed}/${progress.totalChunks} — $${progress.costUsd.toFixed(4)}`;
 }

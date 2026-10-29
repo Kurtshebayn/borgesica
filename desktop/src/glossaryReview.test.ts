@@ -61,7 +61,10 @@ describe("FLAG_TEXT", () => {
 
   it("tells the reader the possible-gloss flag is weak and usually a correct translation", () => {
     expect(FLAG_TEXT.possible_gloss.label).toMatch(/débil/);
-    expect(FLAG_TEXT.possible_gloss.explanation).toMatch(/suele ser correcta/i);
+    expect(FLAG_TEXT.possible_gloss.explanation).toMatch(/casi siempre está bien/i);
+    // Shown under every flagged entry, so no fixed example term (it read as
+    // being about that entry).
+    expect(FLAG_TEXT.possible_gloss.explanation).not.toMatch(/Academ/);
   });
 });
 

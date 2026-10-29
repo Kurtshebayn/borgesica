@@ -132,29 +132,21 @@ export function putNarrators(
   }).then(asJson<NarratorsResponse>);
 }
 
-export function runJob(
-  baseUrl: string,
-  token: string,
-  jobId: string,
-  outPath: string,
-): Promise<JobResponse> {
+/** Starts the translation. No out_path is sent: the engine writes beside the
+ * source (the job's out_path). */
+export function runJob(baseUrl: string, token: string, jobId: string): Promise<JobResponse> {
   return fetch(`${baseUrl}/jobs/${jobId}/run`, {
     method: "POST",
     headers: authHeaders(token, true),
-    body: JSON.stringify({ out_path: outPath }),
+    body: "{}",
   }).then(asJson<JobResponse>);
 }
 
-export function resumeJob(
-  baseUrl: string,
-  token: string,
-  jobId: string,
-  outPath: string,
-): Promise<JobResponse> {
+export function resumeJob(baseUrl: string, token: string, jobId: string): Promise<JobResponse> {
   return fetch(`${baseUrl}/jobs/${jobId}/resume`, {
     method: "POST",
     headers: authHeaders(token, true),
-    body: JSON.stringify({ out_path: outPath }),
+    body: "{}",
   }).then(asJson<JobResponse>);
 }
 

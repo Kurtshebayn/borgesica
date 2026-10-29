@@ -132,6 +132,10 @@ export interface JobResponse {
    * job, so an empty glossary that was never extracted can be told apart
    * from one that was. */
   glossary_extracted: boolean;
+  /** Where the latest run/resume writes the translation: beside the source,
+   * with the target language added to the name (book.epub -> book_es.epub,
+   * numbered book_es_2.epub when taken). Null until a run starts. */
+  out_path: string | null;
 }
 
 /** Cost of the explicit, paid pre-translation glossary pass (one provider

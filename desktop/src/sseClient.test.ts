@@ -39,6 +39,7 @@ const JOB = {
   failed_count: 0,
   failed_indices: [],
   glossary_extracted: true,
+  out_path: "C:\\libros\\book_es.epub",
 };
 
 function sse(...events: object[]): string {

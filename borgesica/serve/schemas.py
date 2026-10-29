@@ -7,6 +7,7 @@ best_effort_count/best_effort_indices fields (serve-api spec).
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -63,6 +64,24 @@ class JobResponse(BaseModel):
     # wizard can tell an empty glossary that was never extracted from one
     # that was.
     glossary_extracted: bool
+    # Where this sidecar's latest run/resume of the job writes its translation
+    # (see default_out_path); null until one has started in this process.
+    out_path: str | None
+
+
+def default_out_path(source_path: str, target_lang: str) -> str:
+    """The source's own folder and name, plus the target language's primary
+    subtag: ``book.epub`` translated to ``es-neutral`` -> ``book_es.epub``.
+    A name already taken is numbered (``book_es_2.epub``, ``book_es_3.epub``…)
+    so an earlier translation is never overwritten."""
+    source = Path(source_path)
+    base = f"{source.stem}_{target_lang.split('-')[0]}"
+    candidate = source.with_name(f"{base}{source.suffix}")
+    number = 2
+    while candidate.exists():
+        candidate = source.with_name(f"{base}_{number}{source.suffix}")
+        number += 1
+    return str(candidate)
 
 
 def job_to_response(
@@ -70,6 +89,7 @@ def job_to_response(
     best_effort_indices: list[int],
     failed_indices: list[int] | None = None,
     failed_errors: dict[int, list[str]] | None = None,
+    out_path: str | None = None,
 ) -> JobResponse:
     """Pure mapping from Job + best-effort/failed indices to JobResponse."""
     failed_indices = failed_indices or []
@@ -86,6 +106,7 @@ def job_to_response(
         failed_indices=failed_indices,
         failed_errors=failed_errors,
         glossary_extracted=job.glossary_extracted,
+        out_path=out_path,
     )
 
 
@@ -138,7 +159,8 @@ class NarratorsUpdateRequest(BaseModel):
 
 
 class RunRequest(BaseModel):
-    """Body for POST run/resume (T6): destination for the translated output,
-    chosen by the UI before the run starts (design decision #11)."""
+    """Body for POST run/resume (T6): an optional destination for the
+    translated output. Without one the output goes beside the source
+    (default_out_path). The job payload reports the path chosen as out_path."""
 
-    out_path: str
+    out_path: str | None = None
