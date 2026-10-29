@@ -5,6 +5,8 @@ import {
   getNarrators,
   putGlossary,
   putNarrators,
+  resumeJob,
+  runJob,
   stopGlossaryExtraction,
 } from "./apiClient";
 
@@ -21,10 +23,30 @@ const JOB = {
   failed_count: 0,
   failed_indices: [],
   glossary_extracted: false,
+  out_path: "C:\\libros\\book_es.epub",
 };
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("runJob / resumeJob", () => {
+  it.each([
+    ["run", runJob],
+    ["resume", resumeJob],
+  ] as const)("POSTs %s with no out_path, so the engine writes beside the source", async (route, start) => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(JOB), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const job = await start(BASE, "secret", "job-1");
+
+    expect(job).toEqual(JOB);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1/${route}`, {
+      method: "POST",
+      headers: { "X-Borgesica-Token": "secret", "Content-Type": "application/json" },
+      body: "{}",
+    });
+  });
 });
 
 describe("extractGlossary", () => {

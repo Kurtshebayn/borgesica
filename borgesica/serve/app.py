@@ -26,7 +26,7 @@ from borgesica.domain.errors import (
     JobStateError,
     NarratorRejectedError,
 )
-from borgesica.domain.models import GlossaryReview, JobConfig, JobStatus, SourceType
+from borgesica.domain.models import GlossaryReview, Job, JobConfig, JobStatus, SourceType
 from borgesica.serve.runner import JobRunner
 from borgesica.serve.schemas import (
     CreateJobRequest,
@@ -37,6 +37,7 @@ from borgesica.serve.schemas import (
     NarratorsResponse,
     NarratorsUpdateRequest,
     RunRequest,
+    default_out_path,
     job_to_response,
 )
 from borgesica.serve.sse import sse_event_stream
@@ -57,6 +58,11 @@ _EXT_TO_SOURCE_TYPE: dict[str, SourceType] = {
 def _source_type_for_serve(source_path: str) -> SourceType | None:
     """SourceType for source_path's extension, or None if unsupported/rejected."""
     return _EXT_TO_SOURCE_TYPE.get(Path(source_path).suffix.lower())
+
+
+def _out_path_for(job: Job, payload: RunRequest) -> str:
+    """The request's out_path, else the default beside the source."""
+    return payload.out_path or default_out_path(job.source_path, job.config.target_lang)
 
 
 def create_app(
@@ -167,7 +173,13 @@ def create_app(
         best_effort_indices = engine.best_effort_chunk_indices(job_id)
         failed_indices = engine.failed_chunk_indices(job_id)
         failed_errors = engine.failed_chunk_errors(job_id)
-        return job_to_response(job, best_effort_indices, failed_indices, failed_errors)
+        return job_to_response(
+            job,
+            best_effort_indices,
+            failed_indices,
+            failed_errors,
+            out_path=runner.out_path_for(job_id),
+        )
 
     @app.post("/jobs", response_model=JobResponse, status_code=201)
     def create_job(payload: CreateJobRequest) -> JobResponse:
@@ -256,18 +268,24 @@ def create_app(
         progress is persisted asynchronously — this response reflects the
         synthetic ack, not a racy read of the checkpoint store."""
         job = engine.status(job_id)  # JobNotFoundError -> 404 before spawning a thread
-        runner.start(job_id, payload.out_path, resume=False)
+        out_path = _out_path_for(job, payload)
+        runner.start(job_id, out_path, resume=False)
         return job_to_response(
-            job.model_copy(update={"status": JobStatus.RUNNING}), best_effort_indices=[]
+            job.model_copy(update={"status": JobStatus.RUNNING}),
+            best_effort_indices=[],
+            out_path=out_path,
         )
 
     @app.post("/jobs/{job_id}/resume", response_model=JobResponse, status_code=202)
     def start_resume(job_id: str, payload: RunRequest) -> JobResponse:
         """Same background-thread contract as run, via resume_job."""
         job = engine.status(job_id)
-        runner.start(job_id, payload.out_path, resume=True)
+        out_path = _out_path_for(job, payload)
+        runner.start(job_id, out_path, resume=True)
         return job_to_response(
-            job.model_copy(update={"status": JobStatus.RUNNING}), best_effort_indices=[]
+            job.model_copy(update={"status": JobStatus.RUNNING}),
+            best_effort_indices=[],
+            out_path=out_path,
         )
 
     @app.post(

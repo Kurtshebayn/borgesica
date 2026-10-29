@@ -59,7 +59,7 @@ El uso es un asistente de un solo flujo:
 2. **Elegir archivo y estimar costo** — antes de traducir una sola palabra.
 3. **Revisar y bloquear el glosario** — se edita y se fija antes de correr el trabajo.
 4. **Traducir con progreso en vivo** — chunk por chunk, con cancelación cooperativa entre chunks.
-5. **Exportar el resultado** — o reanudar un trabajo interrumpido desde su job id.
+5. **Recoger el resultado** — la traducción se guarda junto al archivo original, con el idioma agregado al nombre (`libro.epub` → `libro_es.epub`; si ya existe, se numera `libro_es_2.epub` y la traducción anterior no se toca). También se puede reanudar un trabajo interrumpido desde su job id.
 
 La app también recupera la conexión si el proceso del motor se cae en medio de una sesión.
 

@@ -8,6 +8,7 @@ import {
   formatGlossaryExtractionLine,
   formatGlossaryExtractionSummary,
   formatGlossaryProgress,
+  formatOutputLocation,
   formatProgress,
   glossaryResultFromEvent,
   initialWizardState,
@@ -71,6 +72,27 @@ describe("formatBestEffortSummary", () => {
 
   it("reports multiple chunks in plural form", () => {
     expect(formatBestEffortSummary(3)).toBe("3 fragmentos quedaron en modo best-effort");
+  });
+});
+
+describe("formatOutputLocation", () => {
+  const out = "C:\\libros\\book_es.epub";
+
+  it("names the file a finished run wrote beside the source", () => {
+    expect(formatOutputLocation("DONE", out, null)).toBe(`La traducción quedó en: ${out}`);
+  });
+
+  it("says nothing when writing the file failed (it was never written)", () => {
+    expect(formatOutputLocation("DONE", out, "[WinError 5] Acceso denegado")).toBeNull();
+  });
+
+  it("says nothing when the run stopped before the end (no file is written)", () => {
+    expect(formatOutputLocation("PAUSED", out, null)).toBeNull();
+    expect(formatOutputLocation("CANCELLED", out, null)).toBeNull();
+  });
+
+  it("says nothing when the engine reports no path (no run started in this session)", () => {
+    expect(formatOutputLocation("DONE", null, null)).toBeNull();
   });
 });
 
@@ -323,6 +345,7 @@ describe("wizardReducer", () => {
         failed_count: 0,
         failed_indices: [],
         glossary_extracted: false,
+        out_path: "C:\\libros\\book_es.epub",
       },
     });
     expect(next.screen).toBe("pick");
@@ -353,6 +376,7 @@ describe("wizardReducer", () => {
         failed_count: 0,
         failed_indices: [],
         glossary_extracted: false,
+        out_path: "C:\\libros\\book_es.epub",
       },
     };
     const next = wizardReducer(running, {
@@ -380,6 +404,7 @@ describe("wizardReducer", () => {
         failed_count: 0,
         failed_indices: [],
         glossary_extracted: false,
+        out_path: "C:\\libros\\book_es.epub",
       },
     };
     const refreshed: JobResponse = {
@@ -393,6 +418,7 @@ describe("wizardReducer", () => {
       failed_count: 5,
       failed_indices: [0, 1, 2, 3, 4],
       glossary_extracted: false,
+      out_path: "C:\\libros\\book_es.epub",
     };
     const next = wizardReducer(running, {
       type: "RUN_TERMINAL",
@@ -1065,6 +1091,7 @@ describe("narrator review", () => {
     failed_count: 0,
     failed_indices: [],
     glossary_extracted: false,
+    out_path: "C:\\libros\\book_es.epub",
   };
 
   it("starts with nothing loaded", () => {

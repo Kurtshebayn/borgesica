@@ -23,6 +23,7 @@ import {
   defaultModelForProvider,
   formatBestEffortSummary,
   formatFailureSummary,
+  formatOutputLocation,
   formatGlossaryProgress,
   formatProgress,
   initialWizardState,
@@ -85,7 +86,6 @@ export default function WizardScreen({
   // supersedes the retired claude-3-5-sonnet-latest default, whose failures
   // used to look like a silent $0 "success" on untranslated output.
   const [model, setModel] = useState(() => defaultModelForProvider(provider));
-  const [outPath, setOutPath] = useState("");
   const [resumeJobId, setResumeJobId] = useState("");
   const subscriptionRef = useRef<SseSubscription | null>(null);
 
@@ -223,9 +223,9 @@ export default function WizardScreen({
   }
 
   async function handleStartRun() {
-    if (!state.jobId || !outPath) return;
+    if (!state.jobId) return;
     try {
-      const job = await runJob(baseUrl, token, state.jobId, outPath);
+      const job = await runJob(baseUrl, token, state.jobId);
       dispatch({ type: "RUN_STARTED", job });
       startWatching(state.jobId);
     } catch (err) {
@@ -263,7 +263,7 @@ export default function WizardScreen({
   }
 
   async function handleResume() {
-    if (!resumeJobId || !outPath) return;
+    if (!resumeJobId) return;
     try {
       const status = await getStatus(baseUrl, token, resumeJobId);
       const estimate = await getEstimate(baseUrl, token, resumeJobId).catch(
@@ -274,7 +274,7 @@ export default function WizardScreen({
         dispatch({ type: "RESUME_JOB", job: status });
         return;
       }
-      const job = await resumeJob(baseUrl, token, resumeJobId, outPath);
+      const job = await resumeJob(baseUrl, token, resumeJobId);
       dispatch({ type: "RESUME_JOB", job });
       startWatching(resumeJobId);
     } catch (err) {
@@ -290,6 +290,9 @@ export default function WizardScreen({
     : null;
   const failureSummary = state.job
     ? formatFailureSummary(state.job.failed_count, state.job.total_chunks)
+    : null;
+  const outputLocation = state.job
+    ? formatOutputLocation(state.job.status, state.job.out_path, state.runError)
     : null;
 
   return (
@@ -327,13 +330,7 @@ export default function WizardScreen({
             value={resumeJobId}
             onChange={(e) => setResumeJobId(e.target.value)}
           />
-          <input
-            type="text"
-            placeholder="Ruta de destino de salida"
-            value={outPath}
-            onChange={(e) => setOutPath(e.target.value)}
-          />
-          <button onClick={() => void handleResume()} disabled={!resumeJobId || !outPath}>
+          <button onClick={() => void handleResume()} disabled={!resumeJobId}>
             Reanudar
           </button>
         </div>
@@ -447,16 +444,7 @@ export default function WizardScreen({
           />
           {state.glossaryLocked && (
             <div>
-              <input
-                type="text"
-                placeholder="Ruta de destino de salida"
-                value={outPath}
-                onChange={(e) => setOutPath(e.target.value)}
-              />
-              <button
-                onClick={() => void handleStartRun()}
-                disabled={!outPath || narratorsUnsaved}
-              >
+              <button onClick={() => void handleStartRun()} disabled={narratorsUnsaved}>
                 Iniciar traducción
               </button>
               {narratorsUnsaved && (
@@ -497,44 +485,9 @@ export default function WizardScreen({
           {failureSummary && <p role="alert">⚠ {failureSummary}</p>}
           {state.runError && <p role="alert">{state.runError}</p>}
           {bestEffortSummary && <p>{bestEffortSummary}</p>}
-          <p>Salida escrita en: {outPath || "(el destino se elige al iniciar la traducción)"}</p>
-          <ExportPanel outPath={outPath} />
+          {outputLocation && <p>{outputLocation}</p>}
         </div>
       )}
     </section>
-  );
-}
-
-/**
- * Export = choosing a destination for output already produced (design
- * decision #11); it never re-invokes translation. Copying the file to the
- * chosen destination itself requires an OS-level file-copy command that is
- * out of scope for this frontend-only work unit (no new Tauri fs plugin was
- * registered on the Rust side in T7b) — this panel intentionally limits
- * itself to confirming the already-written location instead of silently
- * claiming a copy it cannot perform.
- */
-function ExportPanel({ outPath }: { outPath: string }) {
-  const [destination, setDestination] = useState("");
-  const [acknowledged, setAcknowledged] = useState(false);
-
-  return (
-    <div>
-      <input
-        type="text"
-        placeholder="Ruta de destino para copiar"
-        value={destination}
-        onChange={(e) => setDestination(e.target.value)}
-      />
-      <button onClick={() => setAcknowledged(true)} disabled={!destination}>
-        Exportar
-      </button>
-      {acknowledged && (
-        <p>
-          La traducción está disponible en <code>{outPath}</code>. Copiala a{" "}
-          <code>{destination}</code> con tu administrador de archivos (no se vuelve a traducir).
-        </p>
-      )}
-    </div>
   );
 }
