@@ -63,6 +63,24 @@ class TestSQLiteCheckpointStore:
         assert loaded.total_chunks == 3
         assert loaded.config.model == "claude-3-5-haiku-20241022"
 
+    def test_list_jobs_empty(self):
+        assert self.store.list_jobs() == []
+
+    def test_list_jobs_newest_first_and_ties_by_insertion(self):
+        from datetime import timedelta
+
+        base = make_job("base")
+        old = base.model_copy(update={"id": "old", "created_at": base.created_at - timedelta(days=1)})
+        tie_a = base.model_copy(update={"id": "tie-a"})
+        tie_b = base.model_copy(update={"id": "tie-b"})
+        for job in (tie_a, old, tie_b):
+            self.store.save_job(job)
+
+        ids = [j.id for j in self.store.list_jobs()]
+
+        assert ids == ["tie-b", "tie-a", "old"]
+        assert self.store.load_job("old") == self.store.list_jobs()[-1]
+
     # --- Test 2: save_chunk + load_chunks round-trip, meta_json preserved ---
     def test_save_and_load_chunks(self):
         job = make_job()

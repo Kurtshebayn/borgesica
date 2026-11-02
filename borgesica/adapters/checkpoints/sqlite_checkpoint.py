@@ -378,7 +378,18 @@ class SQLiteCheckpointStore:
 
         if row is None:
             return None
+        return self._row_to_job(row)
 
+    def list_jobs(self) -> list[Job]:
+        # created_at is ISO-8601 (same offset for every row written by
+        # _dt_to_iso), so text order is time order; rowid breaks ties.
+        sql = "SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [self._row_to_job(row) for row in rows]
+
+    @staticmethod
+    def _row_to_job(row: sqlite3.Row) -> Job:
         config = JobConfig(
             source_type=SourceType(row["source_type"]),
             model=row["model"],

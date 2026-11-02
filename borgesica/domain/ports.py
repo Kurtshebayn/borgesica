@@ -130,6 +130,11 @@ class CheckpointStore(Protocol):
     def load_job(self, job_id: str) -> Job | None:
         ...
 
+    def list_jobs(self) -> list[Job]:
+        """Every stored job, newest first (by created_at; jobs created at the
+        same instant come latest-saved first). Read-only."""
+        ...
+
     def save_chunk(self, job_id: str, chunk: Chunk) -> None:
         """Idempotent upsert keyed by (job_id, chunk.index)."""
         ...

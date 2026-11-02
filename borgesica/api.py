@@ -572,6 +572,14 @@ class TranslatorEngine:
         return self._load_job_or_raise(job_id)
 
     # ------------------------------------------------------------------
+    # list_jobs
+    # ------------------------------------------------------------------
+
+    def list_jobs(self) -> list[Job]:
+        """Return every stored job, newest first. Read-only; no provider call."""
+        return self._checkpoint.list_jobs()
+
+    # ------------------------------------------------------------------
     # failed_chunk_indices
     # ------------------------------------------------------------------
 

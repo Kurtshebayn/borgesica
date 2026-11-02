@@ -4,6 +4,7 @@ import {
   getChunks,
   getGlossaryReview,
   getNarrators,
+  listJobs,
   putGlossary,
   putNarrators,
   resumeJob,
@@ -158,6 +159,44 @@ describe("getChunks", () => {
     );
 
     await expect(getChunks(BASE, "secret", "nope")).rejects.toThrow(/HTTP 404/);
+  });
+});
+
+describe("listJobs", () => {
+  it("GETs /jobs with the token and returns the body", async () => {
+    const body = {
+      jobs: [
+        {
+          id: "job-1",
+          status: "DONE",
+          title: "book",
+          source_type: "epub",
+          target_lang: "es-neutral",
+          model: "m",
+          total_chunks: 3,
+          completed_chunks: 3,
+          cost_usd: 0.1,
+          failed_count: 0,
+          best_effort_count: 1,
+        },
+      ],
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await listJobs(BASE, "secret")).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs`, {
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+
+  it("rejects with the status on a refused token", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"detail":"Missing or invalid session token"}', { status: 401 })),
+    );
+
+    await expect(listJobs(BASE, "bad")).rejects.toThrow(/HTTP 401/);
   });
 });
 

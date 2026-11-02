@@ -8,6 +8,7 @@ T5 landed create/estimate/status/glossary(get,update). T6 adds run/resume
 (background thread via JobRunner), the SSE progress stream, cancellation,
 and graceful shutdown. The glossary extraction pass (POST
 /jobs/{id}/glossary/extract) runs through the same JobRunner slot.
+GET /jobs lists every stored job, newest first (read-only).
 GET /jobs/{id}/chunks pages through the stored source/translation pairs
 (`offset`, `limit` <= MAX_CHUNKS_LIMIT, `only_problems`) for the side-by-side
 view; it is read-only.
@@ -44,6 +45,7 @@ from borgesica.serve.schemas import (
     EstimateResponse,
     GlossaryResponse,
     GlossaryUpdateRequest,
+    JobListResponse,
     JobResponse,
     NarratorsResponse,
     NarratorsUpdateRequest,
@@ -51,6 +53,7 @@ from borgesica.serve.schemas import (
     chunk_to_item,
     default_out_path,
     is_best_effort,
+    job_to_list_item,
     job_to_response,
 )
 from borgesica.serve.sse import sse_event_stream
@@ -196,6 +199,21 @@ def create_app(
             failed_indices,
             failed_errors,
             out_path=runner.out_path_for(job_id),
+        )
+
+    @app.get("/jobs", response_model=JobListResponse)
+    def list_jobs() -> JobListResponse:
+        """Every stored job, newest first, with its failed/best-effort counts.
+        Read-only: derived from the checkpoint, no provider call."""
+        return JobListResponse(
+            jobs=[
+                job_to_list_item(
+                    job,
+                    engine.best_effort_chunk_indices(job.id),
+                    engine.failed_chunk_indices(job.id),
+                )
+                for job in engine.list_jobs()
+            ]
         )
 
     @app.post("/jobs", response_model=JobResponse, status_code=201)

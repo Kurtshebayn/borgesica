@@ -71,6 +71,48 @@ class JobResponse(BaseModel):
     out_path: str | None
 
 
+class JobListItem(BaseModel):
+    """One row of the library: a stored job in brief. ``title`` is the source
+    file's name without its extension. The source language is not stored on a
+    job, so it is not here."""
+
+    id: str
+    status: JobStatus
+    title: str
+    source_type: str
+    target_lang: str
+    model: str
+    total_chunks: int
+    completed_chunks: int
+    cost_usd: float
+    failed_count: int
+    best_effort_count: int
+
+
+class JobListResponse(BaseModel):
+    """GET /jobs: every stored job, newest first."""
+
+    jobs: list[JobListItem] = Field(default_factory=list)
+
+
+def job_to_list_item(
+    job: Job, best_effort_indices: list[int], failed_indices: list[int]
+) -> JobListItem:
+    return JobListItem(
+        id=job.id,
+        status=job.status,
+        title=Path(job.source_path).stem,
+        source_type=str(job.config.source_type),
+        target_lang=job.config.target_lang,
+        model=job.config.model,
+        total_chunks=job.total_chunks,
+        completed_chunks=job.completed_chunks,
+        cost_usd=job.cost_usd,
+        failed_count=len(failed_indices),
+        best_effort_count=len(best_effort_indices),
+    )
+
+
 def default_out_path(source_path: str, target_lang: str) -> str:
     """The source's own folder and name, plus the target language's primary
     subtag: ``book.epub`` translated to ``es-neutral`` -> ``book_es.epub``.

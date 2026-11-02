@@ -139,6 +139,28 @@ export interface NarratorAssignment {
   gender: NarratorGender;
 }
 
+/** One row of GET /jobs: a stored job in brief. `title` is the source file's
+ * name without extension. The source language is not stored on a job. */
+export interface JobListItem {
+  id: string;
+  status: JobStatus;
+  title: string;
+  /** The domain value, upper case like `status`: "SRT", "EPUB" or "PDF". */
+  source_type: string;
+  target_lang: string;
+  model: string;
+  total_chunks: number;
+  completed_chunks: number;
+  cost_usd: number;
+  failed_count: number;
+  best_effort_count: number;
+}
+
+/** GET /jobs: every stored job, newest first. */
+export interface JobListResponse {
+  jobs: JobListItem[];
+}
+
 export interface JobResponse {
   id: string;
   status: JobStatus;

@@ -15,6 +15,7 @@ import type {
   EstimateResponse,
   GlossaryEntry,
   GlossaryReviewResponse,
+  JobListResponse,
   JobResponse,
   NarratorAssignment,
   NarratorsResponse,
@@ -46,6 +47,13 @@ export function createJob(
     headers: authHeaders(token, true),
     body: JSON.stringify(payload),
   }).then(asJson<JobResponse>);
+}
+
+/** Every stored job, newest first, with its failed/best-effort counts. */
+export function listJobs(baseUrl: string, token: string): Promise<JobListResponse> {
+  return fetch(`${baseUrl}/jobs`, { headers: authHeaders(token) }).then(
+    asJson<JobListResponse>,
+  );
 }
 
 export function getStatus(
