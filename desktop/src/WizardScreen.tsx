@@ -339,10 +339,13 @@ export default function WizardScreen({
         {STEP_LABELS.map((label, i) => (
           <li
             key={label}
-            data-label={label}
             data-state={i < currentStep ? "done" : i === currentStep ? "current" : "todo"}
             aria-current={i === currentStep ? "step" : undefined}
-          />
+          >
+            <span className="step-num">{String(i + 1).padStart(2, "0")}</span>
+            <span className="step-name">{label}</span>
+            {i === currentStep && <span className="step-here">Aquí</span>}
+          </li>
         ))}
       </ol>
       {state.screen === "pick" && (

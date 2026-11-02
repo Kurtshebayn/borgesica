@@ -97,48 +97,114 @@ body {
   background: var(--accent);
 }
 
-/* ---- Step bar ---- */
+/* ---- Process list (wizard steps) ---- */
+
+.wizard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: var(--s-7);
+  align-items: start;
+}
+
+.wizard > div {
+  grid-column: 1;
+  grid-row: 1;
+}
 
 .steps {
-  display: flex;
-  gap: var(--s-2);
-  margin: 0 0 var(--s-5);
+  grid-column: 2;
+  grid-row: 1;
+  margin: 0;
   padding: 0;
   list-style: none;
-  counter-reset: step;
+  border-top: 1px solid var(--ink);
 }
 
-.steps li {
-  flex: 1;
+.wizard .steps li {
   display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
+  align-items: baseline;
+  gap: var(--s-3);
+  margin: 0;
+  padding: 14px 0;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: none;
   color: var(--text-faint);
+}
+
+.steps .step-num {
+  width: 22px;
+  font: 12px var(--font-mono);
+}
+
+.steps .step-name {
+  font: 400 1.5rem/1.2 var(--font-display);
+}
+
+.steps .step-here {
+  margin-left: auto;
   font: 11px var(--font-mono);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  counter-increment: step;
+  color: var(--accent);
 }
 
-.steps li::before {
-  content: "";
-  height: 3px;
-  background: var(--rule);
+.wizard .steps li[data-state="done"] {
+  color: var(--text-muted);
 }
 
-.steps li::after {
-  content: "0" counter(step) " " attr(data-label);
-  order: 2;
-}
-
-.steps li[data-state="done"]::before {
-  background: var(--ink);
-}
-.steps li[data-state="current"] {
+.wizard .steps li[data-state="current"] {
   color: var(--text);
 }
-.steps li[data-state="current"]::before {
-  background: var(--accent);
+
+.steps li[data-state="current"] .step-num {
+  color: var(--accent);
+}
+
+@media (max-width: 900px) {
+  .wizard {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-5);
+  }
+
+  .wizard > div {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .steps {
+    grid-column: 1;
+    grid-row: auto;
+    order: -1;
+    display: flex;
+    gap: var(--s-4);
+    border-top: 0;
+  }
+
+  .wizard .steps li {
+    flex: 1;
+    flex-direction: column;
+    gap: var(--s-1);
+    padding: var(--s-2) 0 0;
+    border-bottom: 0;
+    border-top: 3px solid var(--rule);
+  }
+
+  .wizard .steps li[data-state="done"] {
+    border-top-color: var(--ink);
+  }
+
+  .wizard .steps li[data-state="current"] {
+    border-top-color: var(--accent);
+  }
+
+  .steps .step-name {
+    font-size: 0.95rem;
+  }
+
+  .steps .step-here {
+    display: none;
+  }
 }
 
 /* ---- Cards (fichas) ---- */
@@ -796,13 +862,6 @@ button.link.back {
 
 button.link.back {
   display: block;
-}
-
-.wizard .steps li {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: none;
 }
 
 .file-row {
