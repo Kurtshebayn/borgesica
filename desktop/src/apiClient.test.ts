@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   extractGlossary,
+  getChunks,
   getGlossaryReview,
   getNarrators,
   putGlossary,
@@ -122,6 +123,41 @@ describe("putGlossary", () => {
     await expect(
       putGlossary(BASE, "secret", "job-1", [{ term: "Caten", translation: "", locked: false }]),
     ).rejects.toThrow(/HTTP 422: .*entry rejected/);
+  });
+});
+
+describe("getChunks", () => {
+  const body = { total: 0, offset: 0, limit: 50, chunks: [] };
+
+  it("GETs the chunks route with no query by default", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await getChunks(BASE, "secret", "job-1")).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1/chunks`, {
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+
+  it("sends offset, limit and only_problems when given", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getChunks(BASE, "secret", "job-1", { offset: 100, limit: 25, onlyProblems: true });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${BASE}/jobs/job-1/chunks?offset=100&limit=25&only_problems=true`,
+      { headers: { "X-Borgesica-Token": "secret" } },
+    );
+  });
+
+  it("rejects with the server's reason for an unknown job", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"detail":"Job not found: nope"}', { status: 404 })),
+    );
+
+    await expect(getChunks(BASE, "secret", "nope")).rejects.toThrow(/HTTP 404/);
   });
 });
 

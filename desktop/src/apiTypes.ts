@@ -106,6 +106,31 @@ export interface NarratorsResponse {
   chapters: NarratorChapter[];
 }
 
+export type ChunkStatus = "PENDING" | "TRANSLATING" | "DONE" | "FAILED";
+
+/** One chunk of GET /jobs/{id}/chunks: source beside translation. */
+export interface ChunkItem {
+  index: number;
+  status: ChunkStatus;
+  source: string;
+  /** Null until the chunk has been translated. */
+  translation: string | null;
+  /** DONE but accepted although it failed validation. */
+  best_effort: boolean;
+  /** Null for chunks without a chapter (subtitles). */
+  chapter_key: string | null;
+  chapter_title: string | null;
+}
+
+/** GET /jobs/{id}/chunks: one page in reading order. `total` counts the chunks
+ * matching the filter, not just this page. */
+export interface ChunksResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  chunks: ChunkItem[];
+}
+
 /** One element of the PUT body: a chapter with a narrator. The PUT is a full
  * overwrite, so a chapter left out has no narrator afterwards. */
 export interface NarratorAssignment {

@@ -13,6 +13,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from borgesica.domain.models import (
+    Chunk,
+    ChunkStatus,
     GlossaryEntry,
     GlossaryExtractionEstimate,
     Job,
@@ -156,6 +158,51 @@ class NarratorsUpdateRequest(BaseModel):
     """The full set of narrators: chapters left out end up with none."""
 
     narrators: list[NarratorAssignment]
+
+
+class ChunkItem(BaseModel):
+    """One chunk of a job: the source text beside its translation.
+
+    ``translation`` is null until the chunk has been translated; a FAILED
+    chunk keeps whatever was stored. ``best_effort`` marks a DONE chunk that
+    was accepted although it failed validation. ``chapter_key`` and
+    ``chapter_title`` are null for chunks without a chapter (subtitles)."""
+
+    index: int
+    status: ChunkStatus
+    source: str
+    translation: str | None
+    best_effort: bool
+    chapter_key: str | None
+    chapter_title: str | None
+
+
+class ChunksResponse(BaseModel):
+    """One page of a job's chunks in reading order. ``total`` counts the chunks
+    matching the filter (not just this page); ``offset``/``limit`` echo the
+    request."""
+
+    total: int
+    offset: int
+    limit: int
+    chunks: list[ChunkItem]
+
+
+def chunk_to_item(chunk: Chunk, chapter: Chapter | None) -> ChunkItem:
+    return ChunkItem(
+        index=chunk.index,
+        status=chunk.status,
+        source=chunk.source_text,
+        translation=chunk.translated_text,
+        best_effort=is_best_effort(chunk),
+        chapter_key=chapter.key if chapter else None,
+        chapter_title=chapter.title if chapter else None,
+    )
+
+
+def is_best_effort(chunk: Chunk) -> bool:
+    """Same rule as TranslatorEngine.best_effort_chunk_indices."""
+    return chunk.status == ChunkStatus.DONE and not chunk.passed_validation
 
 
 class RunRequest(BaseModel):
