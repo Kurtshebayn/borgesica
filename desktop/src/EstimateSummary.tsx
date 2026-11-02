@@ -28,7 +28,7 @@ export default function EstimateSummary({
 }: Props) {
   return (
     <div>
-      <h2>2. Estimación</h2>
+      <h2>Estimación</h2>
       {preparationMessage && <p role="alert">{preparationMessage}</p>}
       <p>{formatBookEstimate(estimate)}</p>
       {!estimate.within_budget && (
@@ -38,10 +38,10 @@ export default function EstimateSummary({
         <div>
           <p>{formatGlossaryExtractionLine(estimate.glossary_extraction)}</p>
           <p>{START_TRANSLATION_NOTE}</p>
-          <button onClick={onStart}>Comenzar la traducción</button>
+          <button className="primary" onClick={onStart}>Comenzar la traducción</button>
         </div>
       ) : (
-        <button onClick={onContinue}>Continuar al glosario</button>
+        <button className="primary" onClick={onContinue}>Continuar al glosario</button>
       )}
     </div>
   );

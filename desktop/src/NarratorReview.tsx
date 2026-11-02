@@ -102,7 +102,7 @@ export default function NarratorReview({
         ))}
       </ol>
       {hasChanges && !saving && <p>Hay cambios sin guardar.</p>}
-      <button onClick={onSave} disabled={saving || !hasChanges}>
+      <button className="primary" onClick={onSave} disabled={saving || !hasChanges}>
         {saving ? "Guardando…" : "Guardar narradores"}
       </button>
       {saveError && <p role="alert">{saveError}</p>}
