@@ -804,3 +804,18 @@ button.link.back {
   border: 0;
   background: none;
 }
+
+.file-row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: flex-start;
+}
+
+.file-row input[type="text"] {
+  flex: 1;
+}
+
+.file-row button {
+  white-space: nowrap;
+  padding: 10px var(--s-4);
+}

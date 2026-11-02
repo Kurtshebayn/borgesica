@@ -29,6 +29,7 @@ import {
   initialWizardState,
   loadGlossaryReview,
   loadNarrators,
+  modelsForProvider,
   runRecoveryAction,
   saveGlossary,
   saveNarrators,
@@ -38,6 +39,7 @@ import {
 } from "./wizard";
 import { glossaryChangesToSave } from "./glossaryReview";
 import { hasNarratorChanges } from "./narrators";
+import { pickSourceFile } from "./filePicker";
 import EstimateSummary from "./EstimateSummary";
 import GlossaryTriage from "./GlossaryTriage";
 import NarratorReview from "./NarratorReview";
@@ -288,6 +290,15 @@ export default function WizardScreen({
     }
   }
 
+  async function handleChooseFile() {
+    try {
+      const path = await pickSourceFile();
+      if (path) dispatch({ type: "FILE_PATH_CHANGED", path });
+    } catch {
+      // No native dialog (plain browser, dev): the path field still works.
+    }
+  }
+
   async function handleResume(jobId: string) {
     try {
       const status = await getStatus(baseUrl, token, jobId);
@@ -308,6 +319,7 @@ export default function WizardScreen({
   }
 
   const currentStep = STEP_OF_SCREEN[state.screen];
+  const modelOptions = modelsForProvider(provider);
   const pendingGlossaryChanges = state.glossaryReview
     ? glossaryChangesToSave(state.glossaryReview, state.glossary).length
     : 0;
@@ -336,21 +348,39 @@ export default function WizardScreen({
       {state.screen === "pick" && (
         <div>
           <h2>¿Qué libro vamos a traducir?</h2>
-          <input
-            type="text"
-            placeholder="Ruta al archivo .epub o .srt"
-            value={state.filePath}
-            onChange={(e) =>
-              dispatch({ type: "FILE_PATH_CHANGED", path: e.target.value })
-            }
-          />
+          <div className="file-row">
+            <input
+              type="text"
+              placeholder="Ruta al archivo .epub o .srt"
+              value={state.filePath}
+              onChange={(e) =>
+                dispatch({ type: "FILE_PATH_CHANGED", path: e.target.value })
+              }
+            />
+            <button type="button" onClick={() => void handleChooseFile()}>
+              Elegir archivo
+            </button>
+          </div>
           {state.fileError && <p role="alert">{state.fileError}</p>}
-          <input
-            type="text"
-            placeholder="Modelo"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-          />
+          <label>
+            Modelo
+            {modelOptions.length > 0 ? (
+              <select value={model} onChange={(e) => setModel(e.target.value)}>
+                {modelOptions.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                placeholder="Modelo local, p. ej. llama3"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+              />
+            )}
+          </label>
           <button
             className="primary"
             onClick={() => void handlePick()}
