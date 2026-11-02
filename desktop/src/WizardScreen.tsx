@@ -34,6 +34,7 @@ import {
   saveNarrators,
   wizardReducer,
   type Provider,
+  type WizardState,
 } from "./wizard";
 import { glossaryChangesToSave } from "./glossaryReview";
 import { hasNarratorChanges } from "./narrators";
@@ -52,6 +53,19 @@ const JOB_STATUS_LABELS: Record<JobStatus, string> = {
   CANCELLED: "cancelado",
 };
 
+const STEP_LABELS = ["Archivo", "Estimación", "Glosario", "Traducción", "Listo"];
+
+/** Which step of the bar each screen belongs to. */
+const STEP_OF_SCREEN: Record<WizardState["screen"], number> = {
+  pick: 0,
+  estimate: 1,
+  preparing: 2,
+  glossary: 2,
+  run: 3,
+  error: 3,
+  done: 4,
+};
+
 /**
  * The T7b translation wizard: pick -> estimate -> [preparing] -> glossary ->
  * run -> done, plus a resume path for an interrupted job (spec:
@@ -68,7 +82,10 @@ export default function WizardScreen({
   token,
   provider,
   onRestartSidecar,
+  resumeJobId,
 }: {
+  /** An interrupted job (chosen in the library) to pick up on mount. */
+  resumeJobId?: string;
   baseUrl: string;
   token: string;
   /** The provider the sidecar was launched with — seeds a provider-appropriate
@@ -86,14 +103,23 @@ export default function WizardScreen({
   // supersedes the retired claude-3-5-sonnet-latest default, whose failures
   // used to look like a silent $0 "success" on untranslated output.
   const [model, setModel] = useState(() => defaultModelForProvider(provider));
-  const [resumeJobId, setResumeJobId] = useState("");
   const subscriptionRef = useRef<SseSubscription | null>(null);
+  const resumedRef = useRef(false);
 
   useEffect(() => {
     return () => {
       subscriptionRef.current?.close();
     };
   }, []);
+
+  // Resuming starts a paid run, so it happens once per mount even when the
+  // dev build mounts effects twice.
+  useEffect(() => {
+    if (!resumeJobId || resumedRef.current) return;
+    resumedRef.current = true;
+    void handleResume(resumeJobId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeJobId]);
 
   // The triage review is loaded on entering the glossary screen, whichever
   // way it was reached (skipping the preparation or finishing it).
@@ -262,11 +288,10 @@ export default function WizardScreen({
     }
   }
 
-  async function handleResume() {
-    if (!resumeJobId) return;
+  async function handleResume(jobId: string) {
     try {
-      const status = await getStatus(baseUrl, token, resumeJobId);
-      const estimate = await getEstimate(baseUrl, token, resumeJobId).catch(
+      const status = await getStatus(baseUrl, token, jobId);
+      const estimate = await getEstimate(baseUrl, token, jobId).catch(
         () => null,
       );
       if (estimate) dispatch({ type: "ESTIMATE_RECEIVED", estimate });
@@ -274,14 +299,15 @@ export default function WizardScreen({
         dispatch({ type: "RESUME_JOB", job: status });
         return;
       }
-      const job = await resumeJob(baseUrl, token, resumeJobId);
+      const job = await resumeJob(baseUrl, token, jobId);
       dispatch({ type: "RESUME_JOB", job });
-      startWatching(resumeJobId);
+      startWatching(jobId);
     } catch (err) {
       dispatch({ type: "RUN_START_FAILED", message: String(err) });
     }
   }
 
+  const currentStep = STEP_OF_SCREEN[state.screen];
   const pendingGlossaryChanges = state.glossaryReview
     ? glossaryChangesToSave(state.glossaryReview, state.glossary).length
     : 0;
@@ -296,10 +322,20 @@ export default function WizardScreen({
     : null;
 
   return (
-    <section>
+    <section className="wizard">
+      <ol className="steps" aria-label="Proceso">
+        {STEP_LABELS.map((label, i) => (
+          <li
+            key={label}
+            data-label={label}
+            data-state={i < currentStep ? "done" : i === currentStep ? "current" : "todo"}
+            aria-current={i === currentStep ? "step" : undefined}
+          />
+        ))}
+      </ol>
       {state.screen === "pick" && (
         <div>
-          <h2>1. Elegir un archivo</h2>
+          <h2>¿Qué libro vamos a traducir?</h2>
           <input
             type="text"
             placeholder="Ruta al archivo .epub o .srt"
@@ -316,23 +352,13 @@ export default function WizardScreen({
             onChange={(e) => setModel(e.target.value)}
           />
           <button
+            className="primary"
             onClick={() => void handlePick()}
             disabled={!state.filePath || !!state.fileError}
           >
             Crear trabajo y estimar
           </button>
           {state.createError && <p role="alert">{state.createError}</p>}
-
-          <h3>Reanudar un trabajo interrumpido</h3>
-          <input
-            type="text"
-            placeholder="Id de un trabajo existente"
-            value={resumeJobId}
-            onChange={(e) => setResumeJobId(e.target.value)}
-          />
-          <button onClick={() => void handleResume()} disabled={!resumeJobId}>
-            Reanudar
-          </button>
         </div>
       )}
 
@@ -362,7 +388,8 @@ export default function WizardScreen({
 
       {state.screen === "glossary" && (
         <div>
-          <h2>3. Glosario (se bloquea antes de traducir)</h2>
+          <h2>Glosario</h2>
+          <p className="hint">Se bloquea antes de traducir.</p>
           {state.glossaryNotice && <p>{state.glossaryNotice}</p>}
           {state.glossaryReviewError && <p role="alert">{state.glossaryReviewError}</p>}
           {state.glossaryReview && (
@@ -421,7 +448,7 @@ export default function WizardScreen({
             </button>
           )}
           {!state.glossaryLocked && (
-            <button onClick={() => void handleSaveGlossary("lock")}>
+            <button className="primary" onClick={() => void handleSaveGlossary("lock")}>
               Bloquear glosario y continuar
             </button>
           )}
@@ -444,7 +471,7 @@ export default function WizardScreen({
           />
           {state.glossaryLocked && (
             <div>
-              <button onClick={() => void handleStartRun()} disabled={narratorsUnsaved}>
+              <button className="primary" onClick={() => void handleStartRun()} disabled={narratorsUnsaved}>
                 Iniciar traducción
               </button>
               {narratorsUnsaved && (
@@ -458,7 +485,7 @@ export default function WizardScreen({
 
       {state.screen === "run" && (
         <div>
-          <h2>4. Traduciendo</h2>
+          <h2>Traduciendo</h2>
           <p>{state.progress ? formatProgress(state.progress) : "Iniciando…"}</p>
           <button onClick={() => void handleCancel()} disabled={state.cancelRequested}>
             {state.cancelRequested ? "Cancelando… (se aplica entre fragmentos)" : "Cancelar"}
@@ -476,7 +503,7 @@ export default function WizardScreen({
 
       {state.screen === "done" && (
         <div>
-          <h2>{failureSummary ? "5. Terminado con errores" : "5. Listo"}</h2>
+          <h2>{failureSummary ? "Terminado con errores" : "Listo"}</h2>
           <p>Estado: {state.job ? JOB_STATUS_LABELS[state.job.status] : "desconocido"}</p>
           {/* Error-surfacing: a run can end status=DONE at $0 while every
               chunk FAILED (provider auth/model error) and the output holds

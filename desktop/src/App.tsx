@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { deriveSidecarStatus, type SidecarState, type SidecarStatus } from "./sidecarStatus";
 import { startSidecar, stopSidecar } from "./sidecarClient";
 import { PROVIDERS, providerRequiresKey, type Provider } from "./wizard";
+import CompareScreen from "./CompareScreen";
+import LibraryScreen from "./LibraryScreen";
+import LoadingScreen from "./LoadingScreen";
 import WizardScreen from "./WizardScreen";
 
 const SIDECAR_STATUS_LABELS: Record<SidecarStatus, string> = {
@@ -10,6 +13,13 @@ const SIDECAR_STATUS_LABELS: Record<SidecarStatus, string> = {
   ready: "listo",
   error: "error",
 };
+
+/** Which screen the ready app shows: the library, a translation run (new or
+ * resumed), or a finished book read side by side. */
+type View =
+  | { name: "library" }
+  | { name: "translate"; resumeJobId?: string }
+  | { name: "compare"; jobId: string; title: string };
 
 /**
  * App shell: session-only API key entry + sidecar lifecycle (T7a), then
@@ -24,6 +34,8 @@ export default function App() {
     error: null,
     token: null,
   });
+  const [booting, setBooting] = useState(false);
+  const [view, setView] = useState<View>({ name: "library" });
   const started = useRef(false);
 
   const status = deriveSidecarStatus(state);
@@ -39,12 +51,15 @@ export default function App() {
       return;
     }
     started.current = true;
+    setBooting(true);
     try {
       const { baseUrl, token } = await startSidecar(provider, apiKeyInput);
       setState({ baseUrl, token, error: null });
     } catch (err) {
       setState({ baseUrl: null, token: null, error: String(err) });
       started.current = false;
+    } finally {
+      setBooting(false);
     }
   }
 
@@ -76,13 +91,19 @@ export default function App() {
   }, []);
 
   return (
-    <main>
-      <h1>Borgésica</h1>
-      <p>Estado del motor: {SIDECAR_STATUS_LABELS[status]}</p>
+    <main className="app">
+      {booting && <LoadingScreen />}
+      <header className="app-header">
+        <h1>Borgésica</h1>
+        <span className="engine-status" data-status={status}>
+          Motor: {SIDECAR_STATUS_LABELS[status]}
+        </span>
+      </header>
       {status !== "ready" && (
-        <div>
+        <div className="card connect-fields">
+          <h2>Conectar el motor</h2>
           <label>
-            Proveedor:{" "}
+            Proveedor
             <select
               value={provider}
               onChange={(e) => setProvider(e.target.value as Provider)}
@@ -104,19 +125,62 @@ export default function App() {
             value={apiKeyInput}
             onChange={(e) => setApiKeyInput(e.target.value)}
           />
-          <button onClick={handleStart} disabled={status === "starting" && started.current}>
-            Iniciar
-          </button>
+          <div className="actions">
+            <button
+              className="primary"
+              onClick={handleStart}
+              disabled={status === "starting" && started.current}
+            >
+              Iniciar
+            </button>
+          </div>
         </div>
       )}
-      {state.error && <p role="alert">{state.error}</p>}
+      {state.error && (
+        <p role="alert" style={{ marginTop: "var(--s-4)" }}>
+          {state.error}
+        </p>
+      )}
       {status === "ready" && state.baseUrl && state.token && (
-        <WizardScreen
-          baseUrl={state.baseUrl}
-          token={state.token}
-          provider={provider}
-          onRestartSidecar={() => void handleRestartSidecar()}
-        />
+        <>
+          {view.name === "library" && (
+            <LibraryScreen
+              baseUrl={state.baseUrl}
+              token={state.token}
+              onNew={() => setView({ name: "translate" })}
+              onOpen={(ficha) =>
+                setView(
+                  ficha.action === "compare"
+                    ? { name: "compare", jobId: ficha.job.id, title: ficha.job.title }
+                    : { name: "translate", resumeJobId: ficha.job.id },
+                )
+              }
+            />
+          )}
+          {view.name === "translate" && (
+            <>
+              <button type="button" className="link back" onClick={() => setView({ name: "library" })}>
+                ← Biblioteca
+              </button>
+              <WizardScreen
+                baseUrl={state.baseUrl}
+                token={state.token}
+                provider={provider}
+                resumeJobId={view.resumeJobId}
+                onRestartSidecar={() => void handleRestartSidecar()}
+              />
+            </>
+          )}
+          {view.name === "compare" && (
+            <CompareScreen
+              baseUrl={state.baseUrl}
+              token={state.token}
+              jobId={view.jobId}
+              title={view.title}
+              onBack={() => setView({ name: "library" })}
+            />
+          )}
+        </>
       )}
     </main>
   );
