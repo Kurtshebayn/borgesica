@@ -8,12 +8,15 @@ T5 landed create/estimate/status/glossary(get,update). T6 adds run/resume
 (background thread via JobRunner), the SSE progress stream, cancellation,
 and graceful shutdown. The glossary extraction pass (POST
 /jobs/{id}/glossary/extract) runs through the same JobRunner slot.
+GET /jobs/{id}/chunks pages through the stored source/translation pairs
+(`offset`, `limit` <= MAX_CHUNKS_LIMIT, `only_problems`) for the side-by-side
+view; it is read-only.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
@@ -26,9 +29,17 @@ from borgesica.domain.errors import (
     JobStateError,
     NarratorRejectedError,
 )
-from borgesica.domain.models import GlossaryReview, Job, JobConfig, JobStatus, SourceType
+from borgesica.domain.models import (
+    ChunkStatus,
+    GlossaryReview,
+    Job,
+    JobConfig,
+    JobStatus,
+    SourceType,
+)
 from borgesica.serve.runner import JobRunner
 from borgesica.serve.schemas import (
+    ChunksResponse,
     CreateJobRequest,
     EstimateResponse,
     GlossaryResponse,
@@ -37,7 +48,9 @@ from borgesica.serve.schemas import (
     NarratorsResponse,
     NarratorsUpdateRequest,
     RunRequest,
+    chunk_to_item,
     default_out_path,
+    is_best_effort,
     job_to_response,
 )
 from borgesica.serve.sse import sse_event_stream
@@ -46,6 +59,10 @@ from borgesica.serve.sse import sse_event_stream
 # subcommand and tests — the CLI parser also has no --host flag, so a
 # non-loopback bind can never be configured (design threat matrix).
 SERVE_HOST = "127.0.0.1"
+
+# GET /jobs/{id}/chunks page size: a book has hundreds of chunks of ~800 tokens.
+DEFAULT_CHUNKS_LIMIT = 50
+MAX_CHUNKS_LIMIT = 200
 
 # Serve-api spec: "Reject PDF" — enforced independently of the CLI (which
 # still allows PDF input with a warning). PDF is intentionally absent here.
@@ -252,6 +269,30 @@ def create_app(
     def put_narrators(job_id: str, payload: NarratorsUpdateRequest) -> NarratorsResponse:
         """Replace every narrator of the job (chapters left out get none)."""
         return NarratorsResponse(chapters=engine.update_narrators(job_id, payload.narrators))
+
+    @app.get("/jobs/{job_id}/chunks", response_model=ChunksResponse)
+    def get_chunks(
+        job_id: str,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=DEFAULT_CHUNKS_LIMIT, ge=1, le=MAX_CHUNKS_LIMIT),
+        only_problems: bool = False,
+    ) -> ChunksResponse:
+        """A page of the job's chunks in reading order, each with its source
+        and translation. `only_problems` keeps FAILED and best-effort chunks;
+        `total` counts the chunks matching the filter. Read-only."""
+        rows = engine.list_chunks(job_id)
+        if only_problems:
+            rows = [
+                (c, ch)
+                for c, ch in rows
+                if c.status == ChunkStatus.FAILED or is_best_effort(c)
+            ]
+        return ChunksResponse(
+            total=len(rows),
+            offset=offset,
+            limit=limit,
+            chunks=[chunk_to_item(c, ch) for c, ch in rows[offset : offset + limit]],
+        )
 
     @app.get("/jobs/{job_id}/glossary/review", response_model=GlossaryReview)
     def get_glossary_review(job_id: str) -> GlossaryReview:

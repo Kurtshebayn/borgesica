@@ -10,6 +10,7 @@
  * threaded through explicitly rather than hidden in module state.
  */
 import type {
+  ChunksResponse,
   CreateJobRequest,
   EstimateResponse,
   GlossaryEntry,
@@ -130,6 +131,25 @@ export function putNarrators(
     headers: authHeaders(token, true),
     body: JSON.stringify({ narrators }),
   }).then(asJson<NarratorsResponse>);
+}
+
+/** One page of the job's chunks (source beside translation), in reading
+ * order. The server defaults to offset 0, limit 50 (max 200). `onlyProblems`
+ * keeps FAILED and best-effort chunks; `total` counts the filtered set. */
+export function getChunks(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+  options: { offset?: number; limit?: number; onlyProblems?: boolean } = {},
+): Promise<ChunksResponse> {
+  const query = new URLSearchParams();
+  if (options.offset !== undefined) query.set("offset", String(options.offset));
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.onlyProblems) query.set("only_problems", "true");
+  const qs = query.toString();
+  return fetch(`${baseUrl}/jobs/${jobId}/chunks${qs ? `?${qs}` : ""}`, {
+    headers: authHeaders(token),
+  }).then(asJson<ChunksResponse>);
 }
 
 /** Starts the translation. No out_path is sent: the engine writes beside the

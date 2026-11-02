@@ -65,6 +65,7 @@ from borgesica.domain.narrators import (
     Chapter,
     NarratorAssignment,
     NarratorFact,
+    chapter_key,
     list_chapters,
 )
 from borgesica.domain.orchestrator import TranslationOrchestrator
@@ -644,6 +645,28 @@ class TranslatorEngine:
             for c in chunks
             if c.status == ChunkStatus.DONE and not c.passed_validation
         )
+
+    # ------------------------------------------------------------------
+    # list_chunks
+    # ------------------------------------------------------------------
+
+    def list_chunks(self, job_id: str) -> list[tuple[Chunk, Chapter | None]]:
+        """Return every chunk in reading order with the chapter it belongs to.
+
+        The chapter is None for chunks without one (subtitles, PDF, the table
+        of contents). Read-only: derived from the persisted chunks, no provider
+        call.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        chunks = self._chunks_in_order(job_id)
+        chapters = {chapter.key: chapter for chapter in list_chapters(chunks)}
+        return [
+            (chunk, chapters.get(key) if (key := chapter_key(chunk)) else None)
+            for chunk in chunks
+        ]
 
     # ------------------------------------------------------------------
     # requeue_misaligned_chunks
