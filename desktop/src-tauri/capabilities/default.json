@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Lets the main window open the native file picker; nothing else.",
+  "windows": ["main"],
+  "permissions": ["dialog:allow-open"]
+}
