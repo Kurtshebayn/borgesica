@@ -67,12 +67,12 @@ describe("toFichas", () => {
   });
 
   it("reads a finished book and resumes an interrupted one", () => {
-    expect(fichas.map((f) => f.action)).toEqual(["resume", "compare", "compare", null]);
+    expect(fichas.map((f) => f.action)).toEqual(["resume", "compare", "compare", "resume"]);
   });
 
   it("never lets a click start a job that was only created", () => {
     expect(fichas[3].status).toBe("draft");
-    expect(fichas[3].action).toBeNull();
+    expect(fichas[3].action).toBe("resume");
   });
 
   it("labels and formats the footer", () => {

@@ -1,5 +1,5 @@
 import type { FormEvent } from "react";
-import { PROVIDERS, type Provider } from "./wizard";
+import { PROVIDERS, providerRequiresKey, type Provider } from "./wizard";
 
 interface Props {
   provider: Provider;
@@ -10,6 +10,8 @@ interface Props {
   onProviderChange: (provider: Provider) => void;
   onApiKeyChange: (key: string) => void;
   onStart: () => void;
+  /** Enter the library without a key: books can be read, not translated. */
+  onStartWithoutKey: () => void;
 }
 
 /**
@@ -26,10 +28,13 @@ export default function StartScreen({
   onProviderChange,
   onApiKeyChange,
   onStart,
+  onStartWithoutKey,
 }: Props) {
+  const canStart = !providerRequiresKey(provider) || apiKey.trim() !== "";
+
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!booting) onStart();
+    if (!booting && canStart) onStart();
   }
 
   return (
@@ -87,9 +92,16 @@ export default function StartScreen({
             <div className="start-bar" />
           </div>
         ) : (
-          <button type="submit" className="primary">
-            Iniciar
-          </button>
+          <>
+            <button type="submit" className="primary" disabled={!canStart}>
+              Iniciar
+            </button>
+            {providerRequiresKey(provider) && (
+              <button type="button" className="link start-skip" onClick={onStartWithoutKey}>
+                Entrar sin clave
+              </button>
+            )}
+          </>
         )}
       </form>
     </div>

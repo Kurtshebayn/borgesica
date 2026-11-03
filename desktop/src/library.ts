@@ -6,10 +6,9 @@ import type { JobListItem } from "./apiTypes";
 
 export type FichaStatus = "done" | "problems" | "progress" | "draft";
 
-/** What opening a ficha does: read a finished book, resume an interrupted
- * one, or nothing (a job that was created but never estimated has nothing to
- * read and must not be started by a click). */
-export type FichaAction = "compare" | "resume" | null;
+/** What opening a ficha does: read a finished book, or pick up one that is
+ * not finished. A draft (created, never run) is picked up at its estimate. */
+export type FichaAction = "compare" | "resume";
 
 export interface Ficha {
   job: JobListItem;
@@ -50,9 +49,7 @@ function labelFor(status: FichaStatus, job: JobListItem): string {
 }
 
 function actionFor(status: FichaStatus): FichaAction {
-  if (status === "done" || status === "problems") return "compare";
-  if (status === "progress") return "resume";
-  return null;
+  return status === "done" || status === "problems" ? "compare" : "resume";
 }
 
 /** Jobs arrive newest first; the oldest gets signature 1. */

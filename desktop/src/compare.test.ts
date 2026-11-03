@@ -7,6 +7,7 @@ import {
   offsetForChunk,
   pageSummary,
   previousOffset,
+  parseInline,
   translationText,
 } from "./compare";
 
@@ -88,5 +89,45 @@ describe("paging", () => {
     expect(offsetForChunk(7, 8)).toBe(0);
     expect(offsetForChunk(8, 8)).toBe(8);
     expect(offsetForChunk(30, 8)).toBe(24);
+  });
+});
+
+describe("parseInline", () => {
+  it("returns plain text untouched", () => {
+    expect(parseInline("Hola")).toEqual([{ text: "Hola", bold: false, italic: false }]);
+  });
+
+  it("turns em and b into emphasis instead of showing the tag", () => {
+    expect(parseInline("a <em>b</em> <b>c</b>")).toEqual([
+      { text: "a ", bold: false, italic: false },
+      { text: "b", bold: false, italic: true },
+      { text: " ", bold: false, italic: false },
+      { text: "c", bold: true, italic: false },
+    ]);
+  });
+
+  it("drops other tags, including the page-break anchor, and keeps their text", () => {
+    const text = '<span aria-label="3" id="page3" role="doc-pagebreak"/>I <span class="grey">FEAR</span>';
+    expect(parseInline(text).map((s) => s.text).join("")).toBe("I FEAR");
+  });
+
+  it("ignores a closing tag that was never opened", () => {
+    expect(parseInline("x</em>y")).toEqual([
+      { text: "x", bold: false, italic: false },
+      { text: "y", bold: false, italic: false },
+    ]);
+  });
+
+  it("lets an unclosed tag run to the end and nests emphasis", () => {
+    expect(parseInline("<b>a <i>b")).toEqual([
+      { text: "a ", bold: true, italic: false },
+      { text: "b", bold: true, italic: true },
+    ]);
+  });
+
+  it("does not take a bare less-than for a tag", () => {
+    expect(parseInline("si x < 5 y 6 > 2")).toEqual([
+      { text: "si x < 5 y 6 > 2", bold: false, italic: false },
+    ]);
   });
 });

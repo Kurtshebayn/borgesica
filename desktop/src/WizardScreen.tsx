@@ -85,9 +85,12 @@ export default function WizardScreen({
   provider,
   onRestartSidecar,
   resumeJobId,
+  resumeDraft,
 }: {
   /** An interrupted job (chosen in the library) to pick up on mount. */
   resumeJobId?: string;
+  /** The job never ran: pick it up at its estimate instead of resuming a run. */
+  resumeDraft?: boolean;
   baseUrl: string;
   token: string;
   /** The provider the sidecar was launched with — seeds a provider-appropriate
@@ -301,6 +304,15 @@ export default function WizardScreen({
 
   async function handleResume(jobId: string) {
     try {
+      if (resumeDraft) {
+        dispatch({ type: "JOB_CREATED", jobId });
+        try {
+          dispatch({ type: "ESTIMATE_RECEIVED", estimate: await getEstimate(baseUrl, token, jobId) });
+        } catch (err) {
+          dispatch({ type: "ESTIMATE_FAILED", message: String(err) });
+        }
+        return;
+      }
       const status = await getStatus(baseUrl, token, jobId);
       const estimate = await getEstimate(baseUrl, token, jobId).catch(
         () => null,

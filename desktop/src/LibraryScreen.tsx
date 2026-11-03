@@ -75,17 +75,12 @@ function FichaCard({ ficha, onOpen }: { ficha: Ficha; onOpen: (f: Ficha) => void
       <span className="ficha-meta">{ficha.meta}</span>
       <span className="ficha-foot">
         <span>{ficha.footer}</span>
-        {ficha.action === "resume" && <span className="ficha-cta">Reanudar</span>}
+        {ficha.action === "resume" && (
+          <span className="ficha-cta">{ficha.status === "draft" ? "Continuar" : "Reanudar"}</span>
+        )}
       </span>
     </>
   );
-  if (!ficha.action) {
-    return (
-      <div className="ficha" data-status={ficha.status}>
-        {body}
-      </div>
-    );
-  }
   return (
     <button
       type="button"

@@ -9,6 +9,7 @@ import {
   nextOffset,
   offsetForChunk,
   pageSummary,
+  parseInline,
   previousOffset,
   translationText,
 } from "./compare";
@@ -134,10 +135,14 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
             return (
               <div className="compare-cols compare-row" data-kind={kind} key={c.index}>
                 <span className="compare-num">{String(displayNumber(c)).padStart(2, "0")}</span>
-                <p className="compare-source">{c.source}</p>
+                <p className="compare-source">
+                  <InlineText text={c.source} />
+                </p>
                 <div className="compare-target">
                   {label && <span className="compare-tag">{label}</span>}
-                  <p>{translationText(c)}</p>
+                  <p>
+                    <InlineText text={translationText(c)} />
+                  </p>
                 </div>
               </div>
             );
@@ -167,5 +172,19 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
         </div>
       </div>
     </section>
+  );
+}
+
+/** Chunk text with its bold and italic shown as such; the rest of the markup is dropped. */
+function InlineText({ text }: { text: string }) {
+  return (
+    <>
+      {parseInline(text).map((s, i) => {
+        if (s.bold && s.italic) return <strong key={i}><em>{s.text}</em></strong>;
+        if (s.bold) return <strong key={i}>{s.text}</strong>;
+        if (s.italic) return <em key={i}>{s.text}</em>;
+        return s.text;
+      })}
+    </>
   );
 }

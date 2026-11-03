@@ -4,6 +4,7 @@ import { startSidecar, stopSidecar } from "./sidecarClient";
 import { providerRequiresKey, type Provider } from "./wizard";
 import CompareScreen from "./CompareScreen";
 import LibraryScreen from "./LibraryScreen";
+import ProviderPanel from "./ProviderPanel";
 import StartScreen from "./StartScreen";
 import WizardScreen from "./WizardScreen";
 
@@ -14,11 +15,18 @@ const SIDECAR_STATUS_LABELS: Record<SidecarStatus, string> = {
   error: "error",
 };
 
-/** Which screen the ready app shows: the library, a translation run (new or
- * resumed), or a finished book read side by side. */
+/** The engine refuses to boot a hosted provider without some key. Entering
+ * without one boots it with this stand-in: enough to read the library, and
+ * any paid call fails until a real key is added (the translate screen asks
+ * for it first). */
+const NO_KEY = "sin-clave";
+
+/** Which screen the ready app shows: the library, a translation run (new,
+ * resumed or a draft picked up at its estimate), or a finished book read side
+ * by side. */
 type View =
   | { name: "library" }
-  | { name: "translate"; resumeJobId?: string }
+  | { name: "translate"; resumeJobId?: string; draft?: boolean }
   | { name: "compare"; jobId: string; title: string };
 
 /**
@@ -27,8 +35,13 @@ type View =
  * `ready` (spec: desktop-shell "UI waits for readiness").
  */
 export default function App() {
-  const [apiKeyInput, setApiKeyInput] = useState("");
   const [provider, setProvider] = useState<Provider>("anthropic");
+  // Keys typed this session, by provider, so switching back and forth never
+  // asks twice. Memory only: they vanish when the app closes.
+  const [keys, setKeys] = useState<Partial<Record<Provider, string>>>({});
+  // Whether the running engine got a real key (not the NO_KEY stand-in).
+  const [keyed, setKeyed] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
   const [state, setState] = useState<SidecarState>({
     baseUrl: null,
     error: null,
@@ -40,27 +53,39 @@ export default function App() {
 
   const status = deriveSidecarStatus(state);
 
-  async function handleStart() {
+  /** Boots the engine for `target` with `key` (empty/missing: no key). */
+  async function launch(target: Provider, key: string) {
     if (started.current) return;
-    // Pre-spawn guard: hosted providers (anthropic/deepseek) authenticate with
-    // an API key. Spawning the sidecar with an empty key just crashes it
-    // (serve --key-stdin exits(1) on a keyless init line) and surfaces a raw
-    // handshake error. Block Start with a clear inline message instead.
-    if (providerRequiresKey(provider) && apiKeyInput.trim() === "") {
-      setState({ baseUrl: null, token: null, error: "Este proveedor necesita una clave de API." });
-      return;
-    }
     started.current = true;
+    setProvider(target);
     setBooting(true);
+    const hasKey = !providerRequiresKey(target) || key.trim() !== "";
     try {
-      const { baseUrl, token } = await startSidecar(provider, apiKeyInput);
+      const { baseUrl, token } = await startSidecar(target, hasKey ? key : NO_KEY);
       setState({ baseUrl, token, error: null });
+      setKeyed(hasKey);
     } catch (err) {
       setState({ baseUrl: null, token: null, error: String(err) });
       started.current = false;
     } finally {
       setBooting(false);
     }
+  }
+
+  function setKeyFor(target: Provider, key: string) {
+    setKeys((prev) => ({ ...prev, [target]: key }));
+  }
+
+  /** The engine is bound to one provider at boot: switching tears it down and
+   * starts a new one, then lands on the library. */
+  async function handleSwitch(target: Provider, key: string) {
+    if (key.trim() !== "") setKeyFor(target, key);
+    started.current = false;
+    setState({ baseUrl: null, token: null, error: null });
+    setPanelOpen(false);
+    setView({ name: "library" });
+    await stopSidecar();
+    await launch(target, key);
   }
 
   /**
@@ -79,7 +104,7 @@ export default function App() {
     started.current = false;
     setState({ baseUrl: null, token: null, error: null });
     await stopSidecar();
-    await handleStart();
+    await launch(provider, keys[provider] ?? "");
   }
 
   useEffect(() => {
@@ -95,22 +120,48 @@ export default function App() {
       {status !== "ready" && (
         <StartScreen
           provider={provider}
-          apiKey={apiKeyInput}
+          apiKey={keys[provider] ?? ""}
           booting={booting}
           error={state.error}
           onProviderChange={setProvider}
-          onApiKeyChange={setApiKeyInput}
-          onStart={() => void handleStart()}
+          onApiKeyChange={(key) => setKeyFor(provider, key)}
+          onStart={() => void launch(provider, keys[provider] ?? "")}
+          onStartWithoutKey={() => void launch(provider, "")}
         />
       )}
       {status === "ready" && state.baseUrl && state.token && (
         <>
           <header className="app-header">
             <h1>Borgésica</h1>
-            <span className="engine-status" data-status={status}>
-              Motor: {SIDECAR_STATUS_LABELS[status]}
-            </span>
+            <div className="app-header-tools">
+              <button
+                type="button"
+                className="link"
+                disabled={view.name === "translate"}
+                title={
+                  view.name === "translate"
+                    ? "Vuelve a la biblioteca para cambiar de proveedor"
+                    : undefined
+                }
+                onClick={() => setPanelOpen((open) => !open)}
+              >
+                {provider}
+                {providerRequiresKey(provider) && !keyed ? " · sin clave" : ""} · cambiar
+              </button>
+              <span className="engine-status" data-status={status}>
+                Motor: {SIDECAR_STATUS_LABELS[status]}
+              </span>
+            </div>
           </header>
+          {panelOpen && view.name !== "translate" && (
+            <ProviderPanel
+              active={provider}
+              activeKeyed={keyed || !providerRequiresKey(provider)}
+              keys={keys}
+              onUse={(target, key) => void handleSwitch(target, key)}
+              onClose={() => setPanelOpen(false)}
+            />
+          )}
           {view.name === "library" && (
             <LibraryScreen
               baseUrl={state.baseUrl}
@@ -120,7 +171,11 @@ export default function App() {
                 setView(
                   ficha.action === "compare"
                     ? { name: "compare", jobId: ficha.job.id, title: ficha.job.title }
-                    : { name: "translate", resumeJobId: ficha.job.id },
+                    : {
+                        name: "translate",
+                        resumeJobId: ficha.job.id,
+                        draft: ficha.status === "draft",
+                      },
                 )
               }
             />
@@ -130,13 +185,36 @@ export default function App() {
               <button type="button" className="link back" onClick={() => setView({ name: "library" })}>
                 ← Biblioteca
               </button>
-              <WizardScreen
-                baseUrl={state.baseUrl}
-                token={state.token}
-                provider={provider}
-                resumeJobId={view.resumeJobId}
-                onRestartSidecar={() => void handleRestartSidecar()}
-              />
+              {providerRequiresKey(provider) && !keyed ? (
+                <section className="card provider-panel">
+                  <h2>Falta la clave de {provider}</h2>
+                  <p>
+                    Entraste sin clave, así que puedes leer tus libros pero no traducir. Agrégala
+                    para continuar.
+                  </p>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => {
+                        setView({ name: "library" });
+                        setPanelOpen(true);
+                      }}
+                    >
+                      Agregar la clave
+                    </button>
+                  </div>
+                </section>
+              ) : (
+                <WizardScreen
+                  baseUrl={state.baseUrl}
+                  token={state.token}
+                  provider={provider}
+                  resumeJobId={view.resumeJobId}
+                  resumeDraft={view.draft}
+                  onRestartSidecar={() => void handleRestartSidecar()}
+                />
+              )}
             </>
           )}
           {view.name === "compare" && (
