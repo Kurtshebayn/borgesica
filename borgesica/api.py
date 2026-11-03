@@ -572,6 +572,25 @@ class TranslatorEngine:
         return self._load_job_or_raise(job_id)
 
     # ------------------------------------------------------------------
+    # delete_job
+    # ------------------------------------------------------------------
+
+    def delete_job(self, job_id: str) -> Job:
+        """Delete the job and every row keyed by it; return the deleted Job so
+        the caller can find its out_path/source_path. Output files are NOT
+        touched here.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+            JobStateError: if the job is RUNNING.
+        """
+        job = self._load_job_or_raise(job_id)
+        if job.status == JobStatus.RUNNING:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        self._checkpoint.delete_job(job_id)
+        return job
+
+    # ------------------------------------------------------------------
     # list_jobs
     # ------------------------------------------------------------------
 
@@ -1188,7 +1207,7 @@ class TranslatorEngine:
         # against RUNNING itself to prevent double-entry).
         now = datetime.now(UTC)
         running_job = job.model_copy(
-            update={"status": JobStatus.RUNNING, "updated_at": now}
+            update={"status": JobStatus.RUNNING, "updated_at": now, "out_path": out_path}
         )
         self._checkpoint.save_job(running_job)
 
@@ -1196,7 +1215,7 @@ class TranslatorEngine:
         # RUNNING guard does not trip (the guard protects against a job that
         # was ALREADY running when delegated; here we are legitimately starting).
         job_for_orchestrator = job.model_copy(
-            update={"updated_at": now}
+            update={"updated_at": now, "out_path": out_path}
         )
 
         # Wire orchestrator

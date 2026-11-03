@@ -7,6 +7,7 @@ best_effort_count/best_effort_indices fields (serve-api spec).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -113,17 +114,27 @@ def job_to_list_item(
     )
 
 
+def library_dir() -> Path:
+    """The folder every serve-made translation lands in: BORGESICA_LIBRARY_DIR
+    when set, else ``~/Borgesica``."""
+    configured = os.environ.get("BORGESICA_LIBRARY_DIR")
+    return Path(configured) if configured else Path.home() / "Borgesica"
+
+
 def default_out_path(source_path: str, target_lang: str) -> str:
-    """The source's own folder and name, plus the target language's primary
-    subtag: ``book.epub`` translated to ``es-neutral`` -> ``book_es.epub``.
-    A name already taken is numbered (``book_es_2.epub``, ``book_es_3.epub``…)
-    so an earlier translation is never overwritten."""
+    """A file in the library folder named after the source plus the target
+    language's primary subtag: ``book.epub`` translated to ``es-neutral`` ->
+    ``<library>/book_es.epub``. A name already taken is numbered
+    (``book_es_2.epub``, ``book_es_3.epub``...) so an earlier translation is
+    never overwritten. The folder is created here."""
     source = Path(source_path)
+    library = library_dir()
+    library.mkdir(parents=True, exist_ok=True)
     base = f"{source.stem}_{target_lang.split('-')[0]}"
-    candidate = source.with_name(f"{base}{source.suffix}")
+    candidate = library / f"{base}{source.suffix}"
     number = 2
     while candidate.exists():
-        candidate = source.with_name(f"{base}_{number}{source.suffix}")
+        candidate = library / f"{base}_{number}{source.suffix}"
         number += 1
     return str(candidate)
 
@@ -245,6 +256,14 @@ def chunk_to_item(chunk: Chunk, chapter: Chapter | None) -> ChunkItem:
 def is_best_effort(chunk: Chunk) -> bool:
     """Same rule as TranslatorEngine.best_effort_chunk_indices."""
     return chunk.status == ChunkStatus.DONE and not chunk.passed_validation
+
+
+class DeleteJobResponse(BaseModel):
+    """DELETE /jobs/{id}: the job's rows are gone (always true on 200);
+    file_deleted says whether its translated file in the library was removed."""
+
+    deleted: bool
+    file_deleted: bool
 
 
 class RunRequest(BaseModel):

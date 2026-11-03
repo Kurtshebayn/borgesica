@@ -33,6 +33,15 @@ from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test writes its translations to a throwaway library folder, never
+    to the real home folder."""
+    library = tmp_path / "library"
+    monkeypatch.setenv("BORGESICA_LIBRARY_DIR", str(library))
+    return library
+
+
 def _make_srt_fixture(tmp_path: Path, num_cues: int = 2) -> str:
     lines = []
     for i in range(1, num_cues + 1):
@@ -118,11 +127,11 @@ def test_run_returns_immediately_with_running_ack(tmp_path: Path) -> None:
     assert Path(out_path).exists()
 
 
-def test_run_without_out_path_writes_beside_the_source(tmp_path: Path) -> None:
+def test_run_without_out_path_writes_to_the_library(tmp_path: Path) -> None:
     engine, _ = _make_engine()
     client = _app_and_client(engine)
     job_id = _create_job(client, tmp_path)
-    expected = str(tmp_path / "test_es.srt")
+    expected = str(tmp_path / "library" / "test_es.srt")
 
     resp = client.post(f"/jobs/{job_id}/run", json={})
 
@@ -133,7 +142,7 @@ def test_run_without_out_path_writes_beside_the_source(tmp_path: Path) -> None:
     assert client.get(f"/jobs/{job_id}").json()["out_path"] == expected
 
 
-def test_resume_without_out_path_writes_beside_the_source(tmp_path: Path) -> None:
+def test_resume_without_out_path_writes_to_the_library(tmp_path: Path) -> None:
     engine, _ = _make_engine()
     client = _app_and_client(engine)
     job_id = _create_job(client, tmp_path)
@@ -144,7 +153,7 @@ def test_resume_without_out_path_writes_beside_the_source(tmp_path: Path) -> Non
 
     assert resp.status_code == 202
     client.app.state.runner._handles[job_id].thread.join(timeout=5)
-    assert (tmp_path / "test_es.srt").exists()
+    assert (tmp_path / "library" / "test_es.srt").exists()
 
 
 @pytest.mark.parametrize(
@@ -154,23 +163,38 @@ def test_resume_without_out_path_writes_beside_the_source(tmp_path: Path) -> Non
         ("subs.en.srt", "pt-BR", "subs.en_pt.srt"),
     ],
 )
-def test_default_out_path_adds_the_language_to_the_name(
+def test_default_out_path_puts_the_named_file_in_the_library(
     tmp_path: Path, source: str, target_lang: str, expected: str
 ) -> None:
     from borgesica.serve.schemas import default_out_path
 
-    assert default_out_path(str(tmp_path / source), target_lang) == str(tmp_path / expected)
+    result = default_out_path(str(tmp_path / "elsewhere" / source), target_lang)
+
+    assert result == str(tmp_path / "library" / expected)
+    assert (tmp_path / "library").is_dir()
 
 
 def test_default_out_path_numbers_the_name_when_it_is_taken(tmp_path: Path) -> None:
     from borgesica.serve.schemas import default_out_path
 
-    (tmp_path / "book_es.epub").write_bytes(b"first")
-    (tmp_path / "book_es_2.epub").write_bytes(b"second")
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "book_es.epub").write_bytes(b"first")
+    (library / "book_es_2.epub").write_bytes(b"second")
 
     assert default_out_path(str(tmp_path / "book.epub"), "es-neutral") == str(
-        tmp_path / "book_es_3.epub"
+        library / "book_es_3.epub"
     )
+
+
+def test_the_library_defaults_to_a_borgesica_folder_in_the_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from borgesica.serve.schemas import library_dir
+
+    monkeypatch.delenv("BORGESICA_LIBRARY_DIR")
+
+    assert library_dir() == Path.home() / "Borgesica"
 
 
 def test_a_second_translation_of_the_same_source_keeps_the_first(tmp_path: Path) -> None:
@@ -179,18 +203,18 @@ def test_a_second_translation_of_the_same_source_keeps_the_first(tmp_path: Path)
     first_id = _create_job(client, tmp_path)
     client.post(f"/jobs/{first_id}/run", json={})
     client.app.state.runner._handles[first_id].thread.join(timeout=5)
-    first_bytes = (tmp_path / "test_es.srt").read_bytes()
+    first_bytes = (tmp_path / "library" / "test_es.srt").read_bytes()
     second_id = _create_job(client, tmp_path)
 
     resp = client.post(f"/jobs/{second_id}/run", json={})
 
-    assert resp.json()["out_path"] == str(tmp_path / "test_es_2.srt")
+    assert resp.json()["out_path"] == str(tmp_path / "library" / "test_es_2.srt")
     client.app.state.runner._handles[second_id].thread.join(timeout=5)
-    assert (tmp_path / "test_es.srt").read_bytes() == first_bytes
-    assert (tmp_path / "test_es_2.srt").exists()
+    assert (tmp_path / "library" / "test_es.srt").read_bytes() == first_bytes
+    assert (tmp_path / "library" / "test_es_2.srt").exists()
     # Each job keeps reporting the file its own run wrote.
-    assert client.get(f"/jobs/{first_id}").json()["out_path"] == str(tmp_path / "test_es.srt")
-    assert client.get(f"/jobs/{second_id}").json()["out_path"] == str(tmp_path / "test_es_2.srt")
+    assert client.get(f"/jobs/{first_id}").json()["out_path"] == str(tmp_path / "library" / "test_es.srt")
+    assert client.get(f"/jobs/{second_id}").json()["out_path"] == str(tmp_path / "library" / "test_es_2.srt")
 
 
 def test_out_path_is_null_until_a_run_starts(tmp_path: Path) -> None:

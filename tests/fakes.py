@@ -155,6 +155,14 @@ class InMemoryCheckpointStore:
         # Newest first; dict order is insertion order, so ties keep latest-saved first.
         return sorted(reversed(self._jobs.values()), key=lambda j: j.created_at, reverse=True)
 
+    def delete_job(self, job_id: str) -> None:
+        self._jobs.pop(job_id, None)
+        for store in (
+            self._chunks, self._glossaries, self._votes, self._proposals,
+            self._summaries, self._narrators,
+        ):
+            store.pop(job_id, None)
+
     def save_chunk(self, job_id: str, chunk: Chunk) -> None:
         """Idempotent upsert by (job_id, chunk.index)."""
         if job_id not in self._chunks:

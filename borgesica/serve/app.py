@@ -42,6 +42,7 @@ from borgesica.serve.runner import JobRunner
 from borgesica.serve.schemas import (
     ChunksResponse,
     CreateJobRequest,
+    DeleteJobResponse,
     EstimateResponse,
     GlossaryResponse,
     GlossaryUpdateRequest,
@@ -55,6 +56,7 @@ from borgesica.serve.schemas import (
     is_best_effort,
     job_to_list_item,
     job_to_response,
+    library_dir,
 )
 from borgesica.serve.sse import sse_event_stream
 
@@ -83,6 +85,24 @@ def _source_type_for_serve(source_path: str) -> SourceType | None:
 def _out_path_for(job: Job, payload: RunRequest) -> str:
     """The request's out_path, else the default beside the source."""
     return payload.out_path or default_out_path(job.source_path, job.config.target_lang)
+
+
+def _delete_library_file(job: Job) -> bool:
+    """Remove job.out_path iff it is a regular file inside the library folder
+    and not the job's own source. Never raises: any doubt or OSError leaves the
+    file alone (the job's rows are already gone)."""
+    if not job.out_path:
+        return False
+    try:
+        target = Path(job.out_path).resolve()
+        if not target.is_relative_to(library_dir().resolve()):
+            return False
+        if not target.is_file() or target == Path(job.source_path).resolve():
+            return False
+        target.unlink()
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def create_app(
@@ -198,7 +218,7 @@ def create_app(
             best_effort_indices,
             failed_indices,
             failed_errors,
-            out_path=runner.out_path_for(job_id),
+            out_path=runner.out_path_for(job_id) or job.out_path,
         )
 
     @app.get("/jobs", response_model=JobListResponse)
@@ -214,6 +234,19 @@ def create_app(
                 )
                 for job in engine.list_jobs()
             ]
+        )
+
+    @app.delete("/jobs/{job_id}", response_model=DeleteJobResponse)
+    def delete_job(job_id: str) -> DeleteJobResponse:
+        """Delete a ficha: its rows, then its translated file when (and only
+        when) that file is a regular file inside the library folder and is not
+        the source. 404 unknown, 409 while a run/extraction is active."""
+        job = engine.status(job_id)  # JobNotFoundError -> 404
+        if runner.is_active(job_id):
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        deleted = engine.delete_job(job_id)  # JobStateError -> 409 if RUNNING
+        return DeleteJobResponse(
+            deleted=True, file_deleted=_delete_library_file(deleted)
         )
 
     @app.post("/jobs", response_model=JobResponse, status_code=201)

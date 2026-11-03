@@ -135,6 +135,11 @@ class CheckpointStore(Protocol):
         same instant come latest-saved first). Read-only."""
         ...
 
+    def delete_job(self, job_id: str) -> None:
+        """Remove the job and every row keyed by it (chunks, glossary and its
+        votes/proposals, summaries, narrators) atomically. Unknown id: no-op."""
+        ...
+
     def save_chunk(self, job_id: str, chunk: Chunk) -> None:
         """Idempotent upsert keyed by (job_id, chunk.index)."""
         ...

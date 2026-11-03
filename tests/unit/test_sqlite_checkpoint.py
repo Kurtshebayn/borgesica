@@ -117,3 +117,100 @@ def test_proposals_are_kept_per_job() -> None:
 
     assert store.load_glossary_proposals("job-1") == {"vis": ("Vis",)}
     assert store.load_glossary_proposals("job-2") == {"will": ("Voluntad",)}
+
+
+# ---------------------------------------------------------------------------
+# Job.out_path
+# ---------------------------------------------------------------------------
+
+
+def test_a_new_job_has_no_out_path() -> None:
+    assert make_job().out_path is None
+
+
+def test_out_path_round_trips_and_is_updated_on_save() -> None:
+    store = SQLiteCheckpointStore(":memory:")
+    job = make_job()
+    store.save_job(job)
+    assert store.load_job("job-1").out_path is None
+
+    store.save_job(job.model_copy(update={"out_path": "/lib/book_es.epub"}))
+
+    assert store.load_job("job-1").out_path == "/lib/book_es.epub"
+    assert store.list_jobs()[0].out_path == "/lib/book_es.epub"
+
+
+def test_a_database_without_the_out_path_column_is_migrated(tmp_path: Path) -> None:
+    db = str(tmp_path / "old.db")
+    store = SQLiteCheckpointStore(db)
+    store.save_job(make_job())
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE jobs DROP COLUMN out_path")
+
+    reopened = SQLiteCheckpointStore(db)
+
+    loaded = reopened.load_job("job-1")
+    assert loaded is not None and loaded.out_path is None
+    reopened.save_job(loaded.model_copy(update={"out_path": "/x.epub"}))
+    assert reopened.load_job("job-1").out_path == "/x.epub"
+
+
+# ---------------------------------------------------------------------------
+# delete_job
+# ---------------------------------------------------------------------------
+
+_CHILD_TABLES = (
+    "chunks", "glossary", "glossary_votes", "glossary_proposals", "summaries", "narrators",
+)
+
+
+def _populate(store: SQLiteCheckpointStore, db: str, job_id: str) -> None:
+    now = datetime.now(UTC).isoformat()
+    store.save_job(make_job(job_id))
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO chunks (job_id, chunk_index, source_text, status) VALUES (?, 0, 'a', 'DONE')",
+            (job_id,),
+        )
+        conn.execute("INSERT INTO glossary (job_id, term, translation) VALUES (?, 't', 'x')", (job_id,))
+        conn.execute(
+            "INSERT INTO glossary_votes (job_id, term, vote_order, translation) VALUES (?, 't', 0, 'x')",
+            (job_id,),
+        )
+        conn.execute(
+            "INSERT INTO glossary_proposals (job_id, term, proposal_order, translation) VALUES (?, 't', 0, 'x')",
+            (job_id,),
+        )
+        conn.execute(
+            "INSERT INTO summaries (job_id, chunk_index, text) VALUES (?, 0, 's')", (job_id,)
+        )
+        conn.execute(
+            "INSERT INTO narrators (job_id, chapter_key, name, gender) VALUES (?, 'c', 'n', 'female')",
+            (job_id,),
+        )
+
+
+def test_delete_job_removes_the_job_and_every_child_row_but_only_its_own(tmp_path: Path) -> None:
+    db = str(tmp_path / "s.db")
+    store = SQLiteCheckpointStore(db)
+    _populate(store, db, "gone")
+    _populate(store, db, "kept")
+
+    store.delete_job("gone")
+
+    assert store.load_job("gone") is None
+    assert store.load_job("kept") is not None
+    with sqlite3.connect(db) as conn:
+        for table in _CHILD_TABLES:
+            gone = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE job_id='gone'").fetchone()[0]
+            kept = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE job_id='kept'").fetchone()[0]
+            assert (gone, kept) == (0, 1), table
+
+
+def test_delete_job_of_an_unknown_id_is_a_no_op() -> None:
+    store = SQLiteCheckpointStore(":memory:")
+    store.save_job(make_job())
+
+    store.delete_job("missing")
+
+    assert store.load_job("job-1") is not None
