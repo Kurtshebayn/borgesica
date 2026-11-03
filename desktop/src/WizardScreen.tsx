@@ -11,6 +11,7 @@ import {
   putGlossary,
   putNarrators,
   resumeJob,
+  updateJobModel,
   runJob,
   stopGlossaryExtraction,
 } from "./apiClient";
@@ -94,7 +95,11 @@ export default function WizardScreen({
   onRestartSidecar,
   resumeJobId,
   resumeDraft,
+  onChangeProvider,
 }: {
+  /** Asks the app to swap the provider (restarting the engine) and come back
+   * to this draft's estimate. Offered only while the draft has not started. */
+  onChangeProvider?: (jobId: string) => void;
   /** An interrupted job (chosen in the library) to pick up on mount. */
   resumeJobId?: string;
   /** The job never ran: pick it up at its estimate instead of resuming a run. */
@@ -127,6 +132,8 @@ export default function WizardScreen({
   const [peek, setPeek] = useState<"estimate" | "glossary" | null>(null);
   const [peekGlossary, setPeekGlossary] = useState<GlossaryEntry[] | null>(null);
   const [peekError, setPeekError] = useState<string | null>(null);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -324,6 +331,18 @@ export default function WizardScreen({
       if (resumeDraft) {
         dispatch({ type: "JOB_CREATED", jobId });
         try {
+          // The draft keeps the model it was made with; after a provider
+          // change that model belongs to the old provider, so it is swapped
+          // for this provider's default before anything is priced.
+          const draft = await getStatus(baseUrl, token, jobId);
+          const options = modelsForProvider(provider);
+          if (options.length > 0 && !options.includes(draft.model)) {
+            const fallback = defaultModelForProvider(provider);
+            await updateJobModel(baseUrl, token, jobId, fallback);
+            setModel(fallback);
+          } else {
+            setModel(draft.model);
+          }
           dispatch({ type: "ESTIMATE_RECEIVED", estimate: await getEstimate(baseUrl, token, jobId) });
         } catch (err) {
           dispatch({ type: "ESTIMATE_FAILED", message: String(err) });
@@ -353,6 +372,26 @@ export default function WizardScreen({
       setPeekGlossary((await getGlossary(baseUrl, token, pendingResume.id)).entries);
     } catch (err) {
       setPeekError(String(err));
+    }
+  }
+
+  /** A draft's model can change until it starts: the engine stores it, and
+   * the estimate is asked again because every figure follows the model. */
+  async function handleModelChange(next: string) {
+    if (!state.jobId || next.trim() === "" || next === model) return;
+    const jobId = state.jobId;
+    const previous = model;
+    setModel(next);
+    setModelBusy(true);
+    setModelError(null);
+    try {
+      await updateJobModel(baseUrl, token, jobId, next);
+      dispatch({ type: "ESTIMATE_RECEIVED", estimate: await getEstimate(baseUrl, token, jobId) });
+    } catch (err) {
+      setModel(previous);
+      setModelError(`No se pudo cambiar el modelo: ${String(err)}`);
+    } finally {
+      setModelBusy(false);
     }
   }
 
@@ -519,6 +558,43 @@ export default function WizardScreen({
 
       {state.screen === "estimate" && state.estimate && (
         <EstimateSummary
+          settings={
+            <div className="estimate-settings">
+              <label>
+                Modelo
+                {modelOptions.length > 0 ? (
+                  <select
+                    value={model}
+                    disabled={modelBusy}
+                    onChange={(e) => void handleModelChange(e.target.value)}
+                  >
+                    {!modelOptions.includes(model) && <option value={model}>{model}</option>}
+                    {modelOptions.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    defaultValue={model}
+                    disabled={modelBusy}
+                    onBlur={(e) => void handleModelChange(e.target.value)}
+                  />
+                )}
+              </label>
+              {onChangeProvider && state.jobId && (
+                <div>
+                  <span>Proveedor: {provider}</span>
+                  <button type="button" onClick={() => onChangeProvider(state.jobId!)}>
+                    Cambiar proveedor
+                  </button>
+                </div>
+              )}
+              {modelError && <p role="alert">{modelError}</p>}
+            </div>
+          }
           estimate={state.estimate}
           preparationMessage={state.preparationMessage}
           onStart={() => void handlePrepareGlossary()}

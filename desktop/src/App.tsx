@@ -42,6 +42,9 @@ export default function App() {
   // Whether the running engine got a real key (not the NO_KEY stand-in).
   const [keyed, setKeyed] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
+  // A draft whose provider is being changed from its estimate: the engine
+  // restarts, then the app lands back on that draft instead of the library.
+  const [switchingDraft, setSwitchingDraft] = useState<string | null>(null);
   const [state, setState] = useState<SidecarState>({
     baseUrl: null,
     error: null,
@@ -85,7 +88,12 @@ export default function App() {
     setBooting(true);
     setState({ baseUrl: null, token: null, error: null });
     setPanelOpen(false);
-    setView({ name: "library" });
+    setView(
+      switchingDraft
+        ? { name: "translate", resumeJobId: switchingDraft, draft: true }
+        : { name: "library" },
+    );
+    setSwitchingDraft(null);
     await stopSidecar();
     await launch(target, key);
   }
@@ -176,6 +184,18 @@ export default function App() {
               <button type="button" className="link back" onClick={() => setView({ name: "library" })}>
                 ← Biblioteca
               </button>
+              {panelOpen && switchingDraft && (
+                <ProviderPanel
+                  active={provider}
+                  activeKeyed={keyed || !providerRequiresKey(provider)}
+                  keys={keys}
+                  onUse={(target, key) => void handleSwitch(target, key)}
+                  onClose={() => {
+                    setPanelOpen(false);
+                    setSwitchingDraft(null);
+                  }}
+                />
+              )}
               {providerRequiresKey(provider) && !keyed ? (
                 <section className="card provider-panel">
                   <h2>Falta la clave de {provider}</h2>
@@ -203,6 +223,10 @@ export default function App() {
                   provider={provider}
                   resumeJobId={view.resumeJobId}
                   resumeDraft={view.draft}
+                  onChangeProvider={(jobId) => {
+                    setSwitchingDraft(jobId);
+                    setPanelOpen(true);
+                  }}
                   onRestartSidecar={() => void handleRestartSidecar()}
                 />
               )}

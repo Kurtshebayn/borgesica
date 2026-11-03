@@ -70,6 +70,20 @@ export function deleteJob(
   }).then(asJson<DeleteJobResponse>);
 }
 
+/** Changes a draft job's model; the engine refuses once the job has started. */
+export function updateJobModel(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+  model: string,
+): Promise<JobResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}`, {
+    method: "PATCH",
+    headers: authHeaders(token, true),
+    body: JSON.stringify({ model }),
+  }).then(asJson<JobResponse>);
+}
+
 export function getStatus(
   baseUrl: string,
   token: string,

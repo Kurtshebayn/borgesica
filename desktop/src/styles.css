@@ -159,6 +159,22 @@ body {
   text-decoration: underline;
 }
 
+.estimate-settings {
+  display: grid;
+  gap: var(--s-3);
+  margin: var(--s-4) 0;
+  padding-bottom: var(--s-4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.estimate-settings > div {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  font: 12px var(--font-mono);
+  color: var(--text-muted);
+}
+
 .peek-glossary {
   margin: var(--s-4) 0;
   padding: 0;

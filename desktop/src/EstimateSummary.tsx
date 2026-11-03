@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { EstimateResponse } from "./apiTypes";
 import {
   formatBookEstimate,
@@ -14,6 +15,8 @@ interface Props {
   onStart: () => void;
   /** Goes on to the glossary review once the glossary is prepared. */
   onContinue: () => void;
+  /** Model and provider controls, shown above the figures they change. */
+  settings?: ReactNode;
 }
 
 /** The estimate screen: what the whole book costs. The glossary preparation
@@ -25,10 +28,12 @@ export default function EstimateSummary({
   preparationMessage,
   onStart,
   onContinue,
+  settings,
 }: Props) {
   return (
     <div>
       <h2>Estimación</h2>
+      {settings}
       {preparationMessage && <p role="alert">{preparationMessage}</p>}
       <p>{formatBookEstimate(estimate)}</p>
       {!estimate.within_budget && (

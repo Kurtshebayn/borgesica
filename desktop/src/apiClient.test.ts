@@ -5,6 +5,7 @@ import {
   getGlossaryReview,
   getNarrators,
   deleteJob,
+  updateJobModel,
   listJobs,
   putGlossary,
   putNarrators,
@@ -274,5 +275,28 @@ describe("deleteJob", () => {
     );
 
     await expect(deleteJob(BASE, "secret", "job-1")).rejects.toThrow("HTTP 409: running");
+  });
+});
+
+describe("updateJobModel", () => {
+  it("PATCHes /jobs/{id} with the model as JSON and the token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => JOB });
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await updateJobModel(BASE, "secret", "job-1", "deepseek-v4-pro")).toEqual(JOB);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1`, {
+      method: "PATCH",
+      headers: { "X-Borgesica-Token": "secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-pro" }),
+    });
+  });
+
+  it("throws with the status and body when the engine refuses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 409, text: async () => "started" }),
+    );
+
+    await expect(updateJobModel(BASE, "secret", "job-1", "m")).rejects.toThrow("HTTP 409: started");
   });
 });

@@ -162,6 +162,8 @@ export interface JobListResponse {
 }
 
 export interface JobResponse {
+  /** The model the job translates with (a draft's can be changed). */
+  model: string;
   id: string;
   status: JobStatus;
   total_chunks: number;
