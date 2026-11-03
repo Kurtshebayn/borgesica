@@ -81,6 +81,8 @@ export default function App() {
   async function handleSwitch(target: Provider, key: string) {
     if (key.trim() !== "") setKeyFor(target, key);
     started.current = false;
+    // Show the wait at once: stopping the old engine can take seconds.
+    setBooting(true);
     setState({ baseUrl: null, token: null, error: null });
     setPanelOpen(false);
     setView({ name: "library" });
@@ -102,6 +104,7 @@ export default function App() {
    */
   async function handleRestartSidecar() {
     started.current = false;
+    setBooting(true);
     setState({ baseUrl: null, token: null, error: null });
     await stopSidecar();
     await launch(provider, keys[provider] ?? "");
@@ -133,39 +136,27 @@ export default function App() {
         <>
           <header className="app-header">
             <h1>Borgésica</h1>
-            <div className="app-header-tools">
-              <button
-                type="button"
-                className="link"
-                disabled={view.name === "translate"}
-                title={
-                  view.name === "translate"
-                    ? "Vuelve a la biblioteca para cambiar de proveedor"
-                    : undefined
-                }
-                onClick={() => setPanelOpen((open) => !open)}
-              >
-                {provider}
-                {providerRequiresKey(provider) && !keyed ? " · sin clave" : ""} · cambiar
-              </button>
-              <span className="engine-status" data-status={status}>
-                Motor: {SIDECAR_STATUS_LABELS[status]}
-              </span>
-            </div>
+            <span className="engine-status" data-status={status}>
+              Motor: {SIDECAR_STATUS_LABELS[status]}
+            </span>
           </header>
-          {panelOpen && view.name !== "translate" && (
-            <ProviderPanel
-              active={provider}
-              activeKeyed={keyed || !providerRequiresKey(provider)}
-              keys={keys}
-              onUse={(target, key) => void handleSwitch(target, key)}
-              onClose={() => setPanelOpen(false)}
-            />
-          )}
           {view.name === "library" && (
             <LibraryScreen
               baseUrl={state.baseUrl}
               token={state.token}
+              providerLabel={`${provider}${providerRequiresKey(provider) && !keyed ? " · sin clave" : ""} · clave`}
+              onProvider={() => setPanelOpen((open) => !open)}
+              panel={
+                panelOpen && (
+                  <ProviderPanel
+                    active={provider}
+                    activeKeyed={keyed || !providerRequiresKey(provider)}
+                    keys={keys}
+                    onUse={(target, key) => void handleSwitch(target, key)}
+                    onClose={() => setPanelOpen(false)}
+                  />
+                )
+              }
               onNew={() => setView({ name: "translate" })}
               onOpen={(ficha) =>
                 setView(

@@ -4,6 +4,7 @@ import {
   getChunks,
   getGlossaryReview,
   getNarrators,
+  deleteJob,
   listJobs,
   putGlossary,
   putNarrators,
@@ -250,5 +251,28 @@ describe("putNarrators", () => {
     await expect(putNarrators(BASE, "secret", "job-1", [])).rejects.toThrow(
       /HTTP 422: .*unknown chapter key/,
     );
+  });
+});
+
+describe("deleteJob", () => {
+  it("DELETEs /jobs/{id} with the token and returns the body", async () => {
+    const body = { deleted: true, file_deleted: false };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => body });
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await deleteJob(BASE, "secret", "job-1")).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1`, {
+      method: "DELETE",
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+
+  it("throws with the status and body when the engine refuses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 409, text: async () => "running" }),
+    );
+
+    await expect(deleteJob(BASE, "secret", "job-1")).rejects.toThrow("HTTP 409: running");
   });
 });

@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { JobListItem } from "./apiTypes";
-import { fichaStatus, librarySummary, nextSignature, signature, toFichas } from "./library";
+import {
+  fichaStatus,
+  filterCounts,
+  filterFichas,
+  librarySummary,
+  nextSignature,
+  signature,
+  toFichas,
+} from "./library";
 
 function job(overrides: Partial<JobListItem> = {}): JobListItem {
   return {
@@ -93,5 +101,29 @@ describe("library summary", () => {
     const fichas = toFichas([job({ status: "RUNNING" }), job(), job({ failed_count: 1 })]);
     expect(librarySummary(fichas)).toBe("3 fichas · 2 terminadas");
     expect(librarySummary(toFichas([job()]))).toBe("1 ficha · 1 terminada");
+  });
+});
+
+describe("filters", () => {
+  const fichas = toFichas([
+    job({ id: "a", status: "RUNNING" }),
+    job({ id: "b", status: "DONE" }),
+    job({ id: "c", status: "DONE", failed_count: 1 }),
+    job({ id: "d", status: "CREATED" }),
+  ]);
+
+  it("shows everything for all and only the matching status otherwise", () => {
+    expect(filterFichas(fichas, "all")).toHaveLength(4);
+    expect(filterFichas(fichas, "done").map((f) => f.job.id)).toEqual(["b"]);
+    expect(filterFichas(fichas, "problems").map((f) => f.job.id)).toEqual(["c"]);
+    expect(filterFichas(fichas, "draft").map((f) => f.job.id)).toEqual(["d"]);
+  });
+
+  it("counts each status", () => {
+    expect(filterCounts(fichas)).toEqual({ all: 4, progress: 1, draft: 1, done: 1, problems: 1 });
+  });
+
+  it("keeps the signatures the unfiltered library gave", () => {
+    expect(filterFichas(fichas, "done")[0].signature).toBe("BAB-0003");
   });
 });

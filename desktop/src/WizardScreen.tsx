@@ -43,7 +43,7 @@ import { pickSourceFile } from "./filePicker";
 import EstimateSummary from "./EstimateSummary";
 import GlossaryTriage from "./GlossaryTriage";
 import NarratorReview from "./NarratorReview";
-import type { GlossaryEntry, JobStatus } from "./apiTypes";
+import type { GlossaryEntry, JobResponse, JobStatus } from "./apiTypes";
 
 const JOB_STATUS_LABELS: Record<JobStatus, string> = {
   CREATED: "creado",
@@ -110,6 +110,10 @@ export default function WizardScreen({
   const [model, setModel] = useState(() => defaultModelForProvider(provider));
   const subscriptionRef = useRef<SseSubscription | null>(null);
   const resumedRef = useRef(false);
+  // A stopped run picked from the library waits here for an explicit
+  // "Reanudar traducción": resuming spends money, so a click on the ficha
+  // alone must not start it.
+  const [pendingResume, setPendingResume] = useState<JobResponse | null>(null);
 
   useEffect(() => {
     return () => {
@@ -322,6 +326,17 @@ export default function WizardScreen({
         dispatch({ type: "RESUME_JOB", job: status });
         return;
       }
+      setPendingResume(status);
+    } catch (err) {
+      dispatch({ type: "RUN_START_FAILED", message: String(err) });
+    }
+  }
+
+  async function handleConfirmResume() {
+    if (!pendingResume) return;
+    const jobId = pendingResume.id;
+    setPendingResume(null);
+    try {
       const job = await resumeJob(baseUrl, token, jobId);
       dispatch({ type: "RESUME_JOB", job });
       startWatching(jobId);
@@ -330,7 +345,7 @@ export default function WizardScreen({
     }
   }
 
-  const currentStep = STEP_OF_SCREEN[state.screen];
+  const currentStep = pendingResume ? STEP_OF_SCREEN.run : STEP_OF_SCREEN[state.screen];
   const modelOptions = modelsForProvider(provider);
   const pendingGlossaryChanges = state.glossaryReview
     ? glossaryChangesToSave(state.glossaryReview, state.glossary).length
@@ -360,7 +375,21 @@ export default function WizardScreen({
           </li>
         ))}
       </ol>
-      {state.screen === "pick" && (
+      {pendingResume && state.screen === "pick" && (
+        <div>
+          <h2>Reanudar la traducción</h2>
+          <p>
+            Esta traducción quedó a medias: {pendingResume.completed_chunks} de{" "}
+            {pendingResume.total_chunks} fragmentos hechos, ${pendingResume.cost_usd.toFixed(3)} gastados.
+            Al reanudar se vuelve a llamar a {provider} y se paga lo que falta.
+          </p>
+          <button className="primary" onClick={() => void handleConfirmResume()}>
+            Reanudar traducción
+          </button>
+        </div>
+      )}
+
+      {state.screen === "pick" && !pendingResume && (
         <div>
           <h2>¿Qué libro vamos a traducir?</h2>
           <div className="file-row">

@@ -12,6 +12,7 @@
 import type {
   ChunksResponse,
   CreateJobRequest,
+  DeleteJobResponse,
   EstimateResponse,
   GlossaryEntry,
   GlossaryReviewResponse,
@@ -54,6 +55,19 @@ export function listJobs(baseUrl: string, token: string): Promise<JobListRespons
   return fetch(`${baseUrl}/jobs`, { headers: authHeaders(token) }).then(
     asJson<JobListResponse>,
   );
+}
+
+/** Deletes a stored job and, when the engine can tell which file is its
+ * translation inside the library folder, that file too. Never the source. */
+export function deleteJob(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+): Promise<DeleteJobResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}`, {
+    method: "DELETE",
+    headers: authHeaders(token),
+  }).then(asJson<DeleteJobResponse>);
 }
 
 export function getStatus(

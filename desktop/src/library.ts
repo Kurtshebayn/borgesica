@@ -79,3 +79,31 @@ export function librarySummary(fichas: Ficha[]): string {
   const done = finished === 1 ? "terminada" : "terminadas";
   return `${fichas.length} ${noun} · ${finished} ${done}`;
 }
+
+export type FichaFilter = "all" | FichaStatus;
+
+/** The filter bar, in display order. */
+export const FICHA_FILTERS: { id: FichaFilter; label: string }[] = [
+  { id: "all", label: "Todas" },
+  { id: "progress", label: "En curso" },
+  { id: "draft", label: "Borrador" },
+  { id: "done", label: "Listo" },
+  { id: "problems", label: "Con problemas" },
+];
+
+export function filterFichas(fichas: Ficha[], filter: FichaFilter): Ficha[] {
+  return filter === "all" ? fichas : fichas.filter((f) => f.status === filter);
+}
+
+/** How many fichas each filter would show, for the bar's counters. */
+export function filterCounts(fichas: Ficha[]): Record<FichaFilter, number> {
+  const counts: Record<FichaFilter, number> = {
+    all: fichas.length,
+    progress: 0,
+    draft: 0,
+    done: 0,
+    problems: 0,
+  };
+  for (const f of fichas) counts[f.status] += 1;
+  return counts;
+}

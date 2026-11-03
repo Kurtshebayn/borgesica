@@ -228,3 +228,10 @@ export interface CreateJobRequest {
   prose_segmentation?: "batch" | "paragraph";
   continue_on_error?: boolean;
 }
+
+/** `DELETE /jobs/{id}`: the job is gone; `file_deleted` says whether its
+ * translated file was removed from the library folder too. */
+export interface DeleteJobResponse {
+  deleted: boolean;
+  file_deleted: boolean;
+}

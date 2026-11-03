@@ -403,7 +403,8 @@ summary {
   position: fixed;
   inset: 0;
   z-index: 10;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: var(--s-7);
   background:
     linear-gradient(90deg, rgb(12 18 30 / 82%) 0%, rgb(12 18 30 / 50%) 50%, rgb(12 18 30 / 12%) 100%),
@@ -957,4 +958,95 @@ label:has(> input[type="checkbox"]) {
 .start-skip {
   display: block;
   margin: var(--s-3) auto 0;
+}
+
+.library-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-bottom: var(--s-5);
+}
+
+.filters button {
+  padding: 6px 12px;
+  font: 11px var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.filters button span {
+  color: var(--text-faint);
+}
+
+.filters button[aria-pressed="true"] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.filters button[aria-pressed="true"] span {
+  color: var(--text-faint);
+}
+
+.ficha-wrap {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+.ficha-delete {
+  position: absolute;
+  top: 38px;
+  right: 18px;
+  padding: 2px 6px;
+  border: 0;
+  background: none;
+  font: 11px var(--font-mono);
+  color: var(--text-muted);
+  opacity: 0;
+}
+
+.ficha-wrap:hover .ficha-delete,
+.ficha-delete:focus-visible {
+  opacity: 1;
+}
+
+.ficha-delete:hover:not(:disabled) {
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+dialog.confirm {
+  max-width: 460px;
+  padding: var(--s-6);
+  border: 1px solid var(--ink);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--offset-shadow);
+}
+
+dialog.confirm::backdrop {
+  background: rgb(12 18 30 / 55%);
+}
+
+dialog.confirm h2 {
+  margin: 0 0 var(--s-3);
+}
+
+button.danger {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+button.danger:hover:not(:disabled) {
+  background: #b82d16;
+  border-color: #b82d16;
 }
