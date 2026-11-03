@@ -1002,25 +1002,32 @@ label:has(> input[type="checkbox"]) {
 
 .ficha-delete {
   position: absolute;
-  top: 38px;
   right: 18px;
-  padding: 2px 6px;
-  border: 0;
-  background: none;
-  font: 11px var(--font-mono);
+  bottom: var(--s-4);
+  padding: 4px 10px;
+  border: 1px solid var(--rule-strong);
+  background: var(--surface);
+  font: 500 11px var(--font-ui);
   color: var(--text-muted);
-  opacity: 0;
-}
-
-.ficha-wrap:hover .ficha-delete,
-.ficha-delete:focus-visible {
-  opacity: 1;
 }
 
 .ficha-delete:hover:not(:disabled) {
-  background: none;
+  background: var(--surface);
+  border-color: var(--accent);
   color: var(--accent);
-  text-decoration: underline;
+}
+
+/* Room for the Borrar button that sits over the footer's right edge, so
+   Continuar/Reanudar lands beside it and Borrar takes its place without it. */
+.ficha-foot {
+  padding-right: 74px;
+}
+
+.ficha-foot > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 dialog.confirm {
