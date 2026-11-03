@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { deriveSidecarStatus, type SidecarState, type SidecarStatus } from "./sidecarStatus";
 import { startSidecar, stopSidecar } from "./sidecarClient";
-import { PROVIDERS, providerRequiresKey, type Provider } from "./wizard";
+import { providerRequiresKey, type Provider } from "./wizard";
 import CompareScreen from "./CompareScreen";
 import LibraryScreen from "./LibraryScreen";
-import LoadingScreen from "./LoadingScreen";
+import StartScreen from "./StartScreen";
 import WizardScreen from "./WizardScreen";
 
 const SIDECAR_STATUS_LABELS: Record<SidecarStatus, string> = {
@@ -92,57 +92,25 @@ export default function App() {
 
   return (
     <main className="app">
-      {booting && <LoadingScreen />}
-      <header className="app-header">
-        <h1>Borgésica</h1>
-        <span className="engine-status" data-status={status}>
-          Motor: {SIDECAR_STATUS_LABELS[status]}
-        </span>
-      </header>
       {status !== "ready" && (
-        <div className="card connect-fields">
-          <h2>Conectar el motor</h2>
-          <label>
-            Proveedor
-            <select
-              value={provider}
-              onChange={(e) => setProvider(e.target.value as Provider)}
-            >
-              {PROVIDERS.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-          </label>
-          <input
-            type="password"
-            placeholder={
-              provider === "ollama"
-                ? "Clave de API (no hace falta para Ollama)"
-                : "Clave de API (solo para esta sesión, nunca se guarda)"
-            }
-            value={apiKeyInput}
-            onChange={(e) => setApiKeyInput(e.target.value)}
-          />
-          <div className="actions">
-            <button
-              className="primary"
-              onClick={handleStart}
-              disabled={status === "starting" && started.current}
-            >
-              Iniciar
-            </button>
-          </div>
-        </div>
-      )}
-      {state.error && (
-        <p role="alert" style={{ marginTop: "var(--s-4)" }}>
-          {state.error}
-        </p>
+        <StartScreen
+          provider={provider}
+          apiKey={apiKeyInput}
+          booting={booting}
+          error={state.error}
+          onProviderChange={setProvider}
+          onApiKeyChange={setApiKeyInput}
+          onStart={() => void handleStart()}
+        />
       )}
       {status === "ready" && state.baseUrl && state.token && (
         <>
+          <header className="app-header">
+            <h1>Borgésica</h1>
+            <span className="engine-status" data-status={status}>
+              Motor: {SIDECAR_STATUS_LABELS[status]}
+            </span>
+          </header>
           {view.name === "library" && (
             <LibraryScreen
               baseUrl={state.baseUrl}

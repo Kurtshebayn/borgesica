@@ -410,7 +410,7 @@ export function formatBookEstimate(estimate: EstimateResponse): string {
  * person knows that clicking it starts spending on the book. */
 export const START_TRANSLATION_NOTE =
   "Traducir el libro empieza por preparar su glosario: es el primer paso pago. " +
-  "Después podrá revisarlo, y el texto se traduce cuando usted lo confirme.";
+  "Después podrás revisarlo, y el texto se traduce cuando tú lo confirmes.";
 
 /** The glossary's share of the book estimate. Preparing it is not optional:
  * it is the first paid step of the translation. */

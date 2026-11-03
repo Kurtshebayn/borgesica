@@ -344,7 +344,7 @@ export default function WizardScreen({
           >
             <span className="step-num">{String(i + 1).padStart(2, "0")}</span>
             <span className="step-name">{label}</span>
-            {i === currentStep && <span className="step-here">Aquí</span>}
+            {i === currentStep && <span className="step-here" aria-hidden="true" />}
           </li>
         ))}
       </ol>
