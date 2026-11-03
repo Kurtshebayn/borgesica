@@ -435,7 +435,11 @@ export default function WizardScreen({
           <h2>Glosario</h2>
           {peekError && <p role="alert">{peekError}</p>}
           {!peekGlossary && !peekError && <p>Cargando…</p>}
-          {peekGlossary && peekGlossary.length === 0 && <p>Este libro no tiene glosario.</p>}
+          {peekGlossary && peekGlossary.length === 0 && <p>
+              Este libro no tiene glosario. El glosario solo se prepara antes de empezar a
+              traducir; con la traducción ya empezada no se puede crear sin dejar el principio y
+              el resto del libro con términos distintos.
+            </p>}
           {peekGlossary && peekGlossary.length > 0 && (
             <ul className="peek-glossary">
               {peekGlossary.map((entry, i) => (
