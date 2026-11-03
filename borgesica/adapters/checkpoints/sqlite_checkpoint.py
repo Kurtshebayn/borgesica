@@ -342,6 +342,7 @@ class SQLiteCheckpointStore:
             :max_output_tokens, :glossary_extracted, :out_path
         )
         ON CONFLICT(id) DO UPDATE SET
+            model=excluded.model,
             status=excluded.status,
             total_chunks=excluded.total_chunks,
             completed_chunks=excluded.completed_chunks,

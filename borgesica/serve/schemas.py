@@ -41,6 +41,12 @@ class CreateJobRequest(BaseModel):
     continue_on_error: bool = True
 
 
+class UpdateJobRequest(BaseModel):
+    """The one thing a draft lets you change after creation: its model."""
+
+    model: str
+
+
 class JobResponse(BaseModel):
     """Job status payload + best-effort and FAILED count/indices.
 
@@ -53,6 +59,8 @@ class JobResponse(BaseModel):
 
     id: str
     status: JobStatus
+    # The model the job translates with (a draft's can be changed).
+    model: str
     total_chunks: int
     completed_chunks: int
     cost_usd: float
@@ -152,6 +160,7 @@ def job_to_response(
     return JobResponse(
         id=job.id,
         status=job.status,
+        model=job.config.model,
         total_chunks=job.total_chunks,
         completed_chunks=job.completed_chunks,
         cost_usd=job.cost_usd,

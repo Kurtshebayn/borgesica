@@ -575,6 +575,32 @@ class TranslatorEngine:
     # delete_job
     # ------------------------------------------------------------------
 
+    def update_job_model(self, job_id: str, model: str) -> Job:
+        """Change the model of a draft (CREATED) job and return the new Job.
+
+        Only a job that has not started may change it: after that, chunks
+        already translated would belong to the old model. The model's price
+        and the estimate follow it at once; nothing is called on a provider.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+            JobStateError: if the job is not CREATED.
+            ValueError: if model is blank.
+        """
+        if not model.strip():
+            raise ValueError("model must not be blank")
+        job = self._load_job_or_raise(job_id)
+        if job.status != JobStatus.CREATED:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        updated = job.model_copy(
+            update={
+                "config": job.config.model_copy(update={"model": model.strip()}),
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self._checkpoint.save_job(updated)
+        return updated
+
     def delete_job(self, job_id: str) -> Job:
         """Delete the job and every row keyed by it; return the deleted Job so
         the caller can find its out_path/source_path. Output files are NOT

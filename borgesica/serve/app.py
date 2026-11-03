@@ -51,6 +51,7 @@ from borgesica.serve.schemas import (
     NarratorsResponse,
     NarratorsUpdateRequest,
     RunRequest,
+    UpdateJobRequest,
     chunk_to_item,
     default_out_path,
     is_best_effort,
@@ -164,7 +165,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"^(https?://localhost(:\d+)?|https?://tauri\.localhost|tauri://localhost)$",
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-Borgesica-Token"],
     )
 
@@ -235,6 +236,19 @@ def create_app(
                 for job in engine.list_jobs()
             ]
         )
+
+    @app.patch("/jobs/{job_id}", response_model=JobResponse)
+    def update_job(job_id: str, payload: UpdateJobRequest) -> JobResponse:
+        """Change a draft's model. 404 unknown, 409 once the job has left
+        CREATED or while a run/extraction holds it, 422 for a blank model."""
+        job = engine.status(job_id)  # JobNotFoundError -> 404
+        if runner.is_active(job_id):
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        try:
+            engine.update_job_model(job_id, payload.model)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _status_response(job_id)
 
     @app.delete("/jobs/{job_id}", response_model=DeleteJobResponse)
     def delete_job(job_id: str) -> DeleteJobResponse:
