@@ -1020,7 +1020,7 @@ label:has(> input[type="checkbox"]) {
 /* Room for the Borrar button that sits over the footer's right edge, so
    Continuar/Reanudar lands beside it and Borrar takes its place without it. */
 .ficha-foot {
-  padding-right: 74px;
+  padding-right: 62px;
 }
 
 .ficha-foot > span:first-child {

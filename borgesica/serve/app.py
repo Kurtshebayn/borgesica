@@ -164,7 +164,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"^(https?://localhost(:\d+)?|https?://tauri\.localhost|tauri://localhost)$",
-        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-Borgesica-Token"],
     )
 
