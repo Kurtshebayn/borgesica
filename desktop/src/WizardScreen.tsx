@@ -22,6 +22,7 @@ import {
 import {
   defaultModelForProvider,
   formatBestEffortSummary,
+  formatBookEstimate,
   formatFailureSummary,
   formatOutputLocation,
   formatGlossaryProgress,
@@ -56,6 +57,13 @@ const JOB_STATUS_LABELS: Record<JobStatus, string> = {
 };
 
 const STEP_LABELS = ["Archivo", "Estimación", "Glosario", "Traducción", "Listo"];
+
+/** The steps of the bar that can be looked at again while a resume waits. */
+const PEEK_OF_STEP: Record<number, "estimate" | "glossary" | undefined> = {
+  1: "estimate",
+  2: "glossary",
+};
+const PEEK_STEP = { estimate: 1, glossary: 2 } as const;
 
 /** Which step of the bar each screen belongs to. */
 const STEP_OF_SCREEN: Record<WizardState["screen"], number> = {
@@ -114,6 +122,11 @@ export default function WizardScreen({
   // "Reanudar traducción": resuming spends money, so a click on the ficha
   // alone must not start it.
   const [pendingResume, setPendingResume] = useState<JobResponse | null>(null);
+  // While that confirmation waits, the earlier steps can be looked at again
+  // (read-only: nothing there spends money or changes the job).
+  const [peek, setPeek] = useState<"estimate" | "glossary" | null>(null);
+  const [peekGlossary, setPeekGlossary] = useState<GlossaryEntry[] | null>(null);
+  const [peekError, setPeekError] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -332,6 +345,17 @@ export default function WizardScreen({
     }
   }
 
+  async function handlePeek(target: "estimate" | "glossary" | null) {
+    setPeek(target);
+    if (target !== "glossary" || peekGlossary || !pendingResume) return;
+    setPeekError(null);
+    try {
+      setPeekGlossary((await getGlossary(baseUrl, token, pendingResume.id)).entries);
+    } catch (err) {
+      setPeekError(String(err));
+    }
+  }
+
   async function handleConfirmResume() {
     if (!pendingResume) return;
     const jobId = pendingResume.id;
@@ -363,19 +387,68 @@ export default function WizardScreen({
   return (
     <section className="wizard">
       <ol className="steps" aria-label="Proceso">
-        {STEP_LABELS.map((label, i) => (
-          <li
-            key={label}
-            data-state={i < currentStep ? "done" : i === currentStep ? "current" : "todo"}
-            aria-current={i === currentStep ? "step" : undefined}
-          >
-            <span className="step-num">{String(i + 1).padStart(2, "0")}</span>
-            <span className="step-name">{label}</span>
-            {i === currentStep && <span className="step-here" aria-hidden="true" />}
-          </li>
-        ))}
+        {STEP_LABELS.map((label, i) => {
+          // Only the steps already behind a waiting resume can be revisited.
+          const target = pendingResume ? PEEK_OF_STEP[i] : undefined;
+          const here = pendingResume ? (peek ? PEEK_STEP[peek] : currentStep) === i : i === currentStep;
+          return (
+            <li
+              key={label}
+              data-state={here ? "current" : i < currentStep ? "done" : "todo"}
+              aria-current={here ? "step" : undefined}
+            >
+              <span className="step-num">{String(i + 1).padStart(2, "0")}</span>
+              {target ? (
+                <button type="button" className="step-name step-link" onClick={() => void handlePeek(target)}>
+                  {label}
+                </button>
+              ) : pendingResume && i === currentStep ? (
+                <button type="button" className="step-name step-link" onClick={() => void handlePeek(null)}>
+                  {label}
+                </button>
+              ) : (
+                <span className="step-name">{label}</span>
+              )}
+              {here && <span className="step-here" aria-hidden="true" />}
+            </li>
+          );
+        })}
       </ol>
-      {pendingResume && state.screen === "pick" && (
+      {pendingResume && state.screen === "pick" && peek === "estimate" && (
+        <div>
+          <h2>Estimación</h2>
+          {state.estimate ? (
+            <>
+              <p>{formatBookEstimate(state.estimate)}</p>
+              {!state.estimate.within_budget && (
+                <p role="alert">Esta estimación supera el presupuesto configurado.</p>
+              )}
+            </>
+          ) : (
+            <p>No hay estimación disponible para este libro.</p>
+          )}
+          <button onClick={() => void handlePeek(null)}>← Volver a reanudar</button>
+        </div>
+      )}
+      {pendingResume && state.screen === "pick" && peek === "glossary" && (
+        <div>
+          <h2>Glosario</h2>
+          {peekError && <p role="alert">{peekError}</p>}
+          {!peekGlossary && !peekError && <p>Cargando…</p>}
+          {peekGlossary && peekGlossary.length === 0 && <p>Este libro no tiene glosario.</p>}
+          {peekGlossary && peekGlossary.length > 0 && (
+            <ul className="peek-glossary">
+              {peekGlossary.map((entry, i) => (
+                <li key={i}>
+                  <span>{entry.term}</span> → <span>{entry.translation}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button onClick={() => void handlePeek(null)}>← Volver a reanudar</button>
+        </div>
+      )}
+      {pendingResume && state.screen === "pick" && !peek && (
         <div>
           <h2>Reanudar la traducción</h2>
           <p>
@@ -383,9 +456,13 @@ export default function WizardScreen({
             {pendingResume.total_chunks} fragmentos hechos, ${pendingResume.cost_usd.toFixed(3)} gastados.
             Al reanudar se vuelve a llamar a {provider} y se paga lo que falta.
           </p>
-          <button className="primary" onClick={() => void handleConfirmResume()}>
-            Reanudar traducción
-          </button>
+          <div className="actions">
+            <button className="primary" onClick={() => void handleConfirmResume()}>
+              Reanudar traducción
+            </button>
+            <button onClick={() => void handlePeek("estimate")}>Ver estimación</button>
+            <button onClick={() => void handlePeek("glossary")}>Ver glosario</button>
+          </div>
         </div>
       )}
 

@@ -145,6 +145,29 @@ body {
   font: 400 1.5rem/1.2 var(--font-display);
 }
 
+.steps button.step-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.steps button.step-link:hover:not(:disabled) {
+  background: none;
+  text-decoration: underline;
+}
+
+.peek-glossary {
+  margin: var(--s-4) 0;
+  padding: 0;
+  list-style: none;
+  max-height: 50vh;
+  overflow-y: auto;
+  font: 13px/1.7 var(--font-mono);
+}
+
 .steps .step-here {
   align-self: center;
   flex: none;
