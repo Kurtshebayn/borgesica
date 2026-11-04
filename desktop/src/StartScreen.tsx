@@ -42,7 +42,7 @@ export default function StartScreen({
       <p className="start-kicker">Borgésica / motor</p>
       <h1 className="start-title">Borgésica</h1>
       <p className="start-tagline">
-        Un catálogo para los libros que ya leíste en otro idioma.
+        Traducción de libros al español, coherente de la primera página a la última.
       </p>
       <form className="start-card" onSubmit={handleSubmit} aria-busy={booting}>
         <div className="start-card-head">
