@@ -10,7 +10,7 @@ Usage:
 
 Subcommands:
     create  <source_file> --model <model>
-             [--provider anthropic|deepseek|openai|openrouter|ollama]
+             [--provider anthropic|deepseek|openai|openrouter|gemini|ollama]
              [--chunk-size N] [--budget USD] [--quality-mode fast|reflective] [--strict]
              [--extract N] [--from M]
              (source format auto-detected from .srt/.epub/.pdf extension)
@@ -71,13 +71,14 @@ Subcommands:
 Provider selection:
     Pass --provider on any command, or let it auto-detect: BORGESICA_PROVIDER env
     var if set, otherwise whichever key is present
-    (anthropic → deepseek → openai → openrouter → ollama).
+    (anthropic → deepseek → openai → openrouter → gemini → ollama).
 
 Environment (per provider; only the selected provider's key is required):
     ANTHROPIC_API_KEY  — for --provider anthropic
     DEEPSEEK_API_KEY   — for --provider deepseek
     OPENAI_API_KEY     — for --provider openai
     OPENROUTER_API_KEY — for --provider openrouter
+    GEMINI_API_KEY     — for --provider gemini
     OLLAMA_HOST        — for --provider ollama (optional; defaults to localhost:11434)
     BORGESICA_PROVIDER — optional; sets the default provider when --provider is omitted
     BORGESICA_WORKERS  — optional; default --workers for run, resume and serve
@@ -177,7 +178,8 @@ def _default_provider() -> str:
     """Resolve the provider when --provider is not given.
 
     Precedence: explicit BORGESICA_PROVIDER env var → auto-detect from whichever
-    provider key is present (anthropic → deepseek → openai → openrouter → ollama) → 'anthropic'
+    provider key is present (anthropic → deepseek → openai → openrouter → gemini → ollama)
+    → 'anthropic'
     (which then errors clearly about its missing key).
     """
     explicit = os.environ.get("BORGESICA_PROVIDER")
@@ -191,6 +193,8 @@ def _default_provider() -> str:
         return "openai"
     if os.environ.get("OPENROUTER_API_KEY"):
         return "openrouter"
+    if os.environ.get("GEMINI_API_KEY"):
+        return "gemini"
     if os.environ.get("OLLAMA_HOST"):
         return "ollama"
     return "anthropic"
@@ -318,7 +322,7 @@ def _build_provider(provider: str, *, key_stdin: bool = False) -> Any:
     """Instantiate a TranslationProvider by name.
 
     Supported: 'anthropic' (ANTHROPIC_API_KEY), 'deepseek' (DEEPSEEK_API_KEY),
-    'openai' (OPENAI_API_KEY), 'openrouter' (OPENROUTER_API_KEY),
+    'openai' (OPENAI_API_KEY), 'openrouter' (OPENROUTER_API_KEY), 'gemini' (GEMINI_API_KEY),
     'ollama' (local; OLLAMA_HOST optional, no key needed).
 
     key_stdin: when True, the provider's API key is read from a JSON init line
@@ -356,13 +360,20 @@ def _build_provider(provider: str, *, key_stdin: bool = False) -> Any:
 
         key = _resolve_key("OPENROUTER_API_KEY", "openrouter", key_stdin=key_stdin)
         return OpenAICompatibleProvider.openrouter(api_key=key)
+    if name == "gemini":
+        from borgesica.adapters.providers.openai_compatible_provider import (
+            OpenAICompatibleProvider,
+        )
+
+        key = _resolve_key("GEMINI_API_KEY", "gemini", key_stdin=key_stdin)
+        return OpenAICompatibleProvider.gemini(api_key=key)
     if name == "ollama":
         from borgesica.adapters.providers.ollama_provider import OllamaProvider
 
         return OllamaProvider()  # base_url resolved from OLLAMA_HOST; no API key needed
     print(
         f"ERROR: unknown provider {provider!r} "
-        f"(choose: anthropic, deepseek, openai, openrouter, ollama).",
+        f"(choose: anthropic, deepseek, openai, openrouter, gemini, ollama).",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -376,7 +387,7 @@ def _build_engine(
 
     Args:
         provider: Provider name — 'anthropic' (default), 'deepseek', 'openai',
-                  'openrouter', or 'ollama'.
+                  'openrouter', 'gemini', or 'ollama'.
         model:    Model string (persisted in JobConfig; not validated here).
         db_path:  SQLite checkpoint DB path. Defaults to ~/.borgesica/jobs.db.
                   Pass ":memory:" for ephemeral use.
@@ -893,9 +904,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
-    provider_choices = ["anthropic", "deepseek", "openai", "openrouter", "ollama"]
+    provider_choices = ["anthropic", "deepseek", "openai", "openrouter", "gemini", "ollama"]
     provider_help = (
-        "Provider: anthropic/deepseek/openai/openrouter/ollama. Default: auto-detect from "
+        "Provider: anthropic/deepseek/openai/openrouter/gemini/ollama. Default: auto-detect from "
         "BORGESICA_PROVIDER env or whichever API key is set."
     )
 

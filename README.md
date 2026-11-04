@@ -39,7 +39,7 @@ El motor funciona de punta a punta y hoy tiene dos formas de usarlo: una **CLI**
 | Subtítulos SRT → SRT | ✅ Funcional |
 | Libros EPUB → EPUB | ✅ Funcional (incluye tabla de contenidos traducida) |
 | Libros PDF | ✅ Funcional (PDFs digitales, sin OCR) |
-| Providers: Anthropic, OpenAI-compatible (DeepSeek, OpenRouter…), Ollama (local) | ✅ |
+| Providers: Anthropic, OpenAI-compatible (DeepSeek, OpenRouter…), Gemini, Ollama (local) | ✅ |
 | Glosario + narrador por capítulo | ✅ |
 | Checkpointing y reanudación | ✅ |
 | CLI | ✅ Funcional |
@@ -101,7 +101,7 @@ npm run tauri dev
 
 El repo trae subtítulos de muestra en `samples/`, así que no hace falta conseguir un libro para ver el motor funcionando. Cada archivo `-en` viene con su `-es`: la traducción de referencia, para comparar contra la que genere tu modelo.
 
-Necesitas la clave del proveedor que elijas en el entorno (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` u `OPENROUTER_API_KEY`), o ninguna si usas Ollama en local.
+Necesitas la clave del proveedor que elijas en el entorno (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY` o `GEMINI_API_KEY`), o ninguna si usas Ollama en local.
 
 ```bash
 # 1. Crear el trabajo — imprime el job id. No traduce ni gasta nada todavía.

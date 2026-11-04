@@ -317,6 +317,82 @@ def test_provider_flag_accepts_openrouter() -> None:
     assert args.provider == "openrouter"
 
 
+def test_build_provider_gemini_resolves_key_and_targets_gemini_base_url() -> None:
+    """_build_provider('gemini') resolves GEMINI_API_KEY and dispatches to
+    OpenAICompatibleProvider.gemini()."""
+    import os
+
+    from borgesica.__main__ import _build_provider
+
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "g-key"}, clear=True):
+        provider = _build_provider("gemini")
+
+    assert provider.base_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
+    assert provider.default_model == "gemini-2.5-flash"
+
+
+def test_build_provider_gemini_missing_key_exits_with_clear_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import os
+
+    from borgesica.__main__ import _build_provider
+
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(SystemExit) as exc_info:
+            _build_provider("gemini")
+
+    assert exc_info.value.code == 1
+    assert (
+        "ERROR: GEMINI_API_KEY environment variable is not set "
+        "(required for --provider gemini)."
+    ) in capsys.readouterr().err
+
+
+def test_build_provider_gemini_and_openrouter_read_key_from_stdin() -> None:
+    """serve --key-stdin (desktop sidecar) hands the key over stdin for the new
+    providers, without touching the environment."""
+    import io
+    import os
+
+    from borgesica.__main__ import _build_provider
+
+    for name, base in (
+        ("gemini", "generativelanguage.googleapis.com"),
+        ("openrouter", "openrouter.ai"),
+    ):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "sys.stdin", io.StringIO('{"api_key": "from-stdin"}\n')
+        ):
+            provider = _build_provider(name, key_stdin=True)
+        assert base in provider.base_url
+        assert provider._api_key == "from-stdin"
+
+
+def test_default_provider_resolution_gemini_after_openrouter_before_ollama() -> None:
+    import os
+
+    from borgesica.__main__ import _default_provider
+
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "g"}, clear=True):
+        assert _default_provider() == "gemini"
+    with patch.dict(
+        os.environ, {"OPENROUTER_API_KEY": "sk-or", "GEMINI_API_KEY": "g"}, clear=True
+    ):
+        assert _default_provider() == "openrouter"
+    with patch.dict(
+        os.environ, {"GEMINI_API_KEY": "g", "OLLAMA_HOST": "localhost:11434"}, clear=True
+    ):
+        assert _default_provider() == "gemini"
+
+
+def test_provider_flag_accepts_gemini() -> None:
+    from borgesica.__main__ import _build_parser
+
+    args = _build_parser().parse_args(["status", "job-1", "--provider", "gemini"])
+    assert args.provider == "gemini"
+
+
 def test_estimate_resolves_provider_from_env_not_hardcoded_anthropic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

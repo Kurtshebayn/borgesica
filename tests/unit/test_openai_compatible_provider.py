@@ -856,6 +856,62 @@ class TestOpenRouterPreset:
         assert provider.price("xiaomi/mimo-v2.6-pro") == (0.435, 0.87)
 
 
+class TestOpenRouterFallbackPrice:
+    def test_unlisted_openrouter_model_falls_back_to_estimate_rate(self):
+        """An OpenRouter model without a price row uses the fallback estimate rate,
+        and its cache price assumes no discount."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.price("vendor/unlisted") == (3.0, 15.0)
+        assert provider.cache_price("vendor/unlisted") == 3.0
+
+
+# ---------------------------------------------------------------------------
+# Test 9d: Gemini preset (OpenAI-compatible endpoint).
+# ---------------------------------------------------------------------------
+
+
+class TestGeminiPreset:
+    def test_base_url_and_default_model(self):
+        provider = OpenAICompatibleProvider.gemini(api_key="g-fake", _client=object())
+        assert provider.base_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
+        assert provider.default_model == "gemini-2.5-flash"
+
+    def test_prices(self):
+        provider = OpenAICompatibleProvider.gemini(api_key="g-fake", _client=object())
+        assert provider.price("gemini-2.5-flash") == (0.30, 2.50)
+        assert provider.price("gemini-2.5-flash-lite") == (0.10, 0.40)
+        assert provider.price("gemini-2.5-pro") == (1.25, 10.00)
+        assert provider.price("gemini-unknown") == (3.0, 15.0)
+
+    def test_cache_price_assumes_no_discount(self):
+        provider = OpenAICompatibleProvider.gemini(api_key="g-fake", _client=object())
+        assert provider.cache_price("gemini-2.5-flash") == 0.30
+
+    def test_extra_price_table(self):
+        provider = OpenAICompatibleProvider.gemini(
+            api_key="g-fake", extra_price_table={"gemini-x": (1.0, 2.0)}, _client=object()
+        )
+        assert provider.price("gemini-x") == (1.0, 2.0)
+        assert provider.price("gemini-2.5-flash") == (0.30, 2.50)
+
+    def test_flash_sends_no_thinking_and_pro_sends_low(self):
+        """Flash keeps reasoning_effort='none'; 2.5 Pro cannot disable thinking, so
+        it gets 'low' and the larger reasoning output cap."""
+        flash_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        OpenAICompatibleProvider.gemini(api_key="g", _client=flash_client).translate(
+            "system", "Hello world", "gemini-2.5-flash"
+        )
+        assert flash_client.call_log[0]["reasoning_effort"] == "none"
+        assert flash_client.call_log[0]["max_tokens"] == 8192
+
+        pro_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        OpenAICompatibleProvider.gemini(api_key="g", _client=pro_client).translate(
+            "system", "Hello world", "gemini-2.5-pro"
+        )
+        assert pro_client.call_log[0]["reasoning_effort"] == "low"
+        assert pro_client.call_log[0]["max_tokens"] == 40960
+
+
 # ---------------------------------------------------------------------------
 # Test 10: Segmented output (SRT cue arrays — segment_count contract)
 # ---------------------------------------------------------------------------
