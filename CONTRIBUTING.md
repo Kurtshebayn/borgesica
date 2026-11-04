@@ -20,9 +20,6 @@ El extra `dev` trae pytest, ruff y las dependencias de fixtures. Los demás son
 opcionales según lo que vayas a tocar: `epub` para el lector de
 libros, `serve` para la API HTTP, `openai-compat` para DeepSeek, OpenAI, OpenRouter y Gemini.
 
-> `pdf-fast` queda deliberadamente fuera de esa línea: PyMuPDF es **AGPL-3.0** y
-> por eso es opt-in explícito. No lo agregues a las dependencias por defecto.
-
 Para las claves de proveedor, copia `.env.example` a `.env` y completa solo la
 del proveedor que vayas a usar. La CLI carga ese archivo al arrancar, buscándolo
 desde el directorio en el que corres el comando hacia arriba. Una variable ya
