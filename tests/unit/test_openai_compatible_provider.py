@@ -813,6 +813,106 @@ class TestOpenAIPreset:
 
 
 # ---------------------------------------------------------------------------
+# Test 9c: OpenRouter preset — base_url, default model, price and cache tables,
+# and the UNMEASURED retry_waste_factor it must keep.
+# ---------------------------------------------------------------------------
+
+
+class TestOpenRouterPreset:
+    def test_openrouter_preset_sets_correct_base_url(self):
+        """OpenRouter preset uses base_url='https://openrouter.ai/api/v1'."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.base_url == "https://openrouter.ai/api/v1"
+
+    def test_openrouter_preset_sets_correct_default_model(self):
+        """OpenRouter preset defaults to model='xiaomi/mimo-v2.6-pro'."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.default_model == "xiaomi/mimo-v2.6-pro"
+
+    def test_openrouter_preset_prices_mimo_v2_6_pro(self):
+        """xiaomi/mimo-v2.6-pro is priced at $0.435/$0.87 per Mtok."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.price("xiaomi/mimo-v2.6-pro") == (0.435, 0.87)
+
+    def test_openrouter_preset_cache_price_for_mimo_v2_6_pro(self):
+        """xiaomi/mimo-v2.6-pro cache reads are priced at $0.0036 per Mtok."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.cache_price("xiaomi/mimo-v2.6-pro") == pytest.approx(0.0036)
+
+    def test_openrouter_preset_keeps_unmeasured_retry_waste_factor(self):
+        """Nobody has measured OpenRouter's tier fallthrough, so the preset must
+        keep the heavy 3.0 class default rather than a tuned override."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.retry_waste_factor == 3.0
+
+    def test_openrouter_preset_accepts_extra_price_table(self):
+        """extra_price_table entries are added to the preset table."""
+        provider = OpenAICompatibleProvider.openrouter(
+            api_key="sk-or-fake",
+            extra_price_table={"vendor/other-model": (1.0, 2.0)},
+            _client=object(),
+        )
+        assert provider.price("vendor/other-model") == (1.0, 2.0)
+        assert provider.price("xiaomi/mimo-v2.6-pro") == (0.435, 0.87)
+
+
+class TestOpenRouterFallbackPrice:
+    def test_unlisted_openrouter_model_falls_back_to_estimate_rate(self):
+        """An OpenRouter model without a price row uses the fallback estimate rate,
+        and its cache price assumes no discount."""
+        provider = OpenAICompatibleProvider.openrouter(api_key="sk-or-fake", _client=object())
+        assert provider.price("vendor/unlisted") == (3.0, 15.0)
+        assert provider.cache_price("vendor/unlisted") == 3.0
+
+
+# ---------------------------------------------------------------------------
+# Test 9d: Gemini preset (OpenAI-compatible endpoint).
+# ---------------------------------------------------------------------------
+
+
+class TestGeminiPreset:
+    def test_base_url_and_default_model(self):
+        provider = OpenAICompatibleProvider.gemini(api_key="g-fake", _client=object())
+        assert provider.base_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
+        assert provider.default_model == "gemini-2.5-flash"
+
+    def test_prices(self):
+        provider = OpenAICompatibleProvider.gemini(api_key="g-fake", _client=object())
+        assert provider.price("gemini-2.5-flash") == (0.30, 2.50)
+        assert provider.price("gemini-2.5-flash-lite") == (0.10, 0.40)
+        assert provider.price("gemini-2.5-pro") == (1.25, 10.00)
+        assert provider.price("gemini-unknown") == (3.0, 15.0)
+
+    def test_cache_price_assumes_no_discount(self):
+        provider = OpenAICompatibleProvider.gemini(api_key="g-fake", _client=object())
+        assert provider.cache_price("gemini-2.5-flash") == 0.30
+
+    def test_extra_price_table(self):
+        provider = OpenAICompatibleProvider.gemini(
+            api_key="g-fake", extra_price_table={"gemini-x": (1.0, 2.0)}, _client=object()
+        )
+        assert provider.price("gemini-x") == (1.0, 2.0)
+        assert provider.price("gemini-2.5-flash") == (0.30, 2.50)
+
+    def test_flash_sends_no_thinking_and_pro_sends_low(self):
+        """Flash keeps reasoning_effort='none'; 2.5 Pro cannot disable thinking, so
+        it gets 'low' and the larger reasoning output cap."""
+        flash_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        OpenAICompatibleProvider.gemini(api_key="g", _client=flash_client).translate(
+            "system", "Hello world", "gemini-2.5-flash"
+        )
+        assert flash_client.call_log[0]["reasoning_effort"] == "none"
+        assert flash_client.call_log[0]["max_tokens"] == 8192
+
+        pro_client = FakeOpenAIClient(responses=[_TOOL_CALL_RESPONSE])
+        OpenAICompatibleProvider.gemini(api_key="g", _client=pro_client).translate(
+            "system", "Hello world", "gemini-2.5-pro"
+        )
+        assert pro_client.call_log[0]["reasoning_effort"] == "low"
+        assert pro_client.call_log[0]["max_tokens"] == 40960
+
+
+# ---------------------------------------------------------------------------
 # Test 10: Segmented output (SRT cue arrays — segment_count contract)
 # ---------------------------------------------------------------------------
 

@@ -115,8 +115,15 @@ describe("formatFailureSummary", () => {
 });
 
 describe("provider selection", () => {
-  it("offers the four engine-supported providers", () => {
-    expect(PROVIDERS).toEqual(["anthropic", "deepseek", "openai", "ollama"]);
+  it("offers the six engine-supported providers", () => {
+    expect(PROVIDERS).toEqual([
+      "anthropic",
+      "deepseek",
+      "openai",
+      "openrouter",
+      "gemini",
+      "ollama",
+    ]);
   });
 
   it("defaults Anthropic to a current (non-retired) model id", () => {
@@ -131,6 +138,19 @@ describe("provider selection", () => {
 
   it("defaults OpenAI to gpt-5.6-luna", () => {
     expect(defaultModelForProvider("openai")).toBe("gpt-5.6-luna");
+  });
+
+  it("defaults OpenRouter to a vendor/model id and Gemini to gemini-2.5-flash", () => {
+    expect(defaultModelForProvider("openrouter")).toBe("xiaomi/mimo-v2.6-pro");
+    expect(defaultModelForProvider("gemini")).toBe("gemini-2.5-flash");
+  });
+
+  it("lists the default first in each hosted provider's models", () => {
+    for (const p of PROVIDERS.filter((q) => q !== "ollama")) {
+      expect(modelsForProvider(p)[0]).toBe(defaultModelForProvider(p));
+    }
+    expect(modelsForProvider("gemini")).toContain("gemini-2.5-pro");
+    expect(modelsForProvider("ollama")).toEqual([]);
   });
 
   it("leaves the model blank for Ollama (models are user-local, not fixed)", () => {
@@ -149,6 +169,11 @@ describe("providerRequiresKey", () => {
 
   it("requires a key for openai (hosted, key-authenticated)", () => {
     expect(providerRequiresKey("openai")).toBe(true);
+  });
+
+  it("requires a key for openrouter and gemini (hosted, key-authenticated)", () => {
+    expect(providerRequiresKey("openrouter")).toBe(true);
+    expect(providerRequiresKey("gemini")).toBe(true);
   });
 
   it("does not require a key for ollama (runs locally)", () => {

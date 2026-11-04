@@ -184,6 +184,38 @@ _OPENAI_REASONING_EFFORT: dict[str, str | None] = {
     "gpt-6.1-sol": "low",
 }
 
+# OpenRouter price table — (input_usd_per_mtok, output_usd_per_mtok).
+# NOT used for billing; only for pre-flight cost estimates. Taken from the
+# OpenRouter model listing on 2026-09-25, not from a bill.
+_OPENROUTER_PRICE_TABLE: dict[str, tuple[float, float]] = {
+    "xiaomi/mimo-v2.6-pro": (0.435, 0.87),
+}
+
+# USD per Mtok for cache reads, from the same OpenRouter listing (2026-09-25).
+# Listed, not measured: unlike _DEEPSEEK_CACHE_PRICE, no bill has confirmed it.
+_OPENROUTER_CACHE_PRICE: dict[str, float] = {
+    "xiaomi/mimo-v2.6-pro": 0.0036,
+}
+
+# Gemini price table — (input_usd_per_mtok, output_usd_per_mtok), Standard tier,
+# short context. NOT used for billing; only for pre-flight estimates. Read on
+# 2026-11-04 from third-party aggregators that cite Google's pricing page, NOT
+# from the page itself or from a bill: re-check before trusting. Thinking tokens
+# are billed as output at the listed output rate.
+_GEMINI_PRICE_TABLE: dict[str, tuple[float, float]] = {
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-2.5-pro": (1.25, 10.00),
+}
+
+# Per-model reasoning_effort defaults for the .gemini() preset. Google's
+# compatibility docs state that Gemini 2.5 Pro cannot have thinking disabled,
+# so the class-wide 'none' would be rejected with a 4xx (tier-3 then raises).
+# 'low' is the lowest documented value. UNMEASURED against the live API.
+_GEMINI_REASONING_EFFORT: dict[str, str | None] = {
+    "gemini-2.5-pro": "low",
+}
+
 
 # ---------------------------------------------------------------------------
 # OpenAICompatibleProvider
@@ -381,6 +413,74 @@ class OpenAICompatibleProvider:
         provider.retry_waste_factor = 1.5  # instance attr; GPT is Tier-1-reliable
         provider._completion_tokens_param_name = "max_completion_tokens"  # instance attr
         provider._reasoning_effort_by_model = dict(_OPENAI_REASONING_EFFORT)  # instance attr
+        return provider
+
+    @classmethod
+    def openrouter(
+        cls,
+        api_key: str,
+        default_model: str = "xiaomi/mimo-v2.6-pro",
+        extra_price_table: dict[str, tuple[float, float]] | None = None,
+        _client: Any | None = None,
+    ) -> "OpenAICompatibleProvider":
+        """Preset for OpenRouter (https://openrouter.ai/api/v1).
+
+        Prices: xiaomi/mimo-v2.6-pro = ($0.435, $0.87)/Mtok,
+                cache read $0.0036/Mtok (OpenRouter listing, 2026-09-25).
+        The model string passed to translate() is forwarded unchanged, so any
+        "vendor/model" id OpenRouter routes can be used; unlisted ones fall
+        back to _FALLBACK_PRICE for estimates.
+
+        retry_waste_factor is deliberately NOT overridden: nobody has measured
+        how often OpenRouter-routed models fall through the tiers, so the
+        instance keeps the heavy 3.0 class default for an unmeasured endpoint.
+        _completion_tokens_param_name and reasoning_effort also keep their
+        class defaults ("max_tokens", "none").
+        """
+        table = dict(_OPENROUTER_PRICE_TABLE)
+        if extra_price_table:
+            table.update(extra_price_table)
+        return cls(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+            default_model=default_model,
+            price_table=table,
+            _client=_client,
+            cache_price_table=dict(_OPENROUTER_CACHE_PRICE),
+        )
+
+    @classmethod
+    def gemini(
+        cls,
+        api_key: str,
+        default_model: str = "gemini-2.5-flash",
+        extra_price_table: dict[str, tuple[float, float]] | None = None,
+        _client: Any | None = None,
+    ) -> "OpenAICompatibleProvider":
+        """Preset for Google Gemini through its OpenAI-compatible endpoint.
+
+        Base URL: https://generativelanguage.googleapis.com/v1beta/openai/
+        (GEMINI_API_KEY). Prices: gemini-2.5-flash = ($0.30, $2.50)/Mtok,
+        gemini-2.5-flash-lite = ($0.10, $0.40)/Mtok, gemini-2.5-pro =
+        ($1.25, $10.00)/Mtok; unlisted models fall back to _FALLBACK_PRICE.
+
+        reasoning_effort keeps the class default 'none' (thinking off, accepted
+        by the 2.5 Flash family); gemini-2.5-pro cannot disable thinking, so it
+        gets 'low' through _reasoning_effort_by_model. No cache rate is listed:
+        cache_price() falls back to the input price (assumes no discount).
+        retry_waste_factor keeps the unmeasured-endpoint default of 3.0.
+        """
+        table = dict(_GEMINI_PRICE_TABLE)
+        if extra_price_table:
+            table.update(extra_price_table)
+        provider = cls(
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key=api_key,
+            default_model=default_model,
+            price_table=table,
+            _client=_client,
+        )
+        provider._reasoning_effort_by_model = dict(_GEMINI_REASONING_EFFORT)  # instance attr
         return provider
 
     # ------------------------------------------------------------------

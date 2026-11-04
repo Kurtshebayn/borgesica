@@ -56,6 +56,38 @@ through to the JSON-mode/prompt-parse fallback tiers.
 > Selecting an o-series `--model` is not special-cased or validated — the raw OpenAI API
 > error is surfaced unmodified. This is an explicit, documented scope boundary, not a bug.
 
+### OpenRouter
+
+Reuses the same `OpenAICompatibleProvider` adapter via a dedicated `.openrouter()` preset
+(`--provider openrouter`, `OPENROUTER_API_KEY`). Any `vendor/model` id OpenRouter routes can be
+passed with `--model`; only the one below has a price entry, the rest fall back to the default
+estimate rate. The retry-waste ceiling factor stays at the untuned `3.0`: tier fallthrough has not
+been measured on this endpoint yet.
+
+| Model | Provider | Notes |
+|-------|----------|-------|
+| `xiaomi/mimo-v2.6-pro` | OpenRouter (`https://openrouter.ai/api/v1`) | $0.435/Mtok input, $0.87/Mtok output, $0.0036/Mtok cache read (OpenRouter listing, 2026-09-25). Default model for `--provider openrouter`. Translation quality not yet evaluated. |
+
+### Google Gemini
+
+Reuses the same `OpenAICompatibleProvider` adapter through Google's OpenAI-compatible endpoint
+(`https://generativelanguage.googleapis.com/v1beta/openai/`) via the `.gemini()` preset
+(`--provider gemini`, `GEMINI_API_KEY`; get a key in Google AI Studio). Tool calling, JSON mode and
+`max_tokens` go through that endpoint, so no native adapter is needed. Prices were read on
+2026-11-04 from third-party aggregators citing Google's pricing page, not from a bill: treat them
+as estimates. Thinking tokens are billed as output. No cache rate is listed, so cache reads are
+estimated at the full input price (no discount assumed). Unlisted model ids fall back to the default
+estimate rate.
+
+| Model | Notes |
+|-------|-------|
+| `gemini-2.5-flash` | $0.30/Mtok input, $2.50/Mtok output. Default model for `--provider gemini`. Thinking is sent as off (`reasoning_effort="none"`). |
+| `gemini-2.5-flash-lite` | $0.10/Mtok input, $0.40/Mtok output. Thinking off. |
+| `gemini-2.5-pro` | $1.25/Mtok input, $10.00/Mtok output. Cannot disable thinking, so it is sent `reasoning_effort="low"` with the larger output cap. Unmeasured against the live API. |
+
+The retry-waste ceiling factor stays at the untuned `3.0`: tier fallthrough has not been measured on
+this endpoint.
+
 ### Private / Free / Offline
 
 Runs locally through Ollama, with no API key and no connection required — supported today,
