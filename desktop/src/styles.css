@@ -994,6 +994,57 @@ label:has(> input[type="checkbox"]) {
   margin: 0;
 }
 
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgb(15 27 45 / 35%);
+  animation: drawer-fade 160ms ease-out;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  width: min(400px, 100vw);
+  overflow-y: auto;
+  border-left: 1px solid var(--ink);
+  background: var(--surface);
+  box-shadow: -8px 0 0 rgb(15 27 45 / 10%);
+  animation: drawer-in 200ms ease-out;
+}
+
+.drawer-form {
+  display: grid;
+  gap: var(--s-4);
+  padding: var(--s-6);
+}
+
+.drawer-form h2 {
+  margin: 0;
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes drawer-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer,
+  .drawer-backdrop {
+    animation: none;
+  }
+}
+
 .start-skip {
   display: block;
   margin: var(--s-3) auto 0;

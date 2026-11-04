@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PROVIDERS, providerRequiresKey, type Provider } from "./wizard";
 
 interface Props {
@@ -13,17 +13,32 @@ interface Props {
 }
 
 /**
- * Change the provider or add its key once the app is running. The engine is
+ * Change the provider or add its key once the app is running, in a drawer
+ * that slides over the right edge so the page underneath never shifts. The engine is
  * bound to one provider when it starts, so "Usar" restarts it; keys already
  * typed stay in memory so going back and forth asks for nothing twice.
  */
-export default function ProviderPanel({ active, activeKeyed, keys, onUse, onClose }: Props) {
+export default function ProviderPanel({
+  active,
+  activeKeyed,
+  keys,
+  onUse,
+  onClose,
+}: Props) {
   const [selected, setSelected] = useState<Provider>(active);
   const [typed, setTyped] = useState("");
 
+  // Escape closes it, like the confirm dialog.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const stored = keys[selected] ?? "";
   const needsKey = providerRequiresKey(selected);
-  const unchanged = selected === active && typed.trim() === "" && (activeKeyed || !stored);
+  const unchanged =
+    selected === active && typed.trim() === "" && (activeKeyed || !stored);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -31,53 +46,58 @@ export default function ProviderPanel({ active, activeKeyed, keys, onUse, onClos
   }
 
   return (
-    <form className="card provider-panel" onSubmit={handleSubmit}>
-      <h2>Proveedor y clave</h2>
-      <label>
-        Proveedor
-        <select
-          value={selected}
-          onChange={(e) => {
-            setSelected(e.target.value as Provider);
-            setTyped("");
-          }}
-        >
-          {PROVIDERS.map((p) => (
-            <option key={p} value={p}>
-              {p}
-              {keys[p] ? " · con clave" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-      {needsKey && (
-        <label>
-          Clave de API
-          <input
-            type="password"
-            autoComplete="off"
-            placeholder={
-              stored
-                ? "Ya hay una clave en esta sesión; escribe otra para reemplazarla"
-                : "Solo para esta sesión, nunca se guarda en disco"
-            }
-            value={typed}
-            onChange={(e) => setTyped(e.target.value)}
-          />
-        </label>
-      )}
-      <p className="hint">
-        Las claves solo viven en memoria mientras la app esté abierta. Cambiar de proveedor
-        reinicia el motor.
-      </p>
-      <div className="actions">
-        <button type="submit" className="primary" disabled={unchanged}>
-          {needsKey && !typed.trim() && !stored ? "Usar sin clave" : "Usar"}
-        </button>
-        <button type="button" onClick={onClose}>
-          Cerrar
-        </button>
-      </div>
-    </form>
+    <>
+      <div className="drawer-backdrop" onClick={onClose} />
+      <aside className="drawer" role="dialog" aria-label="Proveedor y clave">
+        <form className="drawer-form" onSubmit={handleSubmit}>
+          <h2>Proveedor y clave</h2>
+          <label>
+            Proveedor
+            <select
+              value={selected}
+              onChange={(e) => {
+                setSelected(e.target.value as Provider);
+                setTyped("");
+              }}
+            >
+              {PROVIDERS.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                  {keys[p] ? " · con clave" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          {needsKey && (
+            <label>
+              Clave de API
+              <input
+                type="password"
+                autoComplete="off"
+                placeholder={
+                  stored
+                    ? "Ya hay una clave en esta sesión; escribe otra para reemplazarla"
+                    : "Solo para esta sesión, nunca se guarda en disco"
+                }
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+              />
+            </label>
+          )}
+          <p className="hint">
+            Las claves solo viven en memoria mientras la app esté abierta.
+            Cambiar de proveedor reinicia el motor.
+          </p>
+          <div className="actions">
+            <button type="submit" className="primary" disabled={unchanged}>
+              {needsKey && !typed.trim() && !stored ? "Usar sin clave" : "Usar"}
+            </button>
+            <button type="button" onClick={onClose}>
+              Cerrar
+            </button>
+          </div>
+        </form>
+      </aside>
+    </>
   );
 }
