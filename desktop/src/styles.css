@@ -67,13 +67,23 @@ body {
   gap: var(--s-4);
   margin: 0 calc(var(--gutter) * -1) var(--s-6);
   padding: 0 var(--gutter);
-  height: 52px;
+  height: 104px;
   border-bottom: 1px solid var(--ink);
+  background: var(--ink) url("/banner.webp") center 56% / cover;
 }
 
 .app-header h1 {
   margin: 0;
-  font: 500 1.3rem/1 var(--font-display);
+  font: 500 1.6rem/1 var(--font-display);
+  color: var(--bg);
+}
+
+/* The banner is dark on the left and pale on the right, so the status sits
+   on a paper chip that reads on either. */
+.app-header .engine-status {
+  padding: 5px 10px;
+  background: var(--bg);
+  border: 1px solid var(--ink);
 }
 
 .engine-status {
