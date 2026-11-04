@@ -342,7 +342,6 @@ class SQLiteCheckpointStore:
             :max_output_tokens, :glossary_extracted, :out_path
         )
         ON CONFLICT(id) DO UPDATE SET
-            model=excluded.model,
             status=excluded.status,
             total_chunks=excluded.total_chunks,
             completed_chunks=excluded.completed_chunks,
@@ -377,6 +376,17 @@ class SQLiteCheckpointStore:
                 "glossary_extracted": 1 if job.glossary_extracted else 0,
                 "out_path": job.out_path,
             })
+
+    def set_draft_model(self, job_id: str, model: str, updated_at: datetime) -> bool:
+        """Change the model of a CREATED job in one conditional UPDATE, so a
+        run that starts at the same moment is never overwritten. Returns
+        whether a row changed (False: unknown id, or the job left CREATED)."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET model = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (model, _dt_to_iso(updated_at), job_id, str(JobStatus.CREATED)),
+            )
+            return cursor.rowcount == 1
 
     def delete_job(self, job_id: str) -> None:
         """Remove the job and every row keyed by it, in one transaction.

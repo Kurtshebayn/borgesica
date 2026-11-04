@@ -9,6 +9,7 @@ Provided doubles:
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from dataclasses import dataclass, field
 
 from borgesica.domain.errors import MalformedOutput
@@ -19,6 +20,7 @@ from borgesica.domain.models import (
     GlossaryEntry,
     GlossaryVotes,
     Job,
+    JobStatus,
     RollingSummary,
     TranslationResult,
     TranslationUnit,
@@ -154,6 +156,18 @@ class InMemoryCheckpointStore:
     def list_jobs(self) -> list[Job]:
         # Newest first; dict order is insertion order, so ties keep latest-saved first.
         return sorted(reversed(self._jobs.values()), key=lambda j: j.created_at, reverse=True)
+
+    def set_draft_model(self, job_id: str, model: str, updated_at: datetime) -> bool:
+        job = self._jobs.get(job_id)
+        if job is None or job.status != JobStatus.CREATED:
+            return False
+        self._jobs[job_id] = job.model_copy(
+            update={
+                "config": job.config.model_copy(update={"model": model}),
+                "updated_at": updated_at,
+            }
+        )
+        return True
 
     def delete_job(self, job_id: str) -> None:
         self._jobs.pop(job_id, None)

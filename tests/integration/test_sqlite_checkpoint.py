@@ -803,3 +803,36 @@ def test_narrators_are_kept_per_job(tmp_path):
         "c.xhtml": NarratorFact(name="Vis", gender="masculine")
     }
     assert store.load_narrators("b") == {}
+
+
+def test_set_draft_model_only_changes_a_job_that_is_still_created(tmp_path) -> None:
+    from datetime import UTC, datetime
+
+    from borgesica.domain.models import Job, JobConfig, JobStatus, SourceType
+
+    store = SQLiteCheckpointStore(str(tmp_path / "jobs.db"))
+    now = datetime.now(UTC)
+    job = Job(
+        id="j1",
+        config=JobConfig(source_type=SourceType.SRT, model="model-a"),
+        source_path="x.srt",
+        status=JobStatus.CREATED,
+        total_chunks=1,
+        completed_chunks=0,
+        cost_usd=0.0,
+        created_at=now,
+        updated_at=now,
+    )
+    store.save_job(job)
+
+    assert store.set_draft_model("j1", "model-b", now) is True
+    assert store.load_job("j1").config.model == "model-b"
+
+    store.save_job(job.model_copy(update={"status": JobStatus.RUNNING}))
+    assert store.set_draft_model("j1", "model-c", now) is False
+    assert store.load_job("j1").config.model == "model-b"
+    assert store.set_draft_model("missing", "model-c", now) is False
+
+    # A plain save never changes the model, even from a stale copy.
+    store.save_job(job.model_copy(update={"status": JobStatus.CREATED}))
+    assert store.load_job("j1").config.model == "model-b"

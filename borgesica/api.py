@@ -592,14 +592,11 @@ class TranslatorEngine:
         job = self._load_job_or_raise(job_id)
         if job.status != JobStatus.CREATED:
             raise JobStateError(job_id=job_id, current_status=str(job.status))
-        updated = job.model_copy(
-            update={
-                "config": job.config.model_copy(update={"model": model.strip()}),
-                "updated_at": datetime.now(UTC),
-            }
-        )
-        self._checkpoint.save_job(updated)
-        return updated
+        # One conditional write: a run that starts between the load above and
+        # this line leaves the job untouched and the change is refused.
+        if not self._checkpoint.set_draft_model(job_id, model.strip(), datetime.now(UTC)):
+            raise JobStateError(job_id=job_id, current_status="not CREATED")
+        return self._load_job_or_raise(job_id)
 
     def delete_job(self, job_id: str) -> Job:
         """Delete the job and every row keyed by it; return the deleted Job so
