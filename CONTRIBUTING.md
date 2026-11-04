@@ -13,12 +13,12 @@ python -m venv .venv
 ```
 
 ```bash
-pip install -e ".[dev,epub,pdf,serve,openai-compat]"
+pip install -e ".[dev,epub,serve,openai-compat]"
 ```
 
 El extra `dev` trae pytest, ruff y las dependencias de fixtures. Los demás son
-opcionales según lo que vayas a tocar: `epub` y `pdf` para los lectores de
-libros, `serve` para la API HTTP, `openai-compat` para DeepSeek y OpenAI.
+opcionales según lo que vayas a tocar: `epub` para el lector de
+libros, `serve` para la API HTTP, `openai-compat` para DeepSeek, OpenAI, OpenRouter y Gemini.
 
 > `pdf-fast` queda deliberadamente fuera de esa línea: PyMuPDF es **AGPL-3.0** y
 > por eso es opt-in explícito. No lo agregues a las dependencias por defecto.
@@ -65,9 +65,9 @@ esperado, no un problema.
 ./.venv/Scripts/python.exe -m ruff check .
 ```
 
-El repositorio arrastra un **baseline de 171 errores preexistentes**. Ese número
+El repositorio arrastra un **baseline de 183 errores preexistentes**. Ese número
 es la línea de flotación: mientras no suba, tu cambio no agrega deuda. Si tu
-rama devuelve más de 171, corrige lo tuyo antes de abrir el PR.
+rama devuelve más de 183, corrige lo tuyo antes de abrir el PR.
 
 No corras `ruff check --fix` sobre todo el repositorio para "limpiar de paso".
 Arreglaría cientos de líneas ajenas a tu cambio, volvería el diff imposible de
@@ -176,7 +176,7 @@ Sin salida es lo correcto.
 
 1. Rama desde `main`.
 2. Tests en verde con el intérprete del venv.
-3. Ruff en 171 o menos.
+3. Ruff en 183 o menos.
 4. El dominio sigue sin importar adaptadores.
 5. Describe **qué problema resuelve**, no solo qué archivos tocaste.
 
