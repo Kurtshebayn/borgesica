@@ -52,7 +52,7 @@ pub fn parse_ready_line(line: &str) -> Result<u16, ReadyLineError> {
 /// requirement.
 ///
 /// `provider` selects the translation backend (`anthropic`, `deepseek`,
-/// `ollama`). It is passed to the engine's `serve --provider` flag so the
+/// `openai`, `openrouter`, `gemini`, `ollama`). It is passed to the engine's `serve --provider` flag so the
 /// desktop app is no longer hardwired to Anthropic; the provider is bound to
 /// the sidecar process at spawn (changing it requires a respawn). The value
 /// is a plain identifier, never a secret, so it is safe in argv (unlike the
@@ -184,6 +184,9 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--provider", "deepseek"]));
         let ollama = build_serve_args(0, "ollama");
         assert!(ollama.windows(2).any(|w| w == ["--provider", "ollama"]));
+        for p in ["openrouter", "gemini"] {
+            assert!(build_serve_args(0, p).windows(2).any(|w| w == ["--provider", p]));
+        }
     }
 
     #[test]

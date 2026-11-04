@@ -46,9 +46,16 @@ export type WizardScreen =
 /** Translation backends the engine's `serve --provider` accepts. The provider
  * is chosen before the sidecar spawns (it is bound to that process); changing
  * it requires a sidecar respawn, so it lives at the App shell, not per job. */
-export type Provider = "anthropic" | "deepseek" | "openai" | "ollama";
+export type Provider = "anthropic" | "deepseek" | "openai" | "openrouter" | "gemini" | "ollama";
 
-export const PROVIDERS: Provider[] = ["anthropic", "deepseek", "openai", "ollama"];
+export const PROVIDERS: Provider[] = [
+  "anthropic",
+  "deepseek",
+  "openai",
+  "openrouter",
+  "gemini",
+  "ollama",
+];
 
 /** A sensible default model id for a freshly selected provider, so the user
  * is not left with an Anthropic model id after switching to DeepSeek (which
@@ -62,6 +69,10 @@ export function defaultModelForProvider(provider: Provider): string {
       return "deepseek-v4-flash";
     case "openai":
       return "gpt-5.6-luna";
+    case "openrouter":
+      return "xiaomi/mimo-v2.6-pro";
+    case "gemini":
+      return "gemini-2.5-flash";
     case "ollama":
       return "";
   }
@@ -69,7 +80,8 @@ export function defaultModelForProvider(provider: Provider): string {
 
 /** The models the engine can price for each provider, default first. Empty
  * for Ollama: its models are whatever the person pulled locally, so the UI
- * keeps a free-text field there. */
+ * keeps a free-text field there. OpenRouter lists only the model with a known
+ * price; any other "vendor/model" id it routes is priced at the fallback rate. */
 export function modelsForProvider(provider: Provider): string[] {
   switch (provider) {
     case "anthropic":
@@ -78,6 +90,10 @@ export function modelsForProvider(provider: Provider): string[] {
       return ["deepseek-v4-flash", "deepseek-v4-pro"];
     case "openai":
       return ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"];
+    case "openrouter":
+      return ["xiaomi/mimo-v2.6-pro"];
+    case "gemini":
+      return ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"];
     case "ollama":
       return [];
   }
