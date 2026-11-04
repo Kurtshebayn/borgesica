@@ -19,7 +19,10 @@ from fpdf import FPDF
 from borgesica.domain.models import JobConfig, SourceType
 from tests.fakes import FakeTranslationProvider, InMemoryCheckpointStore
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skip(reason="PDF is out of scope for now (EPUB and SRT only)"),
+]
 
 
 # ---------------------------------------------------------------------------

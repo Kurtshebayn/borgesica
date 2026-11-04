@@ -18,7 +18,10 @@ from fpdf import FPDF
 
 from borgesica.domain.models import JobConfig, SourceType
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skip(reason="PDF is out of scope for now (EPUB and SRT only)"),
+]
 
 
 # ---------------------------------------------------------------------------

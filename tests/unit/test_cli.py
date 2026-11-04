@@ -136,14 +136,22 @@ def test_build_engine_requires_api_key() -> None:
 
 
 def test_source_type_for_maps_extensions() -> None:
-    """_source_type_for detects SRT/EPUB/PDF from the file extension (case-insensitive)."""
+    """_source_type_for detects SRT/EPUB from the file extension (case-insensitive)."""
     from borgesica.__main__ import _source_type_for
     from borgesica.domain.models import SourceType
 
     assert _source_type_for("subs.srt") == SourceType.SRT
     assert _source_type_for("SUBS.SRT") == SourceType.SRT
     assert _source_type_for("book.epub") == SourceType.EPUB
-    assert _source_type_for("/path/to/Doc.PDF") == SourceType.PDF
+
+
+def test_source_type_for_rejects_pdf() -> None:
+    """PDF is recognised but rejected at create time: there is no PDF output yet."""
+    from borgesica.__main__ import _source_type_for
+    from borgesica.domain.errors import UnsupportedFormatError
+
+    with pytest.raises(UnsupportedFormatError, match="PDF"):
+        _source_type_for("/path/to/Doc.PDF")
 
 
 def test_source_type_for_unknown_extension_raises() -> None:
