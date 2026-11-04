@@ -13,7 +13,7 @@ Subcommands:
              [--provider anthropic|deepseek|openai|openrouter|gemini|ollama]
              [--chunk-size N] [--budget USD] [--quality-mode fast|reflective] [--strict]
              [--extract N] [--from M]
-             (source format auto-detected from .srt/.epub/.pdf extension)
+             (source format auto-detected from .srt/.epub extension)
              By default (no --strict), a chunk that exhausts all translation
              attempts is skipped (FAILED) and the run continues; the job still
              finishes DONE. Pass --strict to restore the pre-continue-on-error
@@ -124,6 +124,9 @@ _EXT_TO_SOURCE_TYPE: dict[str, SourceType] = {
     ".epub": SourceType.EPUB,
     ".pdf": SourceType.PDF,
 }
+# Detected but not translatable yet: the PDF writer cannot produce output, so a job
+# would spend the whole translation budget and fail at the final write.
+_UNSUPPORTED_EXTENSIONS = frozenset({".pdf"})
 _SOURCE_TYPE_TO_EXT: dict[SourceType, str] = {v: k for k, v in _EXT_TO_SOURCE_TYPE.items()}
 
 
@@ -131,15 +134,21 @@ def _source_type_for(path: str) -> SourceType:
     """Detect the SourceType from a file's extension (case-insensitive).
 
     Raises:
-        UnsupportedFormatError: if the extension is not one of .srt/.epub/.pdf.
+        UnsupportedFormatError: if the extension is not one of .srt/.epub (PDF is
+            recognised but rejected: there is no PDF output yet).
     """
     ext = Path(path).suffix.lower()
+    if ext in _UNSUPPORTED_EXTENSIONS:
+        raise UnsupportedFormatError(
+            path=path,
+            reason="PDF is not supported yet (no PDF output); supported formats: .srt, .epub",
+        )
     try:
         return _EXT_TO_SOURCE_TYPE[ext]
     except KeyError:
         raise UnsupportedFormatError(
             path=path,
-            reason=f"unsupported extension {ext!r}; supported formats: .srt, .epub, .pdf",
+            reason=f"unsupported extension {ext!r}; supported formats: .srt, .epub",
         ) from None
 
 
@@ -951,10 +960,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # create
     p_create = sub.add_parser(
-        "create", help="Create a translation job from a source file (.srt/.epub/.pdf)"
+        "create", help="Create a translation job from a source file (.srt/.epub)"
     )
     p_create.add_argument(
-        "source_file", help="Path to the source file (.srt, .epub, or .pdf — format auto-detected)"
+        "source_file", help="Path to the source file (.srt or .epub — format auto-detected)"
     )
     p_create.add_argument("--model", required=True, help="Model string (e.g. deepseek-v4-flash)")
     _add_provider(p_create)

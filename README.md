@@ -2,7 +2,9 @@
 
 > Traducción de libros y subtítulos al español, coherente de la primera página a la última.
 
-**borgésica** es un motor de traducción open source que convierte libros (EPUB, PDF) y subtítulos (SRT) del inglés a un **español neutro**, entendible en cualquier región de habla hispana.
+[![Built with Gentle-AI](https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/main/docs/assets/brand/built-with-gentle-ai.png)](https://github.com/Gentleman-Programming/gentle-ai)
+
+**borgésica** es un motor de traducción open source que convierte libros (EPUB) y subtítulos (SRT) del inglés a un **español neutro**, entendible en cualquier región de habla hispana.
 
 ## Por qué existe
 
@@ -38,8 +40,8 @@ El motor funciona de punta a punta y hoy tiene dos formas de usarlo: una **CLI**
 |---|---|
 | Subtítulos SRT → SRT | ✅ Funcional |
 | Libros EPUB → EPUB | ✅ Funcional (incluye tabla de contenidos traducida) |
-| Libros PDF | ✅ Funcional (PDFs digitales, sin OCR) |
-| Providers: Anthropic, OpenAI-compatible (DeepSeek, OpenRouter…), Gemini, Ollama (local) | ✅ |
+| Libros PDF | 🚧 Fuera de alcance por ahora: hay un lector, pero no genera PDF de salida, así que no se debe usar |
+| Providers: Anthropic, OpenAI, DeepSeek, OpenRouter, Gemini, Ollama (local) | ✅ |
 | Glosario + narrador por capítulo | ✅ |
 | Checkpointing y reanudación | ✅ |
 | CLI | ✅ Funcional |
@@ -47,7 +49,7 @@ El motor funciona de punta a punta y hoy tiene dos formas de usarlo: una **CLI**
 | Aplicación de escritorio (Tauri + React) | ✅ Funcional — flujo completo de traducción con progreso en vivo |
 | Otros pares de idiomas | Hoy: solo inglés → español neutro |
 
-Fuera de alcance: e-books con DRM (técnica y legalmente) y OCR de PDFs escaneados como camino por defecto.
+Fuera de alcance: PDF (por ahora el foco es EPUB y SRT), e-books con DRM (técnica y legalmente) y OCR de PDFs escaneados.
 
 ## Aplicación de escritorio
 
@@ -55,7 +57,7 @@ Además de la CLI, borgésica tiene una app de escritorio (Tauri + React) que le
 
 El uso es un asistente de un solo flujo:
 
-1. **Elegir proveedor y clave** — Anthropic, DeepSeek, OpenAI u Ollama (local, sin clave). La clave se pide por sesión y nunca se guarda en disco.
+1. **Elegir proveedor y clave** — Anthropic, DeepSeek, OpenAI, OpenRouter, Gemini u Ollama (local, sin clave). La clave se pide por sesión y nunca se guarda en disco.
 2. **Elegir archivo y estimar costo** — antes de traducir una sola palabra.
 3. **Revisar y bloquear el glosario** — se edita y se fija antes de correr el trabajo.
 4. **Traducir con progreso en vivo** — chunk por chunk, con cancelación cooperativa entre chunks.
@@ -73,6 +75,8 @@ borgésica es agnóstica de proveedor, pero el modelo elegido cambia mucho el re
 | OpenAI | `gpt-5.6-luna` | $1.00 / $6.00 | Modelo por defecto de OpenAI; no evaluado en uso real todavía |
 | Anthropic | `claude-haiku-4-5` | $1.00 / $5.00 | Algo más caro que flash y de calidad inferior |
 | Anthropic | `claude-sonnet-5` | $3.00 / $15.00 | La mejor calidad del grupo, al precio más alto |
+| OpenRouter | `xiaomi/mimo-v2.6-pro` | $0.435 / $0.87 | Modelo por defecto de OpenRouter; no evaluado en uso real todavía |
+| Google | `gemini-2.5-flash` | $0.30 / $2.50 | Modelo por defecto de Gemini; precio estimado, no evaluado en uso real todavía |
 | Ollama (local) | `Tower-Plus-9B-GGUF:Q4_K_M` | Gratis (cómputo local) | Muy baja |
 | Ollama (local) | `qwen3:14b` | Gratis (cómputo local) | Muy baja |
 
@@ -85,7 +89,7 @@ Requiere Python 3.11+.
 ```bash
 pip install -e .              # núcleo (SRT)
 pip install -e ".[epub]"      # + soporte EPUB
-pip install -e ".[pdf]"       # + soporte PDF
+pip install -e ".[openai-compat]"  # + DeepSeek, OpenAI, OpenRouter y Gemini
 pip install -e ".[serve]"     # + API HTTP local (necesaria para la app de escritorio)
 ```
 
@@ -130,10 +134,11 @@ Motor primero, UI después. El núcleo es una arquitectura hexagonal: el dominio
 borgesica/
 ├── domain/        # lógica pura: chunking, contexto, glosario, orquestador, costos
 ├── adapters/
-│   ├── readers/   # SRT, EPUB, PDF (pdfplumber / PyMuPDF)
-│   ├── writers/   # SRT, EPUB, PDF
-│   ├── providers/ # Anthropic, OpenAI-compatible, Ollama
-│   └── checkpoints/ # SQLite
+│   ├── readers/   # SRT, EPUB (+ lector de PDF, fuera de alcance)
+│   ├── writers/   # SRT, EPUB
+│   ├── providers/ # Anthropic, OpenAI-compatible (DeepSeek, OpenAI, OpenRouter, Gemini), Ollama
+│   ├── checkpoints/ # SQLite
+│   └── corpus/    # SQLite
 ├── serve/         # API HTTP (FastAPI) — consumida por la app de escritorio
 └── api.py         # TranslatorEngine — la superficie pública
 
