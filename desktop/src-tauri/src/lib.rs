@@ -78,6 +78,7 @@ fn stop_sidecar(state: State<SidecarState>) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(SidecarState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![start_sidecar, stop_sidecar])
         .on_window_event(|window, event| {

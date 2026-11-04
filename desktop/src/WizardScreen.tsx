@@ -11,6 +11,7 @@ import {
   putGlossary,
   putNarrators,
   resumeJob,
+  updateJobModel,
   runJob,
   stopGlossaryExtraction,
 } from "./apiClient";
@@ -22,6 +23,7 @@ import {
 import {
   defaultModelForProvider,
   formatBestEffortSummary,
+  formatBookEstimate,
   formatFailureSummary,
   formatOutputLocation,
   formatGlossaryProgress,
@@ -29,18 +31,21 @@ import {
   initialWizardState,
   loadGlossaryReview,
   loadNarrators,
+  modelsForProvider,
   runRecoveryAction,
   saveGlossary,
   saveNarrators,
   wizardReducer,
   type Provider,
+  type WizardState,
 } from "./wizard";
 import { glossaryChangesToSave } from "./glossaryReview";
 import { hasNarratorChanges } from "./narrators";
+import { pickSourceFile } from "./filePicker";
 import EstimateSummary from "./EstimateSummary";
 import GlossaryTriage from "./GlossaryTriage";
 import NarratorReview from "./NarratorReview";
-import type { GlossaryEntry, JobStatus } from "./apiTypes";
+import type { GlossaryEntry, JobResponse, JobStatus } from "./apiTypes";
 
 const JOB_STATUS_LABELS: Record<JobStatus, string> = {
   CREATED: "creado",
@@ -50,6 +55,26 @@ const JOB_STATUS_LABELS: Record<JobStatus, string> = {
   DONE: "listo",
   FAILED: "con errores",
   CANCELLED: "cancelado",
+};
+
+const STEP_LABELS = ["Archivo", "Estimación", "Glosario", "Traducción", "Listo"];
+
+/** The steps of the bar that can be looked at again while a resume waits. */
+const PEEK_OF_STEP: Record<number, "estimate" | "glossary" | undefined> = {
+  1: "estimate",
+  2: "glossary",
+};
+const PEEK_STEP = { estimate: 1, glossary: 2 } as const;
+
+/** Which step of the bar each screen belongs to. */
+const STEP_OF_SCREEN: Record<WizardState["screen"], number> = {
+  pick: 0,
+  estimate: 1,
+  preparing: 2,
+  glossary: 2,
+  run: 3,
+  error: 3,
+  done: 4,
 };
 
 /**
@@ -68,7 +93,17 @@ export default function WizardScreen({
   token,
   provider,
   onRestartSidecar,
+  resumeJobId,
+  resumeDraft,
+  onChangeProvider,
 }: {
+  /** Asks the app to swap the provider (restarting the engine) and come back
+   * to this draft's estimate. Offered only while the draft has not started. */
+  onChangeProvider?: (jobId: string) => void;
+  /** An interrupted job (chosen in the library) to pick up on mount. */
+  resumeJobId?: string;
+  /** The job never ran: pick it up at its estimate instead of resuming a run. */
+  resumeDraft?: boolean;
   baseUrl: string;
   token: string;
   /** The provider the sidecar was launched with — seeds a provider-appropriate
@@ -86,14 +121,34 @@ export default function WizardScreen({
   // supersedes the retired claude-3-5-sonnet-latest default, whose failures
   // used to look like a silent $0 "success" on untranslated output.
   const [model, setModel] = useState(() => defaultModelForProvider(provider));
-  const [resumeJobId, setResumeJobId] = useState("");
   const subscriptionRef = useRef<SseSubscription | null>(null);
+  const resumedRef = useRef(false);
+  // A stopped run picked from the library waits here for an explicit
+  // "Reanudar traducción": resuming spends money, so a click on the ficha
+  // alone must not start it.
+  const [pendingResume, setPendingResume] = useState<JobResponse | null>(null);
+  // While that confirmation waits, the earlier steps can be looked at again
+  // (read-only: nothing there spends money or changes the job).
+  const [peek, setPeek] = useState<"estimate" | "glossary" | null>(null);
+  const [peekGlossary, setPeekGlossary] = useState<GlossaryEntry[] | null>(null);
+  const [peekError, setPeekError] = useState<string | null>(null);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
       subscriptionRef.current?.close();
     };
   }, []);
+
+  // Resuming starts a paid run, so it happens once per mount even when the
+  // dev build mounts effects twice.
+  useEffect(() => {
+    if (!resumeJobId || resumedRef.current) return;
+    resumedRef.current = true;
+    void handleResume(resumeJobId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeJobId]);
 
   // The triage review is loaded on entering the glossary screen, whichever
   // way it was reached (skipping the preparation or finishing it).
@@ -262,11 +317,40 @@ export default function WizardScreen({
     }
   }
 
-  async function handleResume() {
-    if (!resumeJobId) return;
+  async function handleChooseFile() {
     try {
-      const status = await getStatus(baseUrl, token, resumeJobId);
-      const estimate = await getEstimate(baseUrl, token, resumeJobId).catch(
+      const path = await pickSourceFile();
+      if (path) dispatch({ type: "FILE_PATH_CHANGED", path });
+    } catch {
+      // No native dialog (plain browser, dev): the path field still works.
+    }
+  }
+
+  async function handleResume(jobId: string) {
+    try {
+      if (resumeDraft) {
+        dispatch({ type: "JOB_CREATED", jobId });
+        try {
+          // The draft keeps the model it was made with; after a provider
+          // change that model belongs to the old provider, so it is swapped
+          // for this provider's default before anything is priced.
+          const draft = await getStatus(baseUrl, token, jobId);
+          const options = modelsForProvider(provider);
+          if (options.length > 0 && !options.includes(draft.model)) {
+            const fallback = defaultModelForProvider(provider);
+            await updateJobModel(baseUrl, token, jobId, fallback);
+            setModel(fallback);
+          } else {
+            setModel(draft.model);
+          }
+          dispatch({ type: "ESTIMATE_RECEIVED", estimate: await getEstimate(baseUrl, token, jobId) });
+        } catch (err) {
+          dispatch({ type: "ESTIMATE_FAILED", message: String(err) });
+        }
+        return;
+      }
+      const status = await getStatus(baseUrl, token, jobId);
+      const estimate = await getEstimate(baseUrl, token, jobId).catch(
         () => null,
       );
       if (estimate) dispatch({ type: "ESTIMATE_RECEIVED", estimate });
@@ -274,14 +358,58 @@ export default function WizardScreen({
         dispatch({ type: "RESUME_JOB", job: status });
         return;
       }
-      const job = await resumeJob(baseUrl, token, resumeJobId);
-      dispatch({ type: "RESUME_JOB", job });
-      startWatching(resumeJobId);
+      setPendingResume(status);
     } catch (err) {
       dispatch({ type: "RUN_START_FAILED", message: String(err) });
     }
   }
 
+  async function handlePeek(target: "estimate" | "glossary" | null) {
+    setPeek(target);
+    if (target !== "glossary" || peekGlossary || !pendingResume) return;
+    setPeekError(null);
+    try {
+      setPeekGlossary((await getGlossary(baseUrl, token, pendingResume.id)).entries);
+    } catch (err) {
+      setPeekError(String(err));
+    }
+  }
+
+  /** A draft's model can change until it starts: the engine stores it, and
+   * the estimate is asked again because every figure follows the model. */
+  async function handleModelChange(next: string) {
+    if (!state.jobId || next.trim() === "" || next === model) return;
+    const jobId = state.jobId;
+    const previous = model;
+    setModel(next);
+    setModelBusy(true);
+    setModelError(null);
+    try {
+      await updateJobModel(baseUrl, token, jobId, next);
+      dispatch({ type: "ESTIMATE_RECEIVED", estimate: await getEstimate(baseUrl, token, jobId) });
+    } catch (err) {
+      setModel(previous);
+      setModelError(`No se pudo cambiar el modelo: ${String(err)}`);
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  async function handleConfirmResume() {
+    if (!pendingResume) return;
+    const jobId = pendingResume.id;
+    setPendingResume(null);
+    try {
+      const job = await resumeJob(baseUrl, token, jobId);
+      dispatch({ type: "RESUME_JOB", job });
+      startWatching(jobId);
+    } catch (err) {
+      dispatch({ type: "RUN_START_FAILED", message: String(err) });
+    }
+  }
+
+  const currentStep = pendingResume ? STEP_OF_SCREEN.run : STEP_OF_SCREEN[state.screen];
+  const modelOptions = modelsForProvider(provider);
   const pendingGlossaryChanges = state.glossaryReview
     ? glossaryChangesToSave(state.glossaryReview, state.glossary).length
     : 0;
@@ -296,48 +424,177 @@ export default function WizardScreen({
     : null;
 
   return (
-    <section>
-      {state.screen === "pick" && (
+    <section className="wizard">
+      <ol className="steps" aria-label="Proceso">
+        {STEP_LABELS.map((label, i) => {
+          // Only the steps already behind a waiting resume can be revisited.
+          const target = pendingResume ? PEEK_OF_STEP[i] : undefined;
+          const here = pendingResume ? (peek ? PEEK_STEP[peek] : currentStep) === i : i === currentStep;
+          return (
+            <li
+              key={label}
+              data-state={here ? "current" : i < currentStep ? "done" : "todo"}
+              aria-current={here ? "step" : undefined}
+            >
+              <span className="step-num">{String(i + 1).padStart(2, "0")}</span>
+              {target ? (
+                <button type="button" className="step-name step-link" onClick={() => void handlePeek(target)}>
+                  {label}
+                </button>
+              ) : pendingResume && i === currentStep ? (
+                <button type="button" className="step-name step-link" onClick={() => void handlePeek(null)}>
+                  {label}
+                </button>
+              ) : (
+                <span className="step-name">{label}</span>
+              )}
+              {here && <span className="step-here" aria-hidden="true" />}
+            </li>
+          );
+        })}
+      </ol>
+      {pendingResume && state.screen === "pick" && peek === "estimate" && (
         <div>
-          <h2>1. Elegir un archivo</h2>
-          <input
-            type="text"
-            placeholder="Ruta al archivo .epub o .srt"
-            value={state.filePath}
-            onChange={(e) =>
-              dispatch({ type: "FILE_PATH_CHANGED", path: e.target.value })
-            }
-          />
+          <h2>Estimación</h2>
+          {state.estimate ? (
+            <>
+              <p>{formatBookEstimate(state.estimate)}</p>
+              {!state.estimate.within_budget && (
+                <p role="alert">Esta estimación supera el presupuesto configurado.</p>
+              )}
+            </>
+          ) : (
+            <p>No hay estimación disponible para este libro.</p>
+          )}
+          <button onClick={() => void handlePeek(null)}>← Volver a reanudar</button>
+        </div>
+      )}
+      {pendingResume && state.screen === "pick" && peek === "glossary" && (
+        <div>
+          <h2>Glosario</h2>
+          {peekError && <p role="alert">{peekError}</p>}
+          {!peekGlossary && !peekError && <p>Cargando…</p>}
+          {peekGlossary && peekGlossary.length === 0 && <p>
+              Este libro no tiene glosario. El glosario solo se prepara antes de empezar a
+              traducir; con la traducción ya empezada no se puede crear sin dejar el principio y
+              el resto del libro con términos distintos.
+            </p>}
+          {peekGlossary && peekGlossary.length > 0 && (
+            <ul className="peek-glossary">
+              {peekGlossary.map((entry, i) => (
+                <li key={i}>
+                  <span>{entry.term}</span> → <span>{entry.translation}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button onClick={() => void handlePeek(null)}>← Volver a reanudar</button>
+        </div>
+      )}
+      {pendingResume && state.screen === "pick" && !peek && (
+        <div>
+          <h2>Reanudar la traducción</h2>
+          <p>
+            Esta traducción quedó a medias: {pendingResume.completed_chunks} de{" "}
+            {pendingResume.total_chunks} fragmentos hechos, ${pendingResume.cost_usd.toFixed(3)} gastados.
+            Al reanudar se vuelve a llamar a {provider} y se paga lo que falta.
+          </p>
+          <div className="actions">
+            <button className="primary" onClick={() => void handleConfirmResume()}>
+              Reanudar traducción
+            </button>
+            <button onClick={() => void handlePeek("estimate")}>Ver estimación</button>
+            <button onClick={() => void handlePeek("glossary")}>Ver glosario</button>
+          </div>
+        </div>
+      )}
+
+      {state.screen === "pick" && !pendingResume && (
+        <div>
+          <h2>¿Qué libro vamos a traducir?</h2>
+          <div className="file-row">
+            <input
+              type="text"
+              placeholder="Ruta al archivo .epub o .srt"
+              value={state.filePath}
+              onChange={(e) =>
+                dispatch({ type: "FILE_PATH_CHANGED", path: e.target.value })
+              }
+            />
+            <button type="button" onClick={() => void handleChooseFile()}>
+              Elegir archivo
+            </button>
+          </div>
           {state.fileError && <p role="alert">{state.fileError}</p>}
-          <input
-            type="text"
-            placeholder="Modelo"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-          />
+          <label>
+            Modelo
+            {modelOptions.length > 0 ? (
+              <select value={model} onChange={(e) => setModel(e.target.value)}>
+                {modelOptions.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                placeholder="Modelo local, p. ej. llama3"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+              />
+            )}
+          </label>
           <button
+            className="primary"
             onClick={() => void handlePick()}
             disabled={!state.filePath || !!state.fileError}
           >
             Crear trabajo y estimar
           </button>
           {state.createError && <p role="alert">{state.createError}</p>}
-
-          <h3>Reanudar un trabajo interrumpido</h3>
-          <input
-            type="text"
-            placeholder="Id de un trabajo existente"
-            value={resumeJobId}
-            onChange={(e) => setResumeJobId(e.target.value)}
-          />
-          <button onClick={() => void handleResume()} disabled={!resumeJobId}>
-            Reanudar
-          </button>
         </div>
       )}
 
       {state.screen === "estimate" && state.estimate && (
         <EstimateSummary
+          settings={
+            <div className="estimate-settings">
+              <label>
+                Modelo
+                {modelOptions.length > 0 ? (
+                  <select
+                    value={model}
+                    disabled={modelBusy}
+                    onChange={(e) => void handleModelChange(e.target.value)}
+                  >
+                    {!modelOptions.includes(model) && <option value={model}>{model}</option>}
+                    {modelOptions.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    defaultValue={model}
+                    disabled={modelBusy}
+                    onBlur={(e) => void handleModelChange(e.target.value)}
+                  />
+                )}
+              </label>
+              {onChangeProvider && state.jobId && (
+                <div>
+                  <span>Proveedor: {provider}</span>
+                  <button type="button" onClick={() => onChangeProvider(state.jobId!)}>
+                    Cambiar proveedor
+                  </button>
+                </div>
+              )}
+              {modelError && <p role="alert">{modelError}</p>}
+            </div>
+          }
           estimate={state.estimate}
           preparationMessage={state.preparationMessage}
           onStart={() => void handlePrepareGlossary()}
@@ -362,7 +619,8 @@ export default function WizardScreen({
 
       {state.screen === "glossary" && (
         <div>
-          <h2>3. Glosario (se bloquea antes de traducir)</h2>
+          <h2>Glosario</h2>
+          <p className="hint">Se bloquea antes de traducir.</p>
           {state.glossaryNotice && <p>{state.glossaryNotice}</p>}
           {state.glossaryReviewError && <p role="alert">{state.glossaryReviewError}</p>}
           {state.glossaryReview && (
@@ -421,7 +679,7 @@ export default function WizardScreen({
             </button>
           )}
           {!state.glossaryLocked && (
-            <button onClick={() => void handleSaveGlossary("lock")}>
+            <button className="primary" onClick={() => void handleSaveGlossary("lock")}>
               Bloquear glosario y continuar
             </button>
           )}
@@ -444,7 +702,7 @@ export default function WizardScreen({
           />
           {state.glossaryLocked && (
             <div>
-              <button onClick={() => void handleStartRun()} disabled={narratorsUnsaved}>
+              <button className="primary" onClick={() => void handleStartRun()} disabled={narratorsUnsaved}>
                 Iniciar traducción
               </button>
               {narratorsUnsaved && (
@@ -458,7 +716,7 @@ export default function WizardScreen({
 
       {state.screen === "run" && (
         <div>
-          <h2>4. Traduciendo</h2>
+          <h2>Traduciendo</h2>
           <p>{state.progress ? formatProgress(state.progress) : "Iniciando…"}</p>
           <button onClick={() => void handleCancel()} disabled={state.cancelRequested}>
             {state.cancelRequested ? "Cancelando… (se aplica entre fragmentos)" : "Cancelar"}
@@ -476,7 +734,7 @@ export default function WizardScreen({
 
       {state.screen === "done" && (
         <div>
-          <h2>{failureSummary ? "5. Terminado con errores" : "5. Listo"}</h2>
+          <h2>{failureSummary ? "Terminado con errores" : "Listo"}</h2>
           <p>Estado: {state.job ? JOB_STATUS_LABELS[state.job.status] : "desconocido"}</p>
           {/* Error-surfacing: a run can end status=DONE at $0 while every
               chunk FAILED (provider auth/model error) and the output holds

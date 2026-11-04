@@ -92,6 +92,10 @@ _JOBS_MIGRATIONS = {
     # Default 0: a job written before the extraction pass existed never ran
     # it, so the honest state is "not extracted" — the pass stays available.
     "glossary_extracted": "INTEGER NOT NULL DEFAULT 0",
+    # Nullable: where this job's translation was written (the serve library
+    # file). NULL for jobs from before it was recorded, and for jobs that
+    # never ran; the delete endpoint then leaves every file alone.
+    "out_path": "TEXT",
 }
 
 _CREATE_CHUNKS = """
@@ -328,14 +332,14 @@ class SQLiteCheckpointStore:
             total_chunks, completed_chunks, cost_usd, created_at, updated_at,
             prose_chunk_tokens, prose_segmentation, continue_on_error,
             glossary_budget_tokens,
-            max_output_tokens, glossary_extracted
+            max_output_tokens, glossary_extracted, out_path
         ) VALUES (
             :id, :source_type, :source_path, :target_lang, :model, :status,
             :budget_usd, :chunk_size, :line_length, :glossary_strategy, :quality_mode,
             :total_chunks, :completed_chunks, :cost_usd, :created_at, :updated_at,
             :prose_chunk_tokens, :prose_segmentation, :continue_on_error,
             :glossary_budget_tokens,
-            :max_output_tokens, :glossary_extracted
+            :max_output_tokens, :glossary_extracted, :out_path
         )
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
@@ -343,7 +347,8 @@ class SQLiteCheckpointStore:
             completed_chunks=excluded.completed_chunks,
             cost_usd=excluded.cost_usd,
             updated_at=excluded.updated_at,
-            glossary_extracted=excluded.glossary_extracted
+            glossary_extracted=excluded.glossary_extracted,
+            out_path=excluded.out_path
         """
         with self._connect() as conn:
             conn.execute(sql, {
@@ -369,7 +374,30 @@ class SQLiteCheckpointStore:
                 "glossary_budget_tokens": job.config.glossary_budget_tokens,
                 "max_output_tokens": job.config.max_output_tokens,
                 "glossary_extracted": 1 if job.glossary_extracted else 0,
+                "out_path": job.out_path,
             })
+
+    def set_draft_model(self, job_id: str, model: str, updated_at: datetime) -> bool:
+        """Change the model of a CREATED job in one conditional UPDATE, so a
+        run that starts at the same moment is never overwritten. Returns
+        whether a row changed (False: unknown id, or the job left CREATED)."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET model = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (model, _dt_to_iso(updated_at), job_id, str(JobStatus.CREATED)),
+            )
+            return cursor.rowcount == 1
+
+    def delete_job(self, job_id: str) -> None:
+        """Remove the job and every row keyed by it, in one transaction.
+        An unknown id deletes nothing."""
+        with self._connect() as conn:
+            for table in (
+                "chunks", "glossary", "glossary_votes", "glossary_proposals",
+                "summaries", "narrators",
+            ):
+                conn.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
     def load_job(self, job_id: str) -> Job | None:
         sql = "SELECT * FROM jobs WHERE id = ?"
@@ -378,7 +406,18 @@ class SQLiteCheckpointStore:
 
         if row is None:
             return None
+        return self._row_to_job(row)
 
+    def list_jobs(self) -> list[Job]:
+        # created_at is ISO-8601 (same offset for every row written by
+        # _dt_to_iso), so text order is time order; rowid breaks ties.
+        sql = "SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [self._row_to_job(row) for row in rows]
+
+    @staticmethod
+    def _row_to_job(row: sqlite3.Row) -> Job:
         config = JobConfig(
             source_type=SourceType(row["source_type"]),
             model=row["model"],
@@ -405,6 +444,7 @@ class SQLiteCheckpointStore:
             created_at=_iso_to_dt(row["created_at"]),
             updated_at=_iso_to_dt(row["updated_at"]),
             glossary_extracted=bool(row["glossary_extracted"]),
+            out_path=row["out_path"],
         )
 
     # --- CheckpointStore Protocol: Chunk ---

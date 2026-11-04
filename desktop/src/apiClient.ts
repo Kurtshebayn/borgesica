@@ -12,9 +12,11 @@
 import type {
   ChunksResponse,
   CreateJobRequest,
+  DeleteJobResponse,
   EstimateResponse,
   GlossaryEntry,
   GlossaryReviewResponse,
+  JobListResponse,
   JobResponse,
   NarratorAssignment,
   NarratorsResponse,
@@ -45,6 +47,40 @@ export function createJob(
     method: "POST",
     headers: authHeaders(token, true),
     body: JSON.stringify(payload),
+  }).then(asJson<JobResponse>);
+}
+
+/** Every stored job, newest first, with its failed/best-effort counts. */
+export function listJobs(baseUrl: string, token: string): Promise<JobListResponse> {
+  return fetch(`${baseUrl}/jobs`, { headers: authHeaders(token) }).then(
+    asJson<JobListResponse>,
+  );
+}
+
+/** Deletes a stored job and, when the engine can tell which file is its
+ * translation inside the library folder, that file too. Never the source. */
+export function deleteJob(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+): Promise<DeleteJobResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}`, {
+    method: "DELETE",
+    headers: authHeaders(token),
+  }).then(asJson<DeleteJobResponse>);
+}
+
+/** Changes a draft job's model; the engine refuses once the job has started. */
+export function updateJobModel(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+  model: string,
+): Promise<JobResponse> {
+  return fetch(`${baseUrl}/jobs/${jobId}`, {
+    method: "PATCH",
+    headers: authHeaders(token, true),
+    body: JSON.stringify({ model }),
   }).then(asJson<JobResponse>);
 }
 

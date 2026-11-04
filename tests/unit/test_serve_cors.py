@@ -60,6 +60,32 @@ def test_preflight_from_webview_origin_is_allowed() -> None:
     assert "x-borgesica-token" in allowed
 
 
+def test_preflight_allows_patch_for_changing_a_draft_model() -> None:
+    resp = _client().options(
+        "/jobs/abc",
+        headers={
+            "Origin": _DEV_ORIGIN,
+            "Access-Control-Request-Method": "PATCH",
+            "Access-Control-Request-Headers": "x-borgesica-token,content-type",
+        },
+    )
+    assert resp.status_code == 200
+    assert "PATCH" in resp.headers.get("access-control-allow-methods", "")
+
+
+def test_preflight_allows_delete_for_removing_a_job() -> None:
+    resp = _client().options(
+        "/jobs/abc",
+        headers={
+            "Origin": _DEV_ORIGIN,
+            "Access-Control-Request-Method": "DELETE",
+            "Access-Control-Request-Headers": "x-borgesica-token",
+        },
+    )
+    assert resp.status_code == 200
+    assert "DELETE" in resp.headers.get("access-control-allow-methods", "")
+
+
 def test_actual_request_carries_allow_origin_for_webview() -> None:
     resp = _client().get("/health", headers={"Origin": _DEV_ORIGIN})
     assert resp.headers.get("access-control-allow-origin") == _DEV_ORIGIN

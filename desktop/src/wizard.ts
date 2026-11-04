@@ -67,6 +67,22 @@ export function defaultModelForProvider(provider: Provider): string {
   }
 }
 
+/** The models the engine can price for each provider, default first. Empty
+ * for Ollama: its models are whatever the person pulled locally, so the UI
+ * keeps a free-text field there. */
+export function modelsForProvider(provider: Provider): string[] {
+  switch (provider) {
+    case "anthropic":
+      return ["claude-sonnet-5", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"];
+    case "deepseek":
+      return ["deepseek-v4-flash", "deepseek-v4-pro"];
+    case "openai":
+      return ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"];
+    case "ollama":
+      return [];
+  }
+}
+
 /** Whether the given provider needs a non-empty API key before the sidecar
  * may be spawned. anthropic/deepseek are hosted APIs that authenticate with a
  * key, so the engine's `serve --key-stdin` exits(1) if the init line carries
@@ -394,7 +410,7 @@ export function formatBookEstimate(estimate: EstimateResponse): string {
  * person knows that clicking it starts spending on the book. */
 export const START_TRANSLATION_NOTE =
   "Traducir el libro empieza por preparar su glosario: es el primer paso pago. " +
-  "Después podrá revisarlo, y el texto se traduce cuando usted lo confirme.";
+  "Después podrás revisarlo, y el texto se traduce cuando tú lo confirmes.";
 
 /** The glossary's share of the book estimate. Preparing it is not optional:
  * it is the first paid step of the translation. */

@@ -4,6 +4,9 @@ import {
   getChunks,
   getGlossaryReview,
   getNarrators,
+  deleteJob,
+  updateJobModel,
+  listJobs,
   putGlossary,
   putNarrators,
   resumeJob,
@@ -161,6 +164,44 @@ describe("getChunks", () => {
   });
 });
 
+describe("listJobs", () => {
+  it("GETs /jobs with the token and returns the body", async () => {
+    const body = {
+      jobs: [
+        {
+          id: "job-1",
+          status: "DONE",
+          title: "book",
+          source_type: "epub",
+          target_lang: "es-neutral",
+          model: "m",
+          total_chunks: 3,
+          completed_chunks: 3,
+          cost_usd: 0.1,
+          failed_count: 0,
+          best_effort_count: 1,
+        },
+      ],
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await listJobs(BASE, "secret")).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs`, {
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+
+  it("rejects with the status on a refused token", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"detail":"Missing or invalid session token"}', { status: 401 })),
+    );
+
+    await expect(listJobs(BASE, "bad")).rejects.toThrow(/HTTP 401/);
+  });
+});
+
 describe("getNarrators", () => {
   it("GETs the job's narrators route with the session token and returns the chapters", async () => {
     const body = {
@@ -211,5 +252,51 @@ describe("putNarrators", () => {
     await expect(putNarrators(BASE, "secret", "job-1", [])).rejects.toThrow(
       /HTTP 422: .*unknown chapter key/,
     );
+  });
+});
+
+describe("deleteJob", () => {
+  it("DELETEs /jobs/{id} with the token and returns the body", async () => {
+    const body = { deleted: true, file_deleted: false };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => body });
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await deleteJob(BASE, "secret", "job-1")).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1`, {
+      method: "DELETE",
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+
+  it("throws with the status and body when the engine refuses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 409, text: async () => "running" }),
+    );
+
+    await expect(deleteJob(BASE, "secret", "job-1")).rejects.toThrow("HTTP 409: running");
+  });
+});
+
+describe("updateJobModel", () => {
+  it("PATCHes /jobs/{id} with the model as JSON and the token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => JOB });
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await updateJobModel(BASE, "secret", "job-1", "deepseek-v4-pro")).toEqual(JOB);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/jobs/job-1`, {
+      method: "PATCH",
+      headers: { "X-Borgesica-Token": "secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-pro" }),
+    });
+  });
+
+  it("throws with the status and body when the engine refuses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 409, text: async () => "started" }),
+    );
+
+    await expect(updateJobModel(BASE, "secret", "job-1", "m")).rejects.toThrow("HTTP 409: started");
   });
 });

@@ -572,6 +572,56 @@ class TranslatorEngine:
         return self._load_job_or_raise(job_id)
 
     # ------------------------------------------------------------------
+    # delete_job
+    # ------------------------------------------------------------------
+
+    def update_job_model(self, job_id: str, model: str) -> Job:
+        """Change the model of a draft (CREATED) job and return the new Job.
+
+        Only a job that has not started may change it: after that, chunks
+        already translated would belong to the old model. The model's price
+        and the estimate follow it at once; nothing is called on a provider.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+            JobStateError: if the job is not CREATED.
+            ValueError: if model is blank.
+        """
+        if not model.strip():
+            raise ValueError("model must not be blank")
+        job = self._load_job_or_raise(job_id)
+        if job.status != JobStatus.CREATED:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        # One conditional write: a run that starts between the load above and
+        # this line leaves the job untouched and the change is refused.
+        if not self._checkpoint.set_draft_model(job_id, model.strip(), datetime.now(UTC)):
+            raise JobStateError(job_id=job_id, current_status="not CREATED")
+        return self._load_job_or_raise(job_id)
+
+    def delete_job(self, job_id: str) -> Job:
+        """Delete the job and every row keyed by it; return the deleted Job so
+        the caller can find its out_path/source_path. Output files are NOT
+        touched here.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+            JobStateError: if the job is RUNNING.
+        """
+        job = self._load_job_or_raise(job_id)
+        if job.status == JobStatus.RUNNING:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        self._checkpoint.delete_job(job_id)
+        return job
+
+    # ------------------------------------------------------------------
+    # list_jobs
+    # ------------------------------------------------------------------
+
+    def list_jobs(self) -> list[Job]:
+        """Return every stored job, newest first. Read-only; no provider call."""
+        return self._checkpoint.list_jobs()
+
+    # ------------------------------------------------------------------
     # failed_chunk_indices
     # ------------------------------------------------------------------
 
@@ -1180,7 +1230,7 @@ class TranslatorEngine:
         # against RUNNING itself to prevent double-entry).
         now = datetime.now(UTC)
         running_job = job.model_copy(
-            update={"status": JobStatus.RUNNING, "updated_at": now}
+            update={"status": JobStatus.RUNNING, "updated_at": now, "out_path": out_path}
         )
         self._checkpoint.save_job(running_job)
 
@@ -1188,7 +1238,7 @@ class TranslatorEngine:
         # RUNNING guard does not trip (the guard protects against a job that
         # was ALREADY running when delegated; here we are legitimately starting).
         job_for_orchestrator = job.model_copy(
-            update={"updated_at": now}
+            update={"updated_at": now, "out_path": out_path}
         )
 
         # Wire orchestrator

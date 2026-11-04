@@ -7,6 +7,7 @@ All Protocols are @runtime_checkable so tests can use isinstance() checks.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from borgesica.domain.models import (
@@ -128,6 +129,21 @@ class CheckpointStore(Protocol):
         ...
 
     def load_job(self, job_id: str) -> Job | None:
+        ...
+
+    def list_jobs(self) -> list[Job]:
+        """Every stored job, newest first (by created_at; jobs created at the
+        same instant come latest-saved first). Read-only."""
+        ...
+
+    def set_draft_model(self, job_id: str, model: str, updated_at: datetime) -> bool:
+        """Atomically change the model of a job that is still CREATED. Returns
+        False, changing nothing, for an unknown id or a job past CREATED."""
+        ...
+
+    def delete_job(self, job_id: str) -> None:
+        """Remove the job and every row keyed by it (chunks, glossary and its
+        votes/proposals, summaries, narrators) atomically. Unknown id: no-op."""
         ...
 
     def save_chunk(self, job_id: str, chunk: Chunk) -> None:

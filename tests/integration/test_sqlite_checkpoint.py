@@ -63,6 +63,24 @@ class TestSQLiteCheckpointStore:
         assert loaded.total_chunks == 3
         assert loaded.config.model == "claude-3-5-haiku-20241022"
 
+    def test_list_jobs_empty(self):
+        assert self.store.list_jobs() == []
+
+    def test_list_jobs_newest_first_and_ties_by_insertion(self):
+        from datetime import timedelta
+
+        base = make_job("base")
+        old = base.model_copy(update={"id": "old", "created_at": base.created_at - timedelta(days=1)})
+        tie_a = base.model_copy(update={"id": "tie-a"})
+        tie_b = base.model_copy(update={"id": "tie-b"})
+        for job in (tie_a, old, tie_b):
+            self.store.save_job(job)
+
+        ids = [j.id for j in self.store.list_jobs()]
+
+        assert ids == ["tie-b", "tie-a", "old"]
+        assert self.store.load_job("old") == self.store.list_jobs()[-1]
+
     # --- Test 2: save_chunk + load_chunks round-trip, meta_json preserved ---
     def test_save_and_load_chunks(self):
         job = make_job()
@@ -785,3 +803,36 @@ def test_narrators_are_kept_per_job(tmp_path):
         "c.xhtml": NarratorFact(name="Vis", gender="masculine")
     }
     assert store.load_narrators("b") == {}
+
+
+def test_set_draft_model_only_changes_a_job_that_is_still_created(tmp_path) -> None:
+    from datetime import UTC, datetime
+
+    from borgesica.domain.models import Job, JobConfig, JobStatus, SourceType
+
+    store = SQLiteCheckpointStore(str(tmp_path / "jobs.db"))
+    now = datetime.now(UTC)
+    job = Job(
+        id="j1",
+        config=JobConfig(source_type=SourceType.SRT, model="model-a"),
+        source_path="x.srt",
+        status=JobStatus.CREATED,
+        total_chunks=1,
+        completed_chunks=0,
+        cost_usd=0.0,
+        created_at=now,
+        updated_at=now,
+    )
+    store.save_job(job)
+
+    assert store.set_draft_model("j1", "model-b", now) is True
+    assert store.load_job("j1").config.model == "model-b"
+
+    store.save_job(job.model_copy(update={"status": JobStatus.RUNNING}))
+    assert store.set_draft_model("j1", "model-c", now) is False
+    assert store.load_job("j1").config.model == "model-b"
+    assert store.set_draft_model("missing", "model-c", now) is False
+
+    # A plain save never changes the model, even from a stale copy.
+    store.save_job(job.model_copy(update={"status": JobStatus.CREATED}))
+    assert store.load_job("j1").config.model == "model-b"

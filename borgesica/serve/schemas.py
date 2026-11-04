@@ -7,6 +7,7 @@ best_effort_count/best_effort_indices fields (serve-api spec).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -40,6 +41,12 @@ class CreateJobRequest(BaseModel):
     continue_on_error: bool = True
 
 
+class UpdateJobRequest(BaseModel):
+    """The one thing a draft lets you change after creation: its model."""
+
+    model: str
+
+
 class JobResponse(BaseModel):
     """Job status payload + best-effort and FAILED count/indices.
 
@@ -52,6 +59,8 @@ class JobResponse(BaseModel):
 
     id: str
     status: JobStatus
+    # The model the job translates with (a draft's can be changed).
+    model: str
     total_chunks: int
     completed_chunks: int
     cost_usd: float
@@ -71,17 +80,69 @@ class JobResponse(BaseModel):
     out_path: str | None
 
 
+class JobListItem(BaseModel):
+    """One row of the library: a stored job in brief. ``title`` is the source
+    file's name without its extension. The source language is not stored on a
+    job, so it is not here."""
+
+    id: str
+    status: JobStatus
+    title: str
+    source_type: str
+    target_lang: str
+    model: str
+    total_chunks: int
+    completed_chunks: int
+    cost_usd: float
+    failed_count: int
+    best_effort_count: int
+
+
+class JobListResponse(BaseModel):
+    """GET /jobs: every stored job, newest first."""
+
+    jobs: list[JobListItem] = Field(default_factory=list)
+
+
+def job_to_list_item(
+    job: Job, best_effort_indices: list[int], failed_indices: list[int]
+) -> JobListItem:
+    return JobListItem(
+        id=job.id,
+        status=job.status,
+        title=Path(job.source_path).stem,
+        source_type=str(job.config.source_type),
+        target_lang=job.config.target_lang,
+        model=job.config.model,
+        total_chunks=job.total_chunks,
+        completed_chunks=job.completed_chunks,
+        cost_usd=job.cost_usd,
+        failed_count=len(failed_indices),
+        best_effort_count=len(best_effort_indices),
+    )
+
+
+def library_dir() -> Path:
+    """The folder every serve-made translation lands in: BORGESICA_LIBRARY_DIR
+    when set, else ``~/Borgesica``."""
+    configured = os.environ.get("BORGESICA_LIBRARY_DIR")
+    return Path(configured) if configured else Path.home() / "Borgesica"
+
+
 def default_out_path(source_path: str, target_lang: str) -> str:
-    """The source's own folder and name, plus the target language's primary
-    subtag: ``book.epub`` translated to ``es-neutral`` -> ``book_es.epub``.
-    A name already taken is numbered (``book_es_2.epub``, ``book_es_3.epub``…)
-    so an earlier translation is never overwritten."""
+    """A file in the library folder named after the source plus the target
+    language's primary subtag: ``book.epub`` translated to ``es-neutral`` ->
+    ``<library>/book_es.epub``. A name already taken is numbered
+    (``book_es_2.epub``, ``book_es_3.epub``...) so an earlier translation is
+    never overwritten. The folder is created here."""
     source = Path(source_path)
+    library = library_dir()
+    library.mkdir(parents=True, exist_ok=True)
     base = f"{source.stem}_{target_lang.split('-')[0]}"
-    candidate = source.with_name(f"{base}{source.suffix}")
+    candidate = library / f"{base}{source.suffix}"
     number = 2
     while candidate.exists():
-        candidate = source.with_name(f"{base}_{number}{source.suffix}")
+        candidate = library / f"{base}_{number}{source.suffix}"
         number += 1
     return str(candidate)
 
@@ -99,6 +160,7 @@ def job_to_response(
     return JobResponse(
         id=job.id,
         status=job.status,
+        model=job.config.model,
         total_chunks=job.total_chunks,
         completed_chunks=job.completed_chunks,
         cost_usd=job.cost_usd,
@@ -203,6 +265,14 @@ def chunk_to_item(chunk: Chunk, chapter: Chapter | None) -> ChunkItem:
 def is_best_effort(chunk: Chunk) -> bool:
     """Same rule as TranslatorEngine.best_effort_chunk_indices."""
     return chunk.status == ChunkStatus.DONE and not chunk.passed_validation
+
+
+class DeleteJobResponse(BaseModel):
+    """DELETE /jobs/{id}: the job's rows are gone (always true on 200);
+    file_deleted says whether its translated file in the library was removed."""
+
+    deleted: bool
+    file_deleted: bool
 
 
 class RunRequest(BaseModel):

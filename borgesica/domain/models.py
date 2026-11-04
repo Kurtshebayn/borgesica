@@ -739,6 +739,10 @@ class Job(BaseModel):
     # whole book again, so the flag is what refuses it — and what removes the
     # extraction line from the estimate once there is nothing left to spend.
     glossary_extracted: bool = False
+    # Where the latest translation run wrote its output; None until one has
+    # started. Persisted so the library file can be found (and removed) after
+    # a restart.
+    out_path: str | None = None
 
 
 class Progress(BaseModel):

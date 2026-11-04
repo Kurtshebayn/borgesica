@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   defaultModelForProvider,
+  modelsForProvider,
   extractSseData,
   formatBestEffortSummary,
   formatFailureSummary,
@@ -341,6 +342,7 @@ describe("wizardReducer", () => {
         completed_chunks: 0,
         cost_usd: 0,
         best_effort_count: 0,
+        model: "model-a",
         best_effort_indices: [],
         failed_count: 0,
         failed_indices: [],
@@ -372,6 +374,7 @@ describe("wizardReducer", () => {
         completed_chunks: 3,
         cost_usd: 0.4,
         best_effort_count: 0,
+        model: "model-a",
         best_effort_indices: [],
         failed_count: 0,
         failed_indices: [],
@@ -400,6 +403,7 @@ describe("wizardReducer", () => {
         completed_chunks: 0,
         cost_usd: 0,
         best_effort_count: 0,
+        model: "model-a",
         best_effort_indices: [],
         failed_count: 0,
         failed_indices: [],
@@ -414,6 +418,7 @@ describe("wizardReducer", () => {
       completed_chunks: 0,
       cost_usd: 0,
       best_effort_count: 0,
+      model: "model-a",
       best_effort_indices: [],
       failed_count: 5,
       failed_indices: [0, 1, 2, 3, 4],
@@ -1087,6 +1092,7 @@ describe("narrator review", () => {
     completed_chunks: 0,
     cost_usd: 0,
     best_effort_count: 0,
+    model: "model-a",
     best_effort_indices: [],
     failed_count: 0,
     failed_indices: [],
@@ -1340,5 +1346,24 @@ describe("narrator load and save seams", () => {
     await saveNarrators({ ...initialWizardState }, { put, dispatch });
     expect(put).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("modelsForProvider", () => {
+  it("offers the provider's default model first", () => {
+    for (const provider of ["anthropic", "deepseek", "openai"] as const) {
+      expect(modelsForProvider(provider)[0]).toBe(defaultModelForProvider(provider));
+    }
+  });
+
+  it("has no fixed list for Ollama, whose models are local", () => {
+    expect(modelsForProvider("ollama")).toEqual([]);
+  });
+
+  it("lists each model once", () => {
+    for (const provider of ["anthropic", "deepseek", "openai"] as const) {
+      const models = modelsForProvider(provider);
+      expect(new Set(models).size).toBe(models.length);
+    }
   });
 });
