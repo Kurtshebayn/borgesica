@@ -76,8 +76,8 @@ _MAX_OUTPUT_TOKENS = 8192
 # Used ONLY for pre-flight cost ESTIMATES, never for billing. Both prices and model
 # IDs go stale; any unknown model falls back to _DEFAULT_PRICE, so a stale table
 # only skews estimates — it never breaks translation.
-# TODO (cost-control / M4): make prices user-overridable and verify against current
-#   published Anthropic pricing. See engram: sdd/translation-engine/todo-pricing.
+# Prices are not user-overridable; verify against Anthropic's published pricing
+# before relying on an estimate.
 _PRICE_TABLE: dict[str, tuple[float, float]] = {
     # Claude 4 family (current model IDs)
     "claude-opus-4-8": (5.0, 25.0),

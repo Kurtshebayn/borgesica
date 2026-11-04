@@ -1,5 +1,10 @@
 """Domain quality harness — LLM-as-judge evaluation (M4-2).
 
+Status: QualityHarness (the judge) is NOT called by the translation pipeline; it is
+only exercised by tests and the golden suite. The live parts of this module are the
+deterministic helpers used by `audit` and the glossary review (audit_chunks,
+lowercase_vocabulary).
+
 Dependency rule: only stdlib + pydantic allowed here.  No anthropic/openai/nltk/sacrebleu.
 
 Tier structure:

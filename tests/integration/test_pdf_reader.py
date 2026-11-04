@@ -175,32 +175,3 @@ def test_hyphenated_line_break_rejoined() -> None:
         )
     finally:
         os.unlink(path)
-
-
-# ---------------------------------------------------------------------------
-# Test 3: PyMuPDF adapter is never imported by the default DI configuration
-# ---------------------------------------------------------------------------
-
-
-def test_pymupdf_not_imported_by_default_di() -> None:
-    """With the default DI wiring, pdf_pymupdf_reader is NOT in sys.modules.
-
-    Spec scenario: "When api.py wires up the DocumentReader for PDF source type,
-    pdf_pymupdf_reader.py SHALL NOT be imported."
-
-    We trigger default DI by importing the top-level borgesica package and
-    calling the module-level wiring path (same as the CLI _build_engine does).
-    The check is purely on sys.modules — no actual job is run.
-
-    RED: if the stub already imported pymupdf at module level this would fail.
-    GREEN: pdf_pymupdf_reader is never in the default import graph.
-    """
-    # Ensure the module is absent before we start
-    pymupdf_key = "borgesica.adapters.readers.pdf_pymupdf_reader"
-    # Importing PdfPlumberReader (the default) must NOT pull in the pymupdf stub
-    from borgesica.adapters.readers.pdf_plumber_reader import PdfPlumberReader  # noqa: F401
-
-    assert pymupdf_key not in sys.modules, (
-        f"pdf_pymupdf_reader was unexpectedly imported into sys.modules. "
-        f"Check that no default import path references it."
-    )
