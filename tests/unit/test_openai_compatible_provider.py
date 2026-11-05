@@ -569,7 +569,7 @@ class TestServerErrorHandling:
 
 class TestPriceAndCountTokens:
     def test_price_deepseek_flash_returns_tuple_of_floats(self):
-        """price('deepseek-v4-flash') returns (0.14, 0.28) for the DeepSeek preset."""
+        """price('deepseek-v4-flash') returns (0.30, 1.20) (peak) for the DeepSeek preset."""
         provider = OpenAICompatibleProvider.deepseek(api_key="fake-key")
         result = provider.price("deepseek-v4-flash")
         assert isinstance(result, tuple)
@@ -756,17 +756,17 @@ class TestOpenAIPreset:
     def test_openai_preset_prices_sol(self):
         """gpt-5.6-sol is priced at $5.00/$30.00 per Mtok."""
         provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
-        assert provider.price("gpt-5.6-sol") == (5.00, 30.00)
+        assert provider.price("gpt-5.6-sol") == (4.00, 20.00)
 
     def test_openai_preset_prices_terra(self):
         """gpt-5.6-terra is priced at $2.50/$15.00 per Mtok."""
         provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
-        assert provider.price("gpt-5.6-terra") == (2.50, 15.00)
+        assert provider.price("gpt-5.6-terra") == (2.00, 12.00)
 
     def test_openai_preset_prices_luna(self):
         """gpt-5.6-luna is priced at $1.00/$6.00 per Mtok."""
         provider = OpenAICompatibleProvider.openai(api_key="sk-fake")
-        assert provider.price("gpt-5.6-luna") == (1.00, 6.00)
+        assert provider.price("gpt-5.6-luna") == (0.20, 1.20)
 
     # gpt-6 family, Standard tier, short context, read 2026-10-01 from
     # https://developers.openai.com/api/docs/pricing. Before this they fell back
@@ -777,6 +777,7 @@ class TestOpenAIPreset:
             ("gpt-6-astra", (10.00, 50.00)),
             ("gpt-6-sol", (2.00, 10.00)),
             ("gpt-6.1-sol", (2.00, 10.00)),
+            ("gpt-6.1-terra", (1.00, 5.00)),
             ("gpt-6-luna", (0.10, 0.50)),
         ],
     )
@@ -1328,7 +1329,7 @@ def test_deepseek_cache_price_is_the_measured_rate():
 
     provider = OpenAICompatibleProvider.deepseek(api_key="k", _client=object())
 
-    assert provider.cache_price("deepseek-v4-flash") == pytest.approx(0.00225)
+    assert provider.cache_price("deepseek-v4-flash") == pytest.approx(0.006)
 
 
 def test_cache_price_falls_back_to_the_input_rate_for_unknown_models():

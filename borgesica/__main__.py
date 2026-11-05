@@ -669,6 +669,33 @@ def _cmd_audit(args: argparse.Namespace, engine: TranslatorEngine) -> int:
         return 1
 
 
+def _cmd_prices_refresh() -> int:
+    """Refresh the price cache and report where it disagrees with the built-ins."""
+    from borgesica.adapters.providers import anthropic_provider as _anth
+    from borgesica.adapters.providers import openai_compatible_provider as _oai
+    from borgesica.adapters.providers import price_cache
+
+    outcome = price_cache.refresh()
+    for source, status in outcome.items():
+        print(f"{source}: {status}")
+
+    builtin = {
+        "anthropic": _anth._PRICE_TABLE,
+        "deepseek": _oai._DEFAULT_DEEPSEEK_PRICE_TABLE,
+        "openai": _oai._OPENAI_PRICE_TABLE,
+        "gemini": _oai._GEMINI_PRICE_TABLE,
+        "openrouter": _oai._OPENROUTER_PRICE_TABLE,
+    }
+    lines = []
+    for provider, table in builtin.items():
+        for model, old, new in price_cache.drift(provider, table):
+            lines.append(f"  {provider}/{model}: built-in {old} -> listing {new}")
+    if lines:
+        print("Refreshed prices now in use that differ from the built-in table by >25%:")
+        print("\n".join(lines))
+    return 0 if any(v.startswith("ok") for v in outcome.values()) else 1
+
+
 def _cmd_requeue(args: argparse.Namespace, engine: TranslatorEngine) -> int:
     """List (and unless --dry-run, requeue) chunks stored with misaligned paragraphs."""
     try:
@@ -756,6 +783,9 @@ def _cmd_serve(args: argparse.Namespace, engine: TranslatorEngine) -> int:
 
     from borgesica.serve.app import SERVE_HOST, create_app
 
+    from borgesica.adapters.providers.price_cache import start_background_refresh
+
+    start_background_refresh()  # stale cache: refresh in background; next launch benefits
     app = create_app(engine, session_token=_stdin_session_token)
     config = uvicorn.Config(app, host=SERVE_HOST, port=args.port, access_log=False)
     _run_server(config)
@@ -1115,6 +1145,14 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_workers(p_serve, _SERVE_DEFAULT_WORKERS)
     _add_provider(p_serve)
 
+    # prices — refresh the local model-price cache (no provider key needed)
+    p_prices = sub.add_parser("prices", help="Manage the refreshable model-price cache")
+    psub = p_prices.add_subparsers(dest="prices_command", metavar="<action>")
+    psub.add_parser(
+        "refresh",
+        help="Download current model prices (OpenRouter, LiteLLM) into ~/.borgesica/prices.json",
+    )
+
     return parser
 
 
@@ -1164,6 +1202,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.command:
         parser.print_help()
         return 1
+
+    # `prices refresh` needs no provider or key, so it runs before the engine
+    # (which requires one) is built.
+    if args.command == "prices":
+        if getattr(args, "prices_command", None) != "refresh":
+            parser.print_help()
+            return 1
+        return _cmd_prices_refresh()
 
     # Resolve provider: explicit --provider wins, else auto-detect (env / keys).
     explicit_provider = getattr(args, "provider", None)

@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 from pydantic import ValidationError
 
+from borgesica.adapters.providers.price_cache import with_refreshed
 from borgesica.domain.errors import MalformedOutput, ProviderError
 from borgesica.domain.models import (
     TranslationResult,
@@ -79,6 +80,13 @@ _MAX_OUTPUT_TOKENS = 8192
 # Prices are not user-overridable; verify against Anthropic's published pricing
 # before relying on an estimate.
 _PRICE_TABLE: dict[str, tuple[float, float]] = {
+    # Claude 5.x (Anthropic pricing page, read 2026-11-04). Haiku 5.5 is tiered:
+    # this is the <=100k-token-prompt rate ($0.50/$2.50 above 100k); chunk
+    # prompts are far below that.
+    "claude-fable-5-1": (10.0, 50.0),
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-haiku-5-5": (0.10, 0.50),
     # Claude 4 family (current model IDs)
     "claude-opus-4-8": (5.0, 25.0),
     "claude-sonnet-4-6": (3.0, 15.0),
@@ -161,7 +169,7 @@ class AnthropicProvider:
         self._max_retries = max_retries
         # Published prices go stale; let callers override/extend the built-in
         # table (used ONLY for pre-flight estimates, never for billing).
-        self._price_table = dict(_PRICE_TABLE)
+        self._price_table, _ = with_refreshed("anthropic", _PRICE_TABLE)
         if price_table:
             self._price_table.update(price_table)
 
