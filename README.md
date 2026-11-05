@@ -69,8 +69,8 @@ borgésica es agnóstica de proveedor, pero el modelo elegido cambia mucho el re
 
 | Proveedor | Modelo | Precio (input / output por Mtok) | Calidad observada |
 |---|---|---|---|
-| DeepSeek | `deepseek-v4-flash` | $0.14 / $0.28 | Muy buena — la mejor relación calidad-precio |
-| OpenAI | `gpt-5.6-luna` | $1.00 / $6.00 | Modelo por defecto de OpenAI; no evaluado en uso real todavía |
+| DeepSeek | `deepseek-v4-flash` | $0.30 / $1.20 (tarifa pico; valle: $0.15 / $0.60) | Muy buena — la mejor relación calidad-precio |
+| OpenAI | `gpt-5.6-luna` | $0.20 / $1.20 | Modelo por defecto de OpenAI; no evaluado en uso real todavía |
 | Anthropic | `claude-haiku-4-5` | $1.00 / $5.00 | Algo más caro que flash y de calidad inferior |
 | Anthropic | `claude-sonnet-5` | $3.00 / $15.00 | La mejor calidad del grupo, al precio más alto |
 | Ollama (local) | `Tower-Plus-9B-GGUF:Q4_K_M` | Gratis (cómputo local) | Muy baja |

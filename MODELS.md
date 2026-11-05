@@ -27,8 +27,8 @@ Strong quality at significantly lower cost. Recommended default for most jobs.
 | `claude-haiku-4-5-20251001` | Anthropic | Cheaper than Sonnet; noticeably lower translation quality in practice |
 | `claude-3-7-sonnet-20250219` | Anthropic | Previous Sonnet generation, still solid |
 | `claude-3-5-sonnet-20241022` / `claude-3-5-sonnet-20240620` | Anthropic | Older Sonnet snapshots, still solid |
-| `deepseek-v4-flash` | DeepSeek (`https://api.deepseek.com`) | ~$0.14/Mtok input (cache miss), ~$0.0028/Mtok cache hit, ~$0.28/Mtok output — roughly 10× cheaper than Sonnet, with very good translation quality. The recommended default for most jobs. |
-| `deepseek-v4-pro` | DeepSeek (`https://api.deepseek.com`) | ~$0.435/Mtok input, ~$0.87/Mtok output. Higher quality than Flash; still significantly cheaper than Anthropic frontier models. |
+| `deepseek-v4-flash` | DeepSeek (`https://api.deepseek.com`) | Peak rate: $0.30/Mtok input (cache miss), $0.006/Mtok cache hit, $1.20/Mtok output (off-peak is half: $0.15 / $0.003 / $0.60) — roughly 7× cheaper than Sonnet, with very good translation quality. The recommended default for most jobs. |
+| `deepseek-v4-pro` | DeepSeek (`https://api.deepseek.com`) | Peak rate: $1.32/Mtok input, $0.044/Mtok cache hit, $3.96/Mtok output (off-peak: $0.66 / $0.022 / $1.98). Higher quality than Flash; still cheaper than Anthropic frontier models. |
 
 > **NOTE — DeepSeek model-id deprecation (2026-07-24)**: the legacy identifiers `deepseek-chat` and `deepseek-reasoner` continue to work as aliases after that date but are deprecated. Use `deepseek-v4-flash` and `deepseek-v4-pro` for new jobs. Borgésica passes model strings unchanged so no library update is needed — update your `--model` argument only.
 
@@ -41,9 +41,9 @@ through to the JSON-mode/prompt-parse fallback tiers.
 
 | Model | Provider | Notes |
 |-------|----------|-------|
-| `gpt-5.6-luna` | OpenAI (`https://api.openai.com/v1`) | $1.00/Mtok input, $6.00/Mtok output. Default model for `--provider openai`. |
-| `gpt-5.6-terra` | OpenAI (`https://api.openai.com/v1`) | $2.50/Mtok input, $15.00/Mtok output. Mid-tier quality/cost. |
-| `gpt-5.6-sol` | OpenAI (`https://api.openai.com/v1`) | $5.00/Mtok input, $30.00/Mtok output. Highest-quality GPT tier. |
+| `gpt-5.6-luna` | OpenAI (`https://api.openai.com/v1`) | $0.20/Mtok input, $1.20/Mtok output. Default model for `--provider openai`. |
+| `gpt-5.6-terra` | OpenAI (`https://api.openai.com/v1`) | $2.00/Mtok input, $12.00/Mtok output. Mid-tier quality/cost. |
+| `gpt-5.6-sol` | OpenAI (`https://api.openai.com/v1`) | $4.00/Mtok input, $20.00/Mtok output. Highest-quality gpt-5.6 tier. |
 
 > **`max_completion_tokens` handling**: the entire gpt-5.6 family (`sol`/`terra`/`luna`)
 > rejects the legacy `max_tokens` parameter and requires `max_completion_tokens` instead.
@@ -102,6 +102,27 @@ hosted option above.
 | `gemma2:9b` | Ollama | Google Gemma; competitive with larger models |
 | `Tower-Plus-9B-GGUF:Q4_K_M` | Ollama | Tested in practice; translation quality was very low at this size |
 | `qwen3:14b` | Ollama | Tested in practice; translation quality was very low at this size |
+
+## Keeping prices current
+
+Prices only feed the pre-flight estimate and the budget guard; they never affect billing.
+The tables built into the code are the offline fallback. `borgesica prices refresh`
+(no API key needed) downloads current prices into `~/.borgesica/prices.json`
+(override with `BORGESICA_PRICES_FILE`) from two sources:
+
+- **OpenRouter** `/api/v1/models` for the `openrouter` provider.
+- **LiteLLM**'s community price list for OpenAI, Anthropic, DeepSeek and Gemini. On
+  2026-11-04 it matched the providers' own pricing pages on 20 of 20 models checked.
+
+Refreshed prices override the built-in ones; a model missing from the built-in table gets a
+real price instead of the default rate. The command also lists refreshed prices that differ
+from the built-in table by more than 25%. A price passed explicitly by the caller always wins,
+and zero, negative or malformed entries are ignored.
+
+`borgesica serve` refreshes in the background at startup when the cache is missing or older
+than 24 hours; providers read the cache when they are built, so a refresh benefits the next
+launch. Set `BORGESICA_PRICES_AUTO_REFRESH=0` to disable it. DeepSeek publishes peak and
+off-peak rates; the peak rate is used so an estimate never undershoots.
 
 ## Note on model strings
 

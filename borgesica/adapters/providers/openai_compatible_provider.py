@@ -53,6 +53,7 @@ from typing import Any
 import openai
 from pydantic import ValidationError
 
+from borgesica.adapters.providers.price_cache import with_refreshed
 from borgesica.domain.errors import MalformedOutput, ProviderError
 from borgesica.domain.models import (
     TranslationResult,
@@ -125,14 +126,25 @@ def _translation_tools(segment_count: int | None = None) -> list[dict[str, Any]]
 
 # Default price table — (input_usd_per_mtok, output_usd_per_mtok).
 # NOT used for billing; only for pre-flight cost estimates.
+#
+# deepseek-v4-flash: DeepSeek's pricing page (V4.1-Flash-1017, read 2026-11-04)
+# lists PEAK and OFF-PEAK rates: input miss $0.30 / $0.15, output $1.20 / $0.60,
+# cache hit $0.006 / $0.003. We price at PEAK so an estimate never undershoots
+# the bill. The earlier ($0.14, $0.28) row was bill-derived on the pre-V4.1
+# model and no longer applies. deepseek-v4-pro (V4-Pro-0813), same page and
+# date: peak input $1.32, output $3.96, cache hit $0.044 (off-peak $0.66 /
+# $1.98 / $0.022).
 _DEFAULT_DEEPSEEK_PRICE_TABLE: dict[str, tuple[float, float]] = {
-    "deepseek-v4-flash": (0.14, 0.28),
-    "deepseek-v4-pro": (0.435, 0.87),
+    "deepseek-v4-flash": (0.30, 1.20),
+    "deepseek-v4-pro": (1.32, 3.96),
 }
 
 _FALLBACK_PRICE: tuple[float, float] = (3.0, 15.0)
 
 # USD per Mtok for input tokens served from the provider's prompt cache.
+#
+# NOTE: the bill derivation below is for the PRE-V4.1 model (history); the live
+# value is the PEAK cache-hit rate from the pricing page, see the table above.
 #
 # DERIVED FROM A REAL BILL, not from documentation. Over 1,114 requests the
 # DeepSeek dashboard reported hit 5,115,392 / miss 892,787 / output 1,941,028
@@ -146,7 +158,8 @@ _FALLBACK_PRICE: tuple[float, float] = (3.0, 15.0)
 # $0.0013-$0.0032/Mtok. The midpoint is used. Re-derive it the same way if
 # DeepSeek changes pricing; do not replace it with a remembered figure.
 _DEEPSEEK_CACHE_PRICE: dict[str, float] = {
-    "deepseek-v4-flash": 0.00225,
+    "deepseek-v4-flash": 0.006,
+    "deepseek-v4-pro": 0.044,
 }
 
 # OpenAI price table — (input_usd_per_mtok, output_usd_per_mtok).
@@ -155,19 +168,41 @@ _DEEPSEEK_CACHE_PRICE: dict[str, float] = {
 # scope for other, unverified API differences (unrelated to the
 # max_completion_tokens handling .openai() already covers for gpt-5.6).
 #
+# All rows re-read 2026-11-04 from the same page (the gpt-5.6 rows were
+# previously $5/$30, $2.50/$15, $1/$6 and had gone stale).
 # gpt-6 rows: Standard tier, short-context input/output, read 2026-10-01 from
 # https://developers.openai.com/api/docs/pricing (cached input, cache writes,
 # long context and the Batch/Flex/Fast tiers are not modelled here). These four
 # are what client.models.list() exposed on the live account; before they were
 # listed they fell back to _FALLBACK_PRICE, over-estimating gpt-6-luna output 30x.
 _OPENAI_PRICE_TABLE: dict[str, tuple[float, float]] = {
-    "gpt-5.6-sol": (5.00, 30.00),
-    "gpt-5.6-terra": (2.50, 15.00),
-    "gpt-5.6-luna": (1.00, 6.00),
+    "gpt-5.6-sol": (4.00, 20.00),
+    "gpt-5.6-terra": (2.00, 12.00),
+    "gpt-5.6-luna": (0.20, 1.20),
+    "gpt-5.5": (5.00, 30.00),
+    "gpt-5.5-pro": (30.00, 180.00),
+    "gpt-5.4": (2.50, 15.00),
     "gpt-6-astra": (10.00, 50.00),
     "gpt-6-sol": (2.00, 10.00),
     "gpt-6.1-sol": (2.00, 10.00),
+    "gpt-6.1-terra": (1.00, 5.00),
     "gpt-6-luna": (0.10, 0.50),
+}
+
+# USD per Mtok for cached input, same page and date as the table above. Rows
+# the page leaves blank (gpt-5.5-pro, gpt-5.4-pro) are omitted: cache_price()
+# then assumes no discount.
+_OPENAI_CACHE_PRICE: dict[str, float] = {
+    "gpt-6-astra": 1.00,
+    "gpt-6.1-sol": 0.10,
+    "gpt-6.1-terra": 0.05,
+    "gpt-6-luna": 0.01,
+    "gpt-6-sol": 0.20,
+    "gpt-5.6-sol": 0.40,
+    "gpt-5.6-terra": 0.20,
+    "gpt-5.6-luna": 0.02,
+    "gpt-5.5": 0.50,
+    "gpt-5.4": 0.25,
 }
 
 # Per-model reasoning_effort defaults for the .openai() preset, for models that
@@ -351,7 +386,9 @@ class OpenAICompatibleProvider:
         The class attribute stays 3.0: it is what an UNMEASURED
         OpenAI-compatible endpoint inherits, and nothing is known about one.
         """
-        table = dict(_DEFAULT_DEEPSEEK_PRICE_TABLE)
+        table, cache_table = with_refreshed(
+            "deepseek", _DEFAULT_DEEPSEEK_PRICE_TABLE, _DEEPSEEK_CACHE_PRICE
+        )
         if extra_price_table:
             table.update(extra_price_table)
         provider = cls(
@@ -360,7 +397,7 @@ class OpenAICompatibleProvider:
             default_model=default_model,
             price_table=table,
             _client=_client,
-            cache_price_table=dict(_DEEPSEEK_CACHE_PRICE),
+            cache_price_table=cache_table,
         )
         provider.retry_waste_factor = 1.5
         return provider
@@ -375,9 +412,9 @@ class OpenAICompatibleProvider:
     ) -> "OpenAICompatibleProvider":
         """Preset for OpenAI (https://api.openai.com/v1).
 
-        Prices: gpt-5.6-sol   = ($5.00, $30.00)/Mtok,
-                gpt-5.6-terra = ($2.50, $15.00)/Mtok,
-                gpt-5.6-luna  = ($1.00, $6.00)/Mtok.
+        Prices: gpt-5.6-sol   = ($4.00, $20.00)/Mtok,
+                gpt-5.6-terra = ($2.00, $12.00)/Mtok,
+                gpt-5.6-luna  = ($0.20, $1.20)/Mtok.
         The model string passed to translate() is forwarded unchanged.
 
         retry_waste_factor is overridden to 1.5 as an INSTANCE attribute (set
@@ -400,7 +437,9 @@ class OpenAICompatibleProvider:
         gets its lowest accepted value instead. An explicit reasoning_effort
         (e.g. --reasoning) still wins.
         """
-        table = dict(_OPENAI_PRICE_TABLE)
+        table, cache_table = with_refreshed(
+            "openai", _OPENAI_PRICE_TABLE, _OPENAI_CACHE_PRICE
+        )
         if extra_price_table:
             table.update(extra_price_table)
         provider = cls(
@@ -409,6 +448,7 @@ class OpenAICompatibleProvider:
             default_model=default_model,
             price_table=table,
             _client=_client,
+            cache_price_table=cache_table,
         )
         provider.retry_waste_factor = 1.5  # instance attr; GPT is Tier-1-reliable
         provider._completion_tokens_param_name = "max_completion_tokens"  # instance attr
@@ -437,7 +477,10 @@ class OpenAICompatibleProvider:
         _completion_tokens_param_name and reasoning_effort also keep their
         class defaults ("max_tokens", "none").
         """
-        table = dict(_OPENROUTER_PRICE_TABLE)
+        table, cache_table = with_refreshed(
+            "openrouter", _OPENROUTER_PRICE_TABLE, _OPENROUTER_CACHE_PRICE,
+            authoritative=True,
+        )
         if extra_price_table:
             table.update(extra_price_table)
         return cls(
@@ -446,7 +489,7 @@ class OpenAICompatibleProvider:
             default_model=default_model,
             price_table=table,
             _client=_client,
-            cache_price_table=dict(_OPENROUTER_CACHE_PRICE),
+            cache_price_table=cache_table,
         )
 
     @classmethod
@@ -470,7 +513,7 @@ class OpenAICompatibleProvider:
         cache_price() falls back to the input price (assumes no discount).
         retry_waste_factor keeps the unmeasured-endpoint default of 3.0.
         """
-        table = dict(_GEMINI_PRICE_TABLE)
+        table, _ = with_refreshed("gemini", _GEMINI_PRICE_TABLE)
         if extra_price_table:
             table.update(extra_price_table)
         provider = cls(
