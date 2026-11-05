@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   defaultModelForProvider,
   modelsForProvider,
+  OLLAMA_MODELS_UNAVAILABLE_HINT,
+  preselectOllamaModel,
   extractSseData,
   formatBestEffortSummary,
   formatFailureSummary,
@@ -1390,5 +1392,23 @@ describe("modelsForProvider", () => {
       const models = modelsForProvider(provider);
       expect(new Set(models).size).toBe(models.length);
     }
+  });
+});
+
+describe("preselectOllamaModel", () => {
+  const pulled = ["qwen3.6-27b-tr:latest", "hf.co/unsloth/Qwen3.6-27B-GGUF:UD-Q3_K_XL"];
+
+  it("starts on the first pulled model when none is chosen", () => {
+    expect(preselectOllamaModel("", pulled)).toBe("qwen3.6-27b-tr:latest");
+  });
+
+  it("keeps a model already chosen, even one that is not listed", () => {
+    expect(preselectOllamaModel(pulled[1], pulled)).toBe(pulled[1]);
+    expect(preselectOllamaModel("qwen", pulled)).toBe("qwen");
+  });
+
+  it("stays blank when Ollama listed nothing, leaving the free-text field", () => {
+    expect(preselectOllamaModel("", [])).toBe("");
+    expect(OLLAMA_MODELS_UNAVAILABLE_HINT).toMatch(/ollama pull/);
   });
 });

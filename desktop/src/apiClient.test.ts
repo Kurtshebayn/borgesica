@@ -4,6 +4,7 @@ import {
   getChunks,
   getGlossaryReview,
   getNarrators,
+  getOllamaModels,
   deleteJob,
   updateJobModel,
   listJobs,
@@ -298,5 +299,23 @@ describe("updateJobModel", () => {
     );
 
     await expect(updateJobModel(BASE, "secret", "job-1", "m")).rejects.toThrow("HTTP 409: started");
+  });
+});
+
+describe("getOllamaModels", () => {
+  it("GETs /ollama/models with the session token", async () => {
+    const body = { models: ["qwen3.6-27b-tr:latest"], error: null };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await getOllamaModels(BASE, "secret")).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/ollama/models`, {
+      headers: { "X-Borgesica-Token": "secret" },
+    });
+  });
+
+  it("rejects on a refused request", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 401 })));
+    await expect(getOllamaModels(BASE, "bad")).rejects.toThrow("HTTP 401");
   });
 });

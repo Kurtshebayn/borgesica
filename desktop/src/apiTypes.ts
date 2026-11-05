@@ -231,6 +231,13 @@ export interface CreateJobRequest {
   continue_on_error?: boolean;
 }
 
+/** `GET /ollama/models`: the tags pulled on the local Ollama. `error` is set
+ * (with no models) when Ollama could not be reached or read. */
+export interface OllamaModelsResponse {
+  models: string[];
+  error: string | null;
+}
+
 /** `DELETE /jobs/{id}`: the job is gone; `file_deleted` says whether its
  * translated file was removed from the library folder too. */
 export interface DeleteJobResponse {

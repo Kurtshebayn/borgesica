@@ -20,6 +20,7 @@ import type {
   JobResponse,
   NarratorAssignment,
   NarratorsResponse,
+  OllamaModelsResponse,
 } from "./apiTypes";
 
 const TOKEN_HEADER = "X-Borgesica-Token";
@@ -48,6 +49,14 @@ export function createJob(
     headers: authHeaders(token, true),
     body: JSON.stringify(payload),
   }).then(asJson<JobResponse>);
+}
+
+/** The models pulled on the local Ollama, asked through the engine (the
+ * webview does not call Ollama itself). */
+export function getOllamaModels(baseUrl: string, token: string): Promise<OllamaModelsResponse> {
+  return fetch(`${baseUrl}/ollama/models`, { headers: authHeaders(token) }).then(
+    asJson<OllamaModelsResponse>,
+  );
 }
 
 /** Every stored job, newest first, with its failed/best-effort counts. */

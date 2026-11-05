@@ -7,6 +7,7 @@ import {
   getGlossary,
   getGlossaryReview,
   getNarrators,
+  getOllamaModels,
   getStatus,
   putGlossary,
   putNarrators,
@@ -32,6 +33,8 @@ import {
   loadGlossaryReview,
   loadNarrators,
   modelsForProvider,
+  OLLAMA_MODELS_UNAVAILABLE_HINT,
+  preselectOllamaModel,
   runRecoveryAction,
   saveGlossary,
   saveNarrators,
@@ -121,6 +124,9 @@ export default function WizardScreen({
   // supersedes the retired claude-3-5-sonnet-latest default, whose failures
   // used to look like a silent $0 "success" on untranslated output.
   const [model, setModel] = useState(() => defaultModelForProvider(provider));
+  // Ollama's models are whatever the person pulled: asked of the engine once.
+  // null = not loaded yet; [] = Ollama unreachable or empty (free-text fallback).
+  const [ollamaModels, setOllamaModels] = useState<string[] | null>(null);
   const subscriptionRef = useRef<SseSubscription | null>(null);
   const resumedRef = useRef(false);
   // A stopped run picked from the library waits here for an explicit
@@ -140,6 +146,21 @@ export default function WizardScreen({
       subscriptionRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (provider !== "ollama") return;
+    let cancelled = false;
+    getOllamaModels(baseUrl, token)
+      .then((res) => res.models, () => [] as string[])
+      .then((models) => {
+        if (cancelled) return;
+        setOllamaModels(models);
+        setModel((current) => preselectOllamaModel(current, models));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, baseUrl, token]);
 
   // Resuming starts a paid run, so it happens once per mount even when the
   // dev build mounts effects twice.
@@ -409,7 +430,8 @@ export default function WizardScreen({
   }
 
   const currentStep = pendingResume ? STEP_OF_SCREEN.run : STEP_OF_SCREEN[state.screen];
-  const modelOptions = modelsForProvider(provider);
+  const modelOptions = provider === "ollama" ? (ollamaModels ?? []) : modelsForProvider(provider);
+  const ollamaUnavailable = provider === "ollama" && ollamaModels !== null && ollamaModels.length === 0;
   const pendingGlossaryChanges = state.glossaryReview
     ? glossaryChangesToSave(state.glossaryReview, state.glossary).length
     : 0;
@@ -545,6 +567,7 @@ export default function WizardScreen({
               />
             )}
           </label>
+          {ollamaUnavailable && <p className="hint">{OLLAMA_MODELS_UNAVAILABLE_HINT}</p>}
           <button
             className="primary"
             onClick={() => void handlePick()}
