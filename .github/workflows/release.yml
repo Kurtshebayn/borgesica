@@ -7,9 +7,8 @@ name: Release (Windows)
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-  push:
     branches: [feat/windows-release] # TEMP: remove before merging
+  workflow_dispatch:
 
 permissions:
   contents: write
