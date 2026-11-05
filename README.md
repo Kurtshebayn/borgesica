@@ -53,6 +53,8 @@ Fuera de alcance: PDF (por ahora el foco es EPUB y SRT), e-books con DRM (técni
 
 ## Aplicación de escritorio
 
+**Descarga para Windows:** [Borgesica-Setup.exe](https://github.com/Kurtshebayn/borgesica/releases/latest/download/Borgesica-Setup.exe) (el instalador aún no está firmado; Windows puede mostrar un aviso de SmartScreen).
+
 Además de la CLI, borgésica tiene una app de escritorio (Tauri + React) que levanta el motor como un proceso local ("sidecar") y lo consume por una API HTTP autenticada con un token de sesión propio.
 
 El uso es un asistente de un solo flujo:

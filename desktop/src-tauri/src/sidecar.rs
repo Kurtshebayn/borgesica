@@ -120,11 +120,14 @@ pub fn spawn_sidecar(
     debug_assert!(!args_contain_secret(&args, api_key));
     leading_args.append(&mut args);
 
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(&leading_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(engine_log_stdio());
+    hide_console_window(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|e| SidecarError::SpawnFailed(e.to_string()))?;
 
@@ -141,6 +144,36 @@ pub fn spawn_sidecar(
         base_url: url,
         token,
     })
+}
+
+/// The engine is a console-subsystem executable, so Windows opens a console
+/// window for it when the (GUI) app spawns it. Closing that window kills the
+/// engine, so run it without one.
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
+
+/// Where the engine's stderr (uvicorn's request log and any traceback) goes:
+/// `~/.borgesica/engine.log`, truncated on every launch. Nothing reads the
+/// engine's stderr pipe, so without this a crash leaves no trace at all. Falls
+/// back to discarding the output if the file cannot be opened.
+fn engine_log_stdio() -> Stdio {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    let Some(home) = home else {
+        return Stdio::null();
+    };
+    let dir = PathBuf::from(home).join(".borgesica");
+    let _ = std::fs::create_dir_all(&dir);
+    match std::fs::File::create(dir.join("engine.log")) {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    }
 }
 
 fn write_key_to_stdin(
