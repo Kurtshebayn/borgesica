@@ -8,6 +8,8 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  push:
+    branches: [feat/windows-release] # TEMP: remove before merging
 
 permissions:
   contents: write
