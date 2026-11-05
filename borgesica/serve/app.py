@@ -50,6 +50,7 @@ from borgesica.serve.schemas import (
     JobResponse,
     NarratorsResponse,
     NarratorsUpdateRequest,
+    OllamaModelsResponse,
     RunRequest,
     UpdateJobRequest,
     chunk_to_item,
@@ -463,6 +464,19 @@ def create_app(
         return StreamingResponse(
             sse_event_stream(engine, runner, job_id), media_type="text/event-stream"
         )
+
+    @app.get("/ollama/models", response_model=OllamaModelsResponse)
+    def get_ollama_models() -> OllamaModelsResponse:
+        """Models pulled on the local Ollama (OLLAMA_HOST, default
+        localhost:11434), for the wizard's model dropdown. The webview does
+        not call Ollama itself (origin/CORS). Always 200: an unreachable or
+        odd Ollama is reported in `error` with no models."""
+        from borgesica.adapters.providers.ollama_provider import list_local_models
+
+        try:
+            return OllamaModelsResponse(models=list_local_models())
+        except (OSError, ValueError) as exc:
+            return OllamaModelsResponse(models=[], error=str(exc))
 
     @app.post("/shutdown")
     def shutdown() -> dict[str, object]:

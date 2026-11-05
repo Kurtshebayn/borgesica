@@ -60,7 +60,8 @@ export const PROVIDERS: Provider[] = [
 /** A sensible default model id for a freshly selected provider, so the user
  * is not left with an Anthropic model id after switching to DeepSeek (which
  * would fail at create/estimate). Ollama returns "" on purpose: local models
- * are user-specific, so the user must type whichever tag they have pulled. */
+ * are user-specific, so the wizard picks from whatever the person has pulled
+ * (see `preselectOllamaModel`). */
 export function defaultModelForProvider(provider: Provider): string {
   switch (provider) {
     case "anthropic":
@@ -79,8 +80,8 @@ export function defaultModelForProvider(provider: Provider): string {
 }
 
 /** The models the engine can price for each provider, default first. Empty
- * for Ollama: its models are whatever the person pulled locally, so the UI
- * keeps a free-text field there. OpenRouter lists only the model with a known
+ * for Ollama: its models are whatever the person pulled locally, listed by the
+ * engine at runtime (`GET /ollama/models`), with a free-text field as fallback. OpenRouter lists only the model with a known
  * price; any other "vendor/model" id it routes is priced at the fallback rate. */
 export function modelsForProvider(provider: Provider): string[] {
   switch (provider) {
@@ -97,6 +98,19 @@ export function modelsForProvider(provider: Provider): string[] {
     case "ollama":
       return [];
   }
+}
+
+/** Shown under the model field when the pulled Ollama models could not be
+ * listed (Ollama off or empty), where the person types the tag instead. */
+export const OLLAMA_MODELS_UNAVAILABLE_HINT =
+  "No se encontraron modelos en Ollama. Comprueba que esté en ejecución y que hayas " +
+  "descargado alguno (ollama pull), o escribe el nombre exacto del modelo.";
+
+/** The model to start with once the pulled Ollama models are known: a model
+ * already chosen stays (a resumed draft keeps its own), otherwise the first. */
+export function preselectOllamaModel(current: string, available: string[]): string {
+  if (current !== "") return current;
+  return available[0] ?? "";
 }
 
 /** Whether the given provider needs a non-empty API key before the sidecar

@@ -281,3 +281,13 @@ class RunRequest(BaseModel):
     (default_out_path). The job payload reports the path chosen as out_path."""
 
     out_path: str | None = None
+
+
+class OllamaModelsResponse(BaseModel):
+    """GET /ollama/models: the tags pulled on the local Ollama. `error` is set
+    (and `models` empty) when Ollama could not be reached or read, so the
+    desktop falls back to a free-text field instead of showing a failure."""
+
+    models: list[str]
+    error: str | None = None
+

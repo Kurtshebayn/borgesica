@@ -107,3 +107,26 @@ def _resolve_base_url() -> str:
         host = host.removeprefix("http://").removeprefix("https://")
         return f"http://{host}/v1"
     return "http://localhost:11434/v1"
+
+
+def _resolve_host_root() -> str:
+    """The Ollama server root (no /v1) from OLLAMA_HOST, else the default."""
+    return _resolve_base_url().removesuffix("/v1")
+
+
+def list_local_models(timeout: float = 3.0) -> list[str]:
+    """Names of the models pulled on the local Ollama (GET /api/tags).
+
+    Raises OSError (URLError/timeout included) when Ollama is unreachable and
+    ValueError when it answers with something that is not the tags document.
+    """
+    import json
+    import urllib.request
+
+    with urllib.request.urlopen(f"{_resolve_host_root()}/api/tags", timeout=timeout) as resp:
+        body = json.load(resp)
+    models = body.get("models") if isinstance(body, dict) else None
+    if not isinstance(models, list):
+        raise ValueError("unexpected response from Ollama /api/tags")
+    return [m["name"] for m in models if isinstance(m, dict) and isinstance(m.get("name"), str)]
+
