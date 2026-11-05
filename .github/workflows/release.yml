@@ -1,0 +1,72 @@
+name: Release (Windows)
+
+# Pushing a tag such as v0.1.0 builds the Windows installer and publishes it as
+# a GitHub Release. "Run workflow" (workflow_dispatch) builds the same
+# installer but only uploads it as a workflow artifact, so the pipeline can be
+# tested without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Freeze the engine (PyInstaller sidecar)
+        shell: bash
+        run: |
+          pip install -e ".[epub,pdf,serve,openai-compat,packaging]"
+          pyinstaller packaging/borgesica.spec --distpath dist --workpath build
+          python packaging/smoke_check.py dist/borgesica/borgesica.exe
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Build the installer
+        working-directory: desktop
+        shell: bash
+        run: |
+          npm ci
+          npx tauri build --config src-tauri/tauri.release.conf.json
+
+      - name: Name the installer with a stable filename
+        shell: bash
+        run: |
+          mkdir -p release
+          installer=$(ls desktop/src-tauri/target/release/bundle/nsis/*-setup.exe | head -n 1)
+          cp "$installer" release/Borgesica-Setup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Borgesica-Setup
+          path: release/Borgesica-Setup.exe
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" release/Borgesica-Setup.exe \
+            --title "borgésica ${{ github.ref_name }}" \
+            --generate-notes
