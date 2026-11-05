@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>borgésica — Traducción de libros y subtítulos al español</title>
+  <meta name="description" content="Aplicación gratuita y de código abierto que traduce EPUB, PDF y SRT del inglés a un español neutro, coherente de la primera página a la última.">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #151b24;
+      --line: #2a3340;
+      --ink: #ece6d8;
+      --muted: #9aa3b0;
+      --red: #c0392b;
+      --red-hover: #d64a3b;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 17px/1.65 Georgia, "Times New Roman", serif;
+    }
+    a { color: var(--ink); }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+
+    .hero {
+      min-height: 62vh;
+      display: flex;
+      align-items: flex-end;
+      background:
+        linear-gradient(to top, var(--bg) 4%, rgba(13, 17, 23, 0.55) 55%, rgba(13, 17, 23, 0.2)),
+        url("banner.webp") center / cover no-repeat;
+    }
+    .hero .wrap { padding-bottom: 48px; }
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(2.6rem, 8vw, 4.2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.05;
+    }
+    .tagline { margin: 0 0 28px; font-size: 1.2rem; color: var(--muted); max-width: 34em; }
+
+    .btn {
+      display: inline-block;
+      padding: 14px 28px;
+      background: var(--red);
+      color: #fff;
+      text-decoration: none;
+      font: 600 1rem/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+      border-radius: 4px;
+      transition: background 0.15s;
+    }
+    .btn:hover { background: var(--red-hover); }
+    .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+    .meta { margin-top: 14px; font: 0.88rem/1.4 system-ui, sans-serif; color: var(--muted); }
+
+    section { padding: 56px 0 8px; }
+    h2 { margin: 0 0 16px; font-size: 1.7rem; font-weight: 400; }
+    p { margin: 0 0 16px; }
+    ul { padding-left: 1.2em; margin: 0 0 16px; }
+    li { margin-bottom: 8px; }
+    li::marker { color: var(--red); }
+
+    .note {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--red);
+      border-radius: 4px;
+      padding: 18px 22px;
+      margin: 24px 0;
+      font-size: 0.97rem;
+    }
+    .note strong { display: block; margin-bottom: 6px; }
+    .note p:last-child { margin-bottom: 0; }
+
+    footer {
+      margin-top: 56px;
+      padding: 28px 0 48px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font: 0.9rem/1.5 system-ui, sans-serif;
+    }
+    footer a { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <h1>borgésica</h1>
+      <p class="tagline">Traducción de libros y subtítulos al español, coherente de la primera página a la última.</p>
+      <a class="btn" href="https://github.com/Kurtshebayn/borgesica/releases/latest/download/Borgesica-Setup.exe">Descargar para Windows</a>
+      <div class="meta">Gratis y de código abierto · Windows 10/11 · <a href="https://github.com/Kurtshebayn/borgesica/releases/latest">Todas las versiones</a></div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section>
+      <h2>Qué hace</h2>
+      <p>Convierte libros (EPUB, PDF) y subtítulos (SRT) del inglés a un español neutro, entendible en cualquier región de habla hispana. Tú eliges el modelo de lenguaje: desde una API de frontera hasta un modelo local, gratis y sin conexión.</p>
+      <ul>
+        <li><strong>Glosario revisable.</strong> Los nombres y términos recurrentes se traducen siempre igual. Lo revisas y lo bloqueas antes de traducir.</li>
+        <li><strong>Narrador por capítulo.</strong> Quién dice «yo» queda fijado por ti, no inventado fragmento a fragmento.</li>
+        <li><strong>Costo conocido de antemano.</strong> Estimación previa y tope de presupuesto.</li>
+        <li><strong>Reanudable.</strong> Si se corta a mitad de libro, retoma sin volver a traducir ni a pagar lo ya hecho.</li>
+        <li><strong>Formato intacto.</strong> Entra un EPUB y sale un EPUB válido, con capítulos e imágenes.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Cómo se usa</h2>
+      <ol>
+        <li>Elige proveedor (Anthropic, DeepSeek, OpenAI, OpenRouter, Gemini u Ollama local) e introduce tu clave. Se pide en cada sesión y nunca se guarda en disco.</li>
+        <li>Elige el archivo y mira la estimación de costo.</li>
+        <li>Revisa y bloquea el glosario.</li>
+        <li>Traduce. El resultado se guarda junto al archivo original.</li>
+      </ol>
+      <div class="note">
+        <strong>Necesitas tu propia clave de API</strong>
+        <p>borgésica no incluye ningún servicio de traducción: pagas directamente al proveedor que elijas. Con Ollama puedes traducir en tu propio equipo sin clave y sin coste.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Instalación</h2>
+      <p>Descarga <code>Borgesica-Setup.exe</code> y ejecútalo. No requiere permisos de administrador.</p>
+      <div class="note">
+        <strong>Aviso de Windows SmartScreen</strong>
+        <p>El instalador aún no está firmado digitalmente, así que Windows puede mostrar «Windows protegió su PC». Pulsa <em>Más información</em> y luego <em>Ejecutar de todas formas</em>. El código completo está publicado y puedes revisarlo o compilarlo tú mismo.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Límites actuales</h2>
+      <ul>
+        <li>Solo inglés → español neutro.</li>
+        <li>PDF: solo documentos digitales, sin OCR de escaneados.</li>
+        <li>No funciona con libros protegidos con DRM.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      Licencia MIT · <a href="https://github.com/Kurtshebayn/borgesica">Código fuente en GitHub</a> · <a href="https://github.com/Kurtshebayn/borgesica/issues">Reportar un problema</a>
+    </div>
+  </footer>
+</body>
+</html>
