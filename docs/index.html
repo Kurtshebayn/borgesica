@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>document.documentElement.classList.add('js');</script>
   <title>borgésica — Traducción de libros y subtítulos al español</title>
   <meta name="description" content="Aplicación gratuita y de código abierto que traduce EPUB, PDF y SRT del inglés a un español neutro, coherente de la primera página a la última.">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
@@ -30,7 +31,6 @@
       color-scheme: light;
     }
     *, *::before, *::after { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
     body {
       margin: 0;
       background: var(--bg);
@@ -47,7 +47,7 @@
     .label { font: 500 0.75rem/1.4 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 
     /* ---- Top bar ---- */
-    .bar { border-bottom: 1px solid var(--rule); }
+    .bar { position: absolute; top: 0; left: 0; right: 0; z-index: 4; border-bottom: 1px solid var(--rule); }
     .bar .wrap { display: flex; align-items: center; justify-content: space-between; height: 72px; }
     .brand { font: 500 1.5rem/1 var(--font-display); text-decoration: none; letter-spacing: -0.01em; }
     .bar nav { display: flex; gap: 28px; font-size: 0.92rem; }
@@ -55,8 +55,8 @@
     .bar nav a:hover { color: var(--ink); text-decoration: underline; }
 
     /* ---- Hero ---- */
-    .hero { padding: clamp(40px, 7vw, 88px) 0 clamp(48px, 7vw, 96px); }
-    .hero .wrap { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: clamp(32px, 6vw, 88px); align-items: center; }
+    .hero { position: relative; min-height: 100dvh; display: grid; align-items: center; padding: 96px 0 72px; overflow: hidden; }
+    .hero .wrap { width: 100%; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: clamp(32px, 6vw, 88px); align-items: center; }
     h1 {
       margin: 18px 0 20px;
       font: 400 clamp(2.4rem, 5vw, 3.7rem)/1.06 var(--font-display);
@@ -88,7 +88,33 @@
       padding: 10px;
       box-shadow: var(--shadow);
     }
-    .plate img { display: block; width: 100%; aspect-ratio: 4 / 5; object-fit: cover; object-position: 46% 50%; }
+    .plate { will-change: transform; }
+    .plate img { display: block; width: 100%; aspect-ratio: 4 / 5; max-height: calc(100dvh - 270px); object-fit: cover; object-position: 46% 50%; }
+
+    /* Scroll cue and the paper-coloured veil the zoom dissolves into. */
+    .hint { display: none; position: absolute; left: 0; right: 0; bottom: 14px; flex-direction: column; align-items: center; gap: 10px; z-index: 2; }
+    .js .hint { display: flex; }
+    .hint::after { content: ""; width: 1px; height: 34px; background: var(--ink); transform-origin: top; animation: cue 1.8s ease-in-out infinite; }
+    @keyframes cue { 0% { transform: scaleY(0); opacity: 1; } 55% { transform: scaleY(1); opacity: 1; } 100% { transform: scaleY(1); opacity: 0; } }
+    .paper { position: absolute; inset: 0; background: var(--bg); opacity: 0; pointer-events: none; z-index: 3; }
+
+    /* ---- Entrance doors: only exist while JS is running the intro ---- */
+    .doors { display: none; }
+    .js .doors { display: block; position: fixed; inset: 0; z-index: 100; perspective: 1900px; overflow: hidden; }
+    .door { position: absolute; top: 0; bottom: 0; width: 50%; overflow: hidden; background: #0b1423; backface-visibility: hidden; will-change: transform; }
+    .door-l { left: 0; transform-origin: 0 50%; }
+    .door-r { right: 0; transform-origin: 100% 50%; }
+    .door::before { content: ""; position: absolute; inset: 7vh 4vw; border: 1px solid rgb(236 230 216 / 16%); }
+    .door::after { content: ""; position: absolute; inset: 13vh 8vw; border: 1px solid rgb(236 230 216 / 9%); }
+    .door-title {
+      position: absolute; top: 0; bottom: 0; width: 100vw;
+      display: flex; align-items: center; justify-content: center;
+      font: 400 clamp(3rem, 9vw, 7.5rem)/1 var(--font-display);
+      letter-spacing: -0.02em; color: #ece6d8; z-index: 1;
+    }
+    .door-l .door-title { left: 0; }
+    .door-r .door-title { right: 0; }
+    .seam { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--accent); transform-origin: 50% 0; z-index: 2; }
 
     /* ---- Sections ---- */
     section.block { border-top: 1px solid var(--rule-strong); padding: clamp(40px, 6vw, 72px) 0; }
@@ -124,18 +150,29 @@
     @media (prefers-reduced-motion: no-preference) {
       .rise { opacity: 0; transform: translateY(14px); animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards; animation-delay: calc(var(--i, 0) * 90ms); }
       @keyframes rise { to { opacity: 1; transform: none; } }
+      /* With JS the page waits behind the doors; the script adds .ready as they open. */
+      .js .rise { animation-play-state: paused; }
+      .js.ready .rise { animation-play-state: running; }
     }
 
     /* ---- Mobile: everything collapses to one column ---- */
     @media (max-width: 820px) {
       .hero .wrap, section.block .wrap { grid-template-columns: 1fr; }
-      .plate img { aspect-ratio: 16 / 10; }
+      .plate img { aspect-ratio: 16 / 10; max-height: none; }
+      .hint { display: none !important; }
+      .hero { min-height: 0; padding: 112px 0 56px; }
       .limits { columns: 1; }
       .bar nav { gap: 18px; }
     }
   </style>
 </head>
 <body>
+  <div class="doors" id="doors" aria-hidden="true">
+    <div class="door door-l"><div class="door-title">borgésica</div></div>
+    <div class="door door-r"><div class="door-title">borgésica</div></div>
+    <span class="seam"></span>
+  </div>
+
   <a class="skip" href="#contenido">Saltar al contenido</a>
 
   <header class="bar">
@@ -151,7 +188,7 @@
   <main id="contenido">
     <section class="hero">
       <div class="wrap">
-        <div>
+        <div class="copy">
           <p class="label rise" style="--i:0">Inglés → español neutro · EPUB, SRT</p>
           <h1 class="rise" style="--i:1">Lee <em>en español</em> lo que solo existe en inglés.</h1>
           <p class="lede rise" style="--i:2">Traducción de libros y subtítulos al español, coherente de la primera página a la última: los nombres no cambian entre capítulos y el registro no deriva.</p>
@@ -167,6 +204,8 @@
           </div>
         </figure>
       </div>
+      <div class="hint" aria-hidden="true"><span class="label rise" style="--i:6">Desplaza para entrar</span></div>
+      <div class="paper" aria-hidden="true"></div>
     </section>
 
     <section class="block" aria-labelledby="h-que">
@@ -248,5 +287,101 @@
       <span><a href="https://github.com/Kurtshebayn/borgesica">Código fuente</a> · <a href="https://github.com/Kurtshebayn/borgesica/issues">Reportar un problema</a></span>
     </div>
   </footer>
+
+  <!-- GSAP drives the doors and the scroll zoom. Without it (blocked CDN) the
+       page simply stays a normal static page. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const doors = document.getElementById('doors');
+      if (!window.gsap || !window.ScrollTrigger) { root.classList.remove('js'); return; }
+      gsap.registerPlugin(ScrollTrigger);
+      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      // ---- 1. Entrance doors ----
+      let intro = null;
+      const finishIntro = () => {
+        root.classList.add('ready');
+        root.style.overflow = '';
+        doors.style.display = 'none';
+        ScrollTrigger.refresh();
+      };
+      if (reduce) {
+        finishIntro();
+      } else {
+        root.style.overflow = 'hidden';
+        intro = gsap.timeline({ onComplete: finishIntro });
+        intro
+          .from('.door-title', { opacity: 0, y: 12, duration: 1, ease: 'power2.out' }, 0)
+          .from('.seam', { scaleY: 0, duration: 0.9, ease: 'power3.out' }, 0.1)
+          .to('.seam', { opacity: 0, duration: 0.4 }, 1.5)
+          .add(() => root.classList.add('ready'), 1.9)
+          .to('.door-l', { rotationY: 100, duration: 1.9, ease: 'power3.inOut' }, 1.5)
+          .to('.door-r', { rotationY: -100, duration: 1.9, ease: 'power3.inOut' }, 1.5)
+          .from('.hero > .wrap', { scale: 1.08, duration: 1.9, ease: 'power3.out' }, 1.5);
+        const skip = () => intro && intro.progress(1);
+        doors.addEventListener('click', skip);
+        addEventListener('keydown', skip, { once: true });
+        addEventListener('wheel', skip, { once: true, passive: true });
+      }
+
+      if (reduce) return;
+
+      // ---- 2. Scroll: zoom into the corridor, dissolve into the next section ----
+      const mm = gsap.matchMedia();
+      mm.add('(min-width: 821px)', () => {
+        const hero = document.querySelector('.hero');
+        const plate = hero.querySelector('.plate');
+        const img = plate.querySelector('img');
+        const copy = hero.querySelector('.copy');
+        const paper = hero.querySelector('.paper');
+        const hint = hero.querySelector('.hint');
+
+        // The corridor's vanishing point, in the source image's pixels.
+        const SRC = { w: 2000, h: 667 }, FOCAL = { x: 975, y: 335 }, POS_X = 0.46;
+        let f = { ox: 0, oy: 0, sx: 0, sy: 0 };
+        let tl = null;
+        const measure = () => {
+          const keep = tl ? tl.progress() : 0;
+          if (tl) tl.progress(0);
+          const p = plate.getBoundingClientRect();
+          const i = img.getBoundingClientRect();
+          const s = Math.max(i.width / SRC.w, i.height / SRC.h);
+          const offX = (SRC.w * s - i.width) * POS_X;
+          const offY = (SRC.h * s - i.height) * 0.5;
+          f.ox = i.left - p.left + FOCAL.x * s - offX;
+          f.oy = i.top - p.top + FOCAL.y * s - offY;
+          f.sx = p.left + f.ox;
+          f.sy = p.top + f.oy;
+          if (tl) tl.progress(keep);
+        };
+        measure();
+
+        tl = gsap.timeline({
+          defaults: { ease: 'none' },
+          scrollTrigger: {
+            trigger: hero, start: 'top top', end: '+=240%',
+            pin: true, scrub: 0.8, invalidateOnRefresh: true, onRefreshInit: measure,
+          },
+        });
+        tl.to(copy, { opacity: 0, x: -80, duration: 0.3 }, 0)
+          .to(hint, { opacity: 0, duration: 0.1 }, 0)
+          .fromTo(plate,
+            { scale: 1, x: 0, y: 0, transformOrigin: () => `${f.ox}px ${f.oy}px` },
+            { scale: 7, x: () => innerWidth / 2 - f.sx, y: () => innerHeight / 2 - f.sy, ease: 'power2.in', duration: 1 }, 0)
+          .to(paper, { opacity: 1, duration: 0.3, ease: 'power1.in' }, 0.7);
+      });
+
+      // ---- 3. Sections rise into view ----
+      const items = gsap.utils.toArray('section.block .wrap > *, footer .wrap > *');
+      gsap.set(items, { opacity: 0, y: 28 });
+      ScrollTrigger.batch(items, {
+        start: 'top 88%', once: true,
+        onEnter: (els) => gsap.to(els, { opacity: 1, y: 0, duration: 0.9, ease: 'power3.out', stagger: 0.12, overwrite: true }),
+      });
+    })();
+  </script>
 </body>
 </html>
