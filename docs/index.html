@@ -56,7 +56,7 @@
 
     /* ---- Hero ---- */
     .hero { position: relative; min-height: 100dvh; display: grid; align-items: center; padding: 96px 0 72px; overflow: hidden; }
-    .hero .wrap { width: 100%; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: clamp(32px, 6vw, 88px); align-items: center; }
+    .hero .wrap { width: 100%; display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: clamp(32px, 6vw, 88px); align-items: center; }
     h1 {
       margin: 18px 0 20px;
       font: 400 clamp(2.4rem, 5vw, 3.7rem)/1.06 var(--font-display);
@@ -82,14 +82,28 @@
     .facts { margin-top: 28px; }
 
     figure { margin: 0; }
-    .plate {
+    .frame {
       border: 1px solid var(--ink);
       background: var(--surface);
       padding: 10px;
       box-shadow: var(--shadow);
     }
-    .plate { will-change: transform; }
-    .plate img { display: block; width: 100%; aspect-ratio: 4 / 5; max-height: calc(100dvh - 270px); object-fit: cover; object-position: 46% 50%; }
+    .frame img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; object-position: 46% 50%; }
+
+    /* The live 3D window. It is a viewport-sized box scaled down into the
+       right-hand slot (so the WebGL canvas stays sharp) and grown back up as
+       you scroll. The mat, border and shadow are in design px at full size, so
+       they read as the thin frame above once scaled; the 1.1 end scale pushes
+       them off-screen. The static .fallback figure keeps the slot's place. */
+    .plate3d {
+      display: none; position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+      padding: 32px; border: 3px solid var(--ink); background: var(--surface);
+      box-shadow: 24px 24px 0 rgb(15 27 45 / 10%);
+      z-index: 1; opacity: 0; will-change: transform; pointer-events: none;
+    }
+    .gl .plate3d { display: block; }
+    .plate3d canvas { display: block; width: 100%; height: 100%; }
+    .gl .fallback { visibility: hidden; }
 
     /* Scroll cue and the paper-coloured veil the zoom dissolves into. */
     .hint { display: none; position: absolute; left: 0; right: 0; bottom: 14px; flex-direction: column; align-items: center; gap: 10px; z-index: 2; }
@@ -115,6 +129,11 @@
     .door-l .door-title { left: 0; }
     .door-r .door-title { right: 0; }
     .seam { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--accent); transform-origin: 50% 0; z-index: 2; }
+    /* The doors wait on the 3D scene to build, so their first beat is plain CSS. */
+    .js .door-title { animation: title-in 1s 0.1s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .js .seam { animation: seam-in 0.9s 0.1s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    @keyframes title-in { from { opacity: 0; transform: translateY(12px); } }
+    @keyframes seam-in { from { transform: scaleY(0); } }
 
     /* ---- Sections ---- */
     section.block { border-top: 1px solid var(--rule-strong); padding: clamp(40px, 6vw, 72px) 0; }
@@ -158,7 +177,6 @@
     /* ---- Mobile: everything collapses to one column ---- */
     @media (max-width: 820px) {
       .hero .wrap, section.block .wrap { grid-template-columns: 1fr; }
-      .plate img { aspect-ratio: 16 / 10; max-height: none; }
       .hint { display: none !important; }
       .hero { min-height: 0; padding: 112px 0 56px; }
       .limits { columns: 1; }
@@ -198,12 +216,13 @@
           </div>
           <p class="label facts rise" style="--i:4">Gratis · Código abierto (MIT) · Windows 10/11</p>
         </div>
-        <figure class="rise" style="--i:2">
-          <div class="plate">
-            <img src="banner.webp" width="2000" height="667" data-w="2000" data-h="667" data-fx="975" data-fy="335" data-zoom="4.2" alt="Un hombre con sombrero mira una galería de estanterías infinitas, enmarcado por hexágonos.">
+        <figure class="fallback rise" style="--i:2">
+          <div class="frame">
+            <img src="banner.webp" width="2000" height="667" alt="Un hombre con sombrero mira una galería de estanterías infinitas, enmarcado por hexágonos.">
           </div>
         </figure>
       </div>
+      <div class="plate3d" aria-hidden="true"><canvas id="gl"></canvas></div>
       <div class="hint" aria-hidden="true"><span class="label rise" style="--i:6">Desplaza para entrar</span></div>
       <div class="paper" aria-hidden="true"></div>
     </section>
@@ -288,104 +307,299 @@
     </div>
   </footer>
 
-  <!-- GSAP drives the doors and the scroll zoom. Without it (blocked CDN) the
-       page simply stays a normal static page. -->
+  <!-- GSAP drives the doors and the scroll; Three.js renders the library. If
+       either CDN is blocked the page simply stays a normal static page. -->
+  <script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js" } }</script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
-  <script>
-    (() => {
-      const root = document.documentElement;
-      const doors = document.getElementById('doors');
-      if (!window.gsap || !window.ScrollTrigger) { root.classList.remove('js'); return; }
+  <script type="module">
+    const root = document.documentElement;
+    const doors = document.getElementById('doors');
+
+    function mulberry32(a) {
+      return () => {
+        a |= 0; a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    const withTimeout = (promise, ms) =>
+      Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
+
+    /* ------------------------------------------------------------------
+       The library: an endless aisle of shelves, built from code. Books are
+       instanced boxes, split in 16-unit segments so the ones behind the
+       camera or past the far plane are culled. Distance fades into the page's
+       own paper colour, so the far end of the aisle glows like the engraving.
+       ------------------------------------------------------------------ */
+    function buildWorld(THREE, canvas) {
+      const PAPER = new THREE.Color('#f1f2ee');
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+      const scene = new THREE.Scene();
+      scene.background = PAPER;
+      scene.fog = new THREE.Fog(PAPER, 6, 92);
+      const camera = new THREE.PerspectiveCamera(56, 1, 0.1, 100);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x39404d, 1.7));
+      const lamp = new THREE.PointLight(0xffe9c8, 55, 0, 2);
+      scene.add(lamp);
+
+      const rand = mulberry32(11);
+      const AISLE = 3, TIER_H = 1.1, TIERS = 30, SEG = 16, SEGS = 13, TRAVEL = 112;
+      const HEIGHT = TIERS * TIER_H;
+      const palette = ['#16233a', '#1f3150', '#2c3e5c', '#3a2f2a', '#54402f', '#6b5a47', '#8a7a64', '#b3a58c', '#d8cdb8', '#0f1b2d', '#243447']
+        .map((c) => new THREE.Color(c));
+      const RED = new THREE.Color('#d9381e');
+      const unit = new THREE.BoxGeometry(1, 1, 1);
+      const bookMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+      const woodMat = new THREE.MeshLambertMaterial({ color: 0x1b2230 });
+      const floorMat = new THREE.MeshLambertMaterial({ color: 0x242b38 });
+      const m = new THREE.Object3D();
+      const col = new THREE.Color();
+
+      for (let s = 0; s < SEGS; s++) {
+        const z0 = -s * SEG;
+        const group = new THREE.Group();
+
+        for (const side of [-1, 1]) {
+          // x, y, z, depth, height, thickness, palette index (-1 = vermilion), jitter, lean
+          const specs = [];
+          for (let tier = 0; tier < TIERS; tier++) {
+            const y0 = tier * TIER_H + 0.1;
+            let z = z0;
+            while (z > z0 - SEG) {
+              const t = 0.07 + rand() * 0.09;
+              if (rand() < 0.04) { z -= 0.18 + rand() * 0.25; continue; }
+              const h = TIER_H * (0.66 + rand() * 0.27);
+              const d = 0.42 + rand() * 0.16;
+              specs.push(
+                side * (AISLE + d / 2), y0 + h / 2, z - t / 2, d, h, t,
+                rand() < 0.012 ? -1 : (rand() * palette.length) | 0,
+                rand() - 0.5,
+                rand() < 0.04 ? (rand() - 0.5) * 0.3 : 0,
+              );
+              z -= t + 0.004;
+            }
+          }
+          const n = specs.length / 9;
+          const books = new THREE.InstancedMesh(unit, bookMat, n);
+          for (let i = 0; i < n; i++) {
+            const k = i * 9;
+            m.position.set(specs[k], specs[k + 1], specs[k + 2]);
+            m.rotation.set(specs[k + 8], 0, 0);
+            m.scale.set(specs[k + 3], specs[k + 4], specs[k + 5]);
+            m.updateMatrix();
+            books.setMatrixAt(i, m.matrix);
+            col.copy(specs[k + 6] < 0 ? RED : palette[specs[k + 6]]).offsetHSL(0, 0, specs[k + 7] * 0.05);
+            books.setColorAt(i, col);
+          }
+          books.computeBoundingSphere();
+          group.add(books);
+
+          // Shelf boards, one per tier.
+          const boards = new THREE.InstancedMesh(unit, woodMat, TIERS + 1);
+          m.rotation.set(0, 0, 0);
+          for (let tier = 0; tier <= TIERS; tier++) {
+            m.position.set(side * (AISLE + 0.3), tier * TIER_H + 0.03, z0 - SEG / 2);
+            m.scale.set(0.75, 0.07, SEG);
+            m.updateMatrix();
+            boards.setMatrixAt(tier, m.matrix);
+          }
+          boards.computeBoundingSphere();
+          group.add(boards);
+
+          // Back panel and a pillar every four units.
+          const back = new THREE.Mesh(unit, woodMat);
+          back.position.set(side * (AISLE + 0.66), HEIGHT / 2, z0 - SEG / 2);
+          back.scale.set(0.1, HEIGHT, SEG);
+          group.add(back);
+          for (let k = 0; k < SEG; k += 4) {
+            const pillar = new THREE.Mesh(unit, woodMat);
+            pillar.position.set(side * (AISLE - 0.05), HEIGHT / 2, z0 - k);
+            pillar.scale.set(0.34, HEIGHT + 2, 0.34);
+            group.add(pillar);
+          }
+        }
+
+        // Two footbridges across the aisle, at different heights.
+        for (let b = 0; b < 2; b++) {
+          const bz = z0 - 2 - rand() * (SEG - 4);
+          const by = 4 + ((rand() * 6) | 0) * 3.3;
+          const slab = new THREE.Mesh(unit, woodMat);
+          slab.position.set(0, by, bz);
+          slab.scale.set(AISLE * 2 + 0.3, 0.28, 1.1);
+          group.add(slab);
+          const rail = new THREE.Mesh(unit, woodMat);
+          rail.position.set(0, by + 0.95, bz + 0.5);
+          rail.scale.set(AISLE * 2 + 0.3, 0.1, 0.08);
+          group.add(rail);
+        }
+        scene.add(group);
+      }
+
+      const floor = new THREE.Mesh(unit, floorMat);
+      floor.position.set(0, -0.1, -(SEG * SEGS) / 2);
+      floor.scale.set(AISLE * 2 + 1.4, 0.2, SEG * SEGS + 20);
+      scene.add(floor);
+
+      // Drifting dust gives the air some depth.
+      const dustN = 900, dustPos = new Float32Array(dustN * 3);
+      for (let i = 0; i < dustN; i++) {
+        dustPos[i * 3] = (rand() - 0.5) * (AISLE * 2 - 0.6);
+        dustPos[i * 3 + 1] = 0.2 + rand() * 16;
+        dustPos[i * 3 + 2] = -rand() * SEG * SEGS;
+      }
+      const dustGeo = new THREE.BufferGeometry();
+      dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+      scene.add(new THREE.Points(dustGeo, new THREE.PointsMaterial({
+        color: 0xfff3dc, size: 0.07, sizeAttenuation: true, transparent: true, opacity: 0.55, depthWrite: false,
+      })));
+
+      function resize() {
+        const w = canvas.clientWidth, h = canvas.clientHeight;
+        if (!w || !h) return;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+      new ResizeObserver(resize).observe(canvas);
+      resize();
+
+      // p: 0..1 along the aisle. (px, py): pointer, -1..1, for a little parallax.
+      function render(p, time, px, py) {
+        camera.position.set(px * 0.5, 1.7 + py * 0.2 + Math.sin(time * 0.7) * 0.04, -TRAVEL * p);
+        camera.rotation.set(0.1 - py * 0.05, -px * 0.1, Math.sin(time * 0.4) * 0.004);
+        camera.fov = 54 + 16 * p;
+        camera.updateProjectionMatrix();
+        lamp.position.set(camera.position.x, camera.position.y + 0.5, camera.position.z - 1.5);
+        renderer.render(scene, camera);
+      }
+      return { render };
+    }
+
+    /* ------------------------------------------------------------------
+       Scroll: the page pins, the framed window grows to fill the screen and
+       the camera walks down the aisle; the end dissolves into the paper.
+       ------------------------------------------------------------------ */
+    function setupScroll(world) {
+      const hero = document.querySelector('.hero');
+      const plate = hero.querySelector('.plate3d');
+      const slot = hero.querySelector('.fallback .frame');
+      const copy = hero.querySelector('.copy');
+      const paper = hero.querySelector('.paper');
+      const hint = hero.querySelector('.hint');
+      const state = { p: 0 };
+      const geo = { s: 0.4, x: 0, y: 0 };
+      let tl = null;
+
+      // Where the small window sits: the (hidden) static figure keeps its place.
+      const measure = () => {
+        const keep = tl ? tl.progress() : 0;
+        if (tl) tl.progress(0);
+        const h = hero.getBoundingClientRect(), r = slot.getBoundingClientRect();
+        geo.s = r.width / plate.offsetWidth;
+        geo.x = r.left - h.left + r.width / 2 - h.width / 2;
+        geo.y = r.top - h.top + r.height / 2 - h.height / 2;
+        if (tl) tl.progress(keep);
+      };
+      measure();
+      gsap.set(plate, { scale: geo.s, x: geo.x, y: geo.y });
+
+      tl = gsap.timeline({
+        defaults: { ease: 'none' },
+        scrollTrigger: {
+          trigger: hero, start: 'top top', end: '+=160%',
+          pin: true, scrub: 0.5, invalidateOnRefresh: true, onRefreshInit: measure,
+        },
+      });
+      tl.fromTo(plate,
+          { scale: () => geo.s, x: () => geo.x, y: () => geo.y },
+          { scale: 1.1, x: 0, y: 0, ease: 'power2.inOut', duration: 0.8 }, 0)
+        .to(copy, { opacity: 0, x: -80, duration: 0.3 }, 0)
+        .to(hint, { opacity: 0, duration: 0.1 }, 0)
+        .to(state, { p: 1, ease: 'power1.in', duration: 1 }, 0)
+        .to(paper, { opacity: 1, duration: 0.35, ease: 'power1.in' }, 0.65);
+
+      let active = true;
+      new IntersectionObserver(([entry]) => { active = entry.isIntersecting; }).observe(hero);
+      const ptr = { x: 0, y: 0, tx: 0, ty: 0 };
+      addEventListener('pointermove', (e) => {
+        ptr.tx = (e.clientX / innerWidth) * 2 - 1;
+        ptr.ty = (e.clientY / innerHeight) * 2 - 1;
+      }, { passive: true });
+      gsap.ticker.add((time) => {
+        if (!active) return;
+        ptr.x += (ptr.tx - ptr.x) * 0.05;
+        ptr.y += (ptr.ty - ptr.y) * 0.05;
+        world.render(state.p, time, ptr.x, ptr.y);
+      });
+    }
+
+    async function main() {
       gsap.registerPlugin(ScrollTrigger);
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const wide = matchMedia('(min-width: 821px)').matches;
 
-      // ---- 1. Entrance doors ----
-      let intro = null;
       const finishIntro = () => {
         root.classList.add('ready');
         root.style.overflow = '';
         doors.style.display = 'none';
         ScrollTrigger.refresh();
       };
+
+      // 1. The library, on large screens only. Any failure falls back to the static image.
+      let world = null;
+      if (!reduce && wide) {
+        root.classList.add('gl');
+        try {
+          const THREE = await withTimeout(import('three'), 8000);
+          world = buildWorld(THREE, document.getElementById('gl'));
+          world.render(0, 0, 0, 0);
+        } catch (err) {
+          console.warn('3D unavailable, using the static image.', err);
+          root.classList.remove('gl');
+          world = null;
+        }
+      }
+      if (world) setupScroll(world);
+
+      // 2. The doors. They hold ~1.9s from page load, then open over 2.9s.
       if (reduce) {
         finishIntro();
       } else {
         root.style.overflow = 'hidden';
-        intro = gsap.timeline({ onComplete: finishIntro });
+        const wait = Math.max(0, 1.9 - performance.now() / 1000);
+        const intro = gsap.timeline({ delay: wait, onComplete: finishIntro });
         intro
-          .from('.door-title', { opacity: 0, y: 12, duration: 1, ease: 'power2.out' }, 0)
-          .from('.seam', { scaleY: 0, duration: 0.9, ease: 'power3.out' }, 0.1)
-          .to('.seam', { opacity: 0, duration: 0.4 }, 1.9)
-          .add(() => root.classList.add('ready'), 2.3)
-          .to('.door-l', { rotationY: 100, duration: 2.9, ease: 'power3.inOut' }, 1.9)
-          .to('.door-r', { rotationY: -100, duration: 2.9, ease: 'power3.inOut' }, 1.9)
-          .from('.hero > .wrap', { scale: 1.08, duration: 2.9, ease: 'power3.out' }, 1.9);
-        const skip = () => intro && intro.progress(1);
+          .to('.seam', { opacity: 0, duration: 0.4 }, 0)
+          .add(() => root.classList.add('ready'), 0.4)
+          .to('.door-l', { rotationY: 100, duration: 2.9, ease: 'power3.inOut' }, 0)
+          .to('.door-r', { rotationY: -100, duration: 2.9, ease: 'power3.inOut' }, 0);
+        if (world) intro.to('.plate3d', { opacity: 1, duration: 1.4, ease: 'power2.out' }, 0.5);
+        const skip = () => intro.progress(1);
         doors.addEventListener('click', skip);
         addEventListener('keydown', skip, { once: true });
         addEventListener('wheel', skip, { once: true, passive: true });
       }
 
-      if (reduce) return;
-
-      // ---- 2. Scroll: zoom into the corridor, dissolve into the next section ----
-      const mm = gsap.matchMedia();
-      mm.add('(min-width: 821px)', () => {
-        const hero = document.querySelector('.hero');
-        const plate = hero.querySelector('.plate');
-        const img = plate.querySelector('img');
-        const copy = hero.querySelector('.copy');
-        const paper = hero.querySelector('.paper');
-        const hint = hero.querySelector('.hint');
-
-        // The corridor's vanishing point, in the source image's pixels (data-* on the img),
-        // and how far in the camera goes. object-position comes from the CSS.
-        const SRC = { w: +img.dataset.w, h: +img.dataset.h };
-        const FOCAL = { x: +img.dataset.fx, y: +img.dataset.fy };
-        const ZOOM = +img.dataset.zoom || 4;
-        const POS_X = parseFloat(getComputedStyle(img).objectPosition) / 100;
-        let f = { ox: 0, oy: 0, sx: 0, sy: 0 };
-        let tl = null;
-        const measure = () => {
-          const keep = tl ? tl.progress() : 0;
-          if (tl) tl.progress(0);
-          const p = plate.getBoundingClientRect();
-          const i = img.getBoundingClientRect();
-          const s = Math.max(i.width / SRC.w, i.height / SRC.h);
-          const offX = (SRC.w * s - i.width) * POS_X;
-          const offY = (SRC.h * s - i.height) * 0.5;
-          f.ox = i.left - p.left + FOCAL.x * s - offX;
-          f.oy = i.top - p.top + FOCAL.y * s - offY;
-          f.sx = p.left + f.ox;
-          f.sy = p.top + f.oy;
-          if (tl) tl.progress(keep);
-        };
-        measure();
-
-        tl = gsap.timeline({
-          defaults: { ease: 'none' },
-          scrollTrigger: {
-            trigger: hero, start: 'top top', end: '+=160%',
-            pin: true, scrub: 0.5, invalidateOnRefresh: true, onRefreshInit: measure,
-          },
+      // 3. Sections rise into view.
+      if (!reduce) {
+        const items = gsap.utils.toArray('section.block .wrap > *, footer .wrap > *');
+        gsap.set(items, { opacity: 0, y: 28 });
+        ScrollTrigger.batch(items, {
+          start: 'top 88%', once: true,
+          onEnter: (els) => gsap.to(els, { opacity: 1, y: 0, duration: 0.9, ease: 'power3.out', stagger: 0.12, overwrite: true }),
         });
-        tl.to(copy, { opacity: 0, x: -80, duration: 0.3 }, 0)
-          .to(hint, { opacity: 0, duration: 0.1 }, 0)
-          .fromTo(plate,
-            { scale: 1, x: 0, y: 0, transformOrigin: () => `${f.ox}px ${f.oy}px` },
-            { scale: ZOOM, x: () => innerWidth / 2 - f.sx, y: () => innerHeight / 2 - f.sy, ease: 'power2.in', duration: 1 }, 0)
-          .to(paper, { opacity: 1, duration: 0.4, ease: 'power1.in' }, 0.6);
-      });
+      }
+    }
 
-      // ---- 3. Sections rise into view ----
-      const items = gsap.utils.toArray('section.block .wrap > *, footer .wrap > *');
-      gsap.set(items, { opacity: 0, y: 28 });
-      ScrollTrigger.batch(items, {
-        start: 'top 88%', once: true,
-        onEnter: (els) => gsap.to(els, { opacity: 1, y: 0, duration: 0.9, ease: 'power3.out', stagger: 0.12, overwrite: true }),
-      });
-    })();
+    // Everything above is declared by now, so it is safe to start.
+    if (!window.gsap || !window.ScrollTrigger) {
+      root.classList.remove('js');
+    } else {
+      main();
+    }
   </script>
 </body>
 </html>
