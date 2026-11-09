@@ -200,7 +200,7 @@
         </div>
         <figure class="rise" style="--i:2">
           <div class="plate">
-            <img src="banner.webp" width="2000" height="667" alt="Un hombre con sombrero mira una galería de estanterías infinitas, enmarcado por hexágonos.">
+            <img src="banner.webp" width="2000" height="667" data-w="2000" data-h="667" data-fx="975" data-fy="335" data-zoom="4.2" alt="Un hombre con sombrero mira una galería de estanterías infinitas, enmarcado por hexágonos.">
           </div>
         </figure>
       </div>
@@ -339,8 +339,12 @@
         const paper = hero.querySelector('.paper');
         const hint = hero.querySelector('.hint');
 
-        // The corridor's vanishing point, in the source image's pixels.
-        const SRC = { w: 2000, h: 667 }, FOCAL = { x: 975, y: 335 }, POS_X = 0.46;
+        // The corridor's vanishing point, in the source image's pixels (data-* on the img),
+        // and how far in the camera goes. object-position comes from the CSS.
+        const SRC = { w: +img.dataset.w, h: +img.dataset.h };
+        const FOCAL = { x: +img.dataset.fx, y: +img.dataset.fy };
+        const ZOOM = +img.dataset.zoom || 4;
+        const POS_X = parseFloat(getComputedStyle(img).objectPosition) / 100;
         let f = { ox: 0, oy: 0, sx: 0, sy: 0 };
         let tl = null;
         const measure = () => {
@@ -362,16 +366,16 @@
         tl = gsap.timeline({
           defaults: { ease: 'none' },
           scrollTrigger: {
-            trigger: hero, start: 'top top', end: '+=240%',
-            pin: true, scrub: 0.8, invalidateOnRefresh: true, onRefreshInit: measure,
+            trigger: hero, start: 'top top', end: '+=160%',
+            pin: true, scrub: 0.5, invalidateOnRefresh: true, onRefreshInit: measure,
           },
         });
         tl.to(copy, { opacity: 0, x: -80, duration: 0.3 }, 0)
           .to(hint, { opacity: 0, duration: 0.1 }, 0)
           .fromTo(plate,
             { scale: 1, x: 0, y: 0, transformOrigin: () => `${f.ox}px ${f.oy}px` },
-            { scale: 7, x: () => innerWidth / 2 - f.sx, y: () => innerHeight / 2 - f.sy, ease: 'power2.in', duration: 1 }, 0)
-          .to(paper, { opacity: 1, duration: 0.3, ease: 'power1.in' }, 0.7);
+            { scale: ZOOM, x: () => innerWidth / 2 - f.sx, y: () => innerHeight / 2 - f.sy, ease: 'power2.in', duration: 1 }, 0)
+          .to(paper, { opacity: 1, duration: 0.4, ease: 'power1.in' }, 0.6);
       });
 
       // ---- 3. Sections rise into view ----
