@@ -118,13 +118,21 @@
     .door { position: absolute; top: 0; bottom: 0; width: 50%; overflow: hidden; background: #0b1423; backface-visibility: hidden; will-change: transform; }
     .door-l { left: 0; transform-origin: 0 50%; }
     .door-r { right: 0; transform-origin: 100% 50%; }
-    .door::before { content: ""; position: absolute; inset: 7vh 4vw; border: 1px solid rgb(236 230 216 / 16%); }
-    .door::after { content: ""; position: absolute; inset: 13vh 8vw; border: 1px solid rgb(236 230 216 / 9%); }
+    /* The artwork is 2:3 and fits the screen height; each door carries its own half,
+       against a dark wall that matches the artwork's edges. */
+    .door { background: #08090d; }
+    .door::before {
+      content: ""; position: absolute; top: 0; bottom: 0; width: 33.334vh;
+      background: url("doors.webp") no-repeat; background-size: auto 100%;
+    }
+    .door-l::before { right: 0; background-position: left top; }
+    .door-r::before { left: 0; background-position: right top; }
     .door-title {
       position: absolute; top: 0; bottom: 0; width: 100vw;
       display: flex; align-items: center; justify-content: center;
       font: 400 clamp(3rem, 9vw, 7.5rem)/1 var(--font-display);
       letter-spacing: -0.02em; color: #ece6d8; z-index: 1;
+      text-shadow: 0 2px 24px rgb(0 0 0 / 70%);
     }
     .door-l .door-title { left: 0; }
     .door-r .door-title { right: 0; }
