@@ -113,6 +113,8 @@
     .paper { position: absolute; inset: 0; background: var(--bg); opacity: 0; pointer-events: none; z-index: 3; }
 
     /* ---- Entrance doors: only exist while JS is running the intro ---- */
+    /* No scrollbar while the doors are up: its disappearing would resize them. */
+    .js:not(.ready) { overflow: hidden; }
     .doors { display: none; }
     .js .doors { display: block; position: fixed; inset: 0; z-index: 100; perspective: 1900px; overflow: hidden; }
     .door { position: absolute; top: 0; bottom: 0; width: 50%; overflow: hidden; background: #0b1423; backface-visibility: hidden; will-change: transform; }
@@ -121,13 +123,13 @@
     /* The artwork is 16:9 and covers the screen; each door shows its own half of it. */
     .door { background: #08090d; }
     .door::before {
-      content: ""; position: absolute; top: 0; bottom: 0; width: 100vw;
+      content: ""; position: absolute; top: 0; bottom: 0; width: 200%;
       background: url("doors.webp") center / cover no-repeat;
     }
     .door-l::before { left: 0; }
     .door-r::before { right: 0; }
     .door-title {
-      position: absolute; top: 0; bottom: 0; width: 100vw;
+      position: absolute; top: 0; bottom: 0; width: 200%;
       display: flex; align-items: center; justify-content: center;
       font: 400 clamp(3rem, 9vw, 7.5rem)/1 var(--font-display);
       letter-spacing: -0.02em; color: #ece6d8; z-index: 1;
