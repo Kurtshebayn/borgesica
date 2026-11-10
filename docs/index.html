@@ -115,6 +115,9 @@
     /* ---- Entrance doors: only exist while JS is running the intro ---- */
     /* No scrollbar while the doors are up: its disappearing would resize them. */
     .js:not(.ready) { overflow: hidden; }
+    /* Reserve the scrollbar's space from the start so nothing shifts when the doors leave. */
+    html.js { scrollbar-gutter: stable; }
+    html.js:not(.done) { background: #08090d; }
     .doors { display: none; }
     .js .doors { display: block; position: fixed; inset: 0; z-index: 100; perspective: 1900px; overflow: hidden; }
     .door { position: absolute; top: 0; bottom: 0; width: 50%; overflow: hidden; background: #0b1423; backface-visibility: hidden; will-change: transform; }
@@ -561,10 +564,10 @@
       const wide = matchMedia('(min-width: 821px)').matches;
 
       const finishIntro = () => {
-        root.classList.add('ready');
+        root.classList.add('ready', 'done');
         root.style.overflow = '';
         doors.style.display = 'none';
-        ScrollTrigger.refresh();
+        requestAnimationFrame(() => ScrollTrigger.refresh());
       };
 
       // 1. The library, on large screens only. Any failure falls back to the static image.
@@ -593,7 +596,7 @@
         const intro = gsap.timeline({
           delay: wait,
           onComplete: () => {
-            if (world) { world.lite = false; world.setQuality(false); }
+            if (world) { world.lite = false; world.setQuality(false); world.render(0, 0, 0, 0); }
             finishIntro();
           },
         });
@@ -601,7 +604,11 @@
           .to('.seam', { opacity: 0, duration: 0.4 }, 0)
           .add(() => root.classList.add('ready'), 0.4)
           .to('.door-l', { rotationY: 100, duration: 2.9, ease: 'power3.inOut' }, 0)
-          .to('.door-r', { rotationY: -100, duration: 2.9, ease: 'power3.inOut' }, 0);
+          .to('.door-r', { rotationY: -100, duration: 2.9, ease: 'power3.inOut' }, 0)
+          // In the last stretch the leaves slide off to the sides, so they leave the
+          // screen instead of vanishing while still visible.
+          .to('.door-l', { xPercent: -100, duration: 1.5, ease: 'power2.in' }, 1.4)
+          .to('.door-r', { xPercent: 100, duration: 1.5, ease: 'power2.in' }, 1.4);
         if (world) intro.to('.plate3d', { opacity: 1, duration: 1.4, ease: 'power2.out' }, 0.5);
         const skip = () => intro.progress(1);
         doors.addEventListener('click', skip);
