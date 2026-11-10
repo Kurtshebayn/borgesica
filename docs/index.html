@@ -456,6 +456,13 @@
         color: 0xfff3dc, size: 0.07, sizeAttenuation: true, transparent: true, opacity: 0.55, depthWrite: false,
       })));
 
+      // Lower resolution while the doors animate, so the GPU is free for them.
+      const fullRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+      function setQuality(low) {
+        renderer.setPixelRatio(low ? 0.6 : fullRatio);
+        resize();
+      }
+
       function resize() {
         const w = canvas.clientWidth, h = canvas.clientHeight;
         if (!w || !h) return;
@@ -475,7 +482,7 @@
         lamp.position.set(camera.position.x, camera.position.y + 0.5, camera.position.z - 1.5);
         renderer.render(scene, camera);
       }
-      return { render };
+      return { render, setQuality };
     }
 
     /* ------------------------------------------------------------------
@@ -528,8 +535,11 @@
         ptr.tx = (e.clientX / innerWidth) * 2 - 1;
         ptr.ty = (e.clientY / innerHeight) * 2 - 1;
       }, { passive: true });
+      let frame = 0;
       gsap.ticker.add((time) => {
         if (!active) return;
+        // While the doors open the view barely changes: draw it at ~20 fps.
+        if (world.lite && (frame++ % 3)) return;
         ptr.x += (ptr.tx - ptr.x) * 0.05;
         ptr.y += (ptr.ty - ptr.y) * 0.05;
         world.render(state.p, time, ptr.x, ptr.y);
@@ -570,7 +580,14 @@
       } else {
         root.style.overflow = 'hidden';
         const wait = Math.max(0, 1.9 - performance.now() / 1000);
-        const intro = gsap.timeline({ delay: wait, onComplete: finishIntro });
+        if (world) { world.lite = true; world.setQuality(true); }
+        const intro = gsap.timeline({
+          delay: wait,
+          onComplete: () => {
+            if (world) { world.lite = false; world.setQuality(false); }
+            finishIntro();
+          },
+        });
         intro
           .to('.seam', { opacity: 0, duration: 0.4 }, 0)
           .add(() => root.classList.add('ready'), 0.4)
