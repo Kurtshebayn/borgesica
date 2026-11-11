@@ -346,27 +346,31 @@
        own paper colour, so the far end of the aisle glows like the engraving.
        ------------------------------------------------------------------ */
     function buildWorld(THREE, canvas) {
-      const PAPER = new THREE.Color('#f1f2ee');
+      // Dark, warm and misty: near shelves sink into shadow, the far end glows.
+      const HAZE = new THREE.Color('#d9cdb7');
       const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
       const scene = new THREE.Scene();
-      scene.background = PAPER;
-      scene.fog = new THREE.Fog(PAPER, 6, 92);
+      scene.background = HAZE;
+      scene.fog = new THREE.Fog(HAZE, 4, 78);
       const camera = new THREE.PerspectiveCamera(56, 1, 0.1, 100);
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x39404d, 1.7));
-      const lamp = new THREE.PointLight(0xffe9c8, 55, 0, 2);
+      scene.add(new THREE.HemisphereLight(0xcdbfa6, 0x0b0d12, 0.62));
+      const lamp = new THREE.PointLight(0xffd29a, 95, 0, 2);
       scene.add(lamp);
 
       const rand = mulberry32(11);
       const AISLE = 3, TIER_H = 1.1, TIERS = 30, SEG = 16, SEGS = 13, TRAVEL = 112;
       const HEIGHT = TIERS * TIER_H;
-      const palette = ['#16233a', '#1f3150', '#2c3e5c', '#3a2f2a', '#54402f', '#6b5a47', '#8a7a64', '#b3a58c', '#d8cdb8', '#0f1b2d', '#243447']
+      const palette = ['#1c212b', '#252d3b', '#313e50', '#3d2f27', '#52402f', '#665544', '#85755f', '#a39379', '#c4b79e', '#13171e', '#2a3340']
         .map((c) => new THREE.Color(c));
-      const RED = new THREE.Color('#d9381e');
+      const RED = new THREE.Color('#b3281a');
       const unit = new THREE.BoxGeometry(1, 1, 1);
       const bookMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-      const woodMat = new THREE.MeshLambertMaterial({ color: 0x1b2230 });
-      const floorMat = new THREE.MeshLambertMaterial({ color: 0x242b38 });
+      const woodMat = new THREE.MeshLambertMaterial({ color: 0x1a1d25 });
+      const floorMat = new THREE.MeshLambertMaterial({ color: 0x15181f });
+      // Warm paper lanterns hanging from the bridges: unlit, so they glow and fade in the haze.
+      const lampMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0 });
+      const lampGeo = new THREE.SphereGeometry(0.22, 10, 8);
       const m = new THREE.Object3D();
       const col = new THREE.Color();
 
@@ -446,6 +450,11 @@
           rail.position.set(0, by + 0.95, bz + 0.5);
           rail.scale.set(AISLE * 2 + 0.3, 0.1, 0.08);
           group.add(rail);
+          for (const lx of [-1.6, 1.6]) {
+            const lantern = new THREE.Mesh(lampGeo, lampMat);
+            lantern.position.set(lx, by - 0.7, bz);
+            group.add(lantern);
+          }
         }
         scene.add(group);
       }
@@ -456,10 +465,10 @@
       scene.add(floor);
 
       // Drifting dust gives the air some depth.
-      const dustN = 900, dustPos = new Float32Array(dustN * 3);
+      const dustN = 1500, dustPos = new Float32Array(dustN * 3);
       for (let i = 0; i < dustN; i++) {
         dustPos[i * 3] = (rand() - 0.5) * (AISLE * 2 - 0.6);
-        dustPos[i * 3 + 1] = 0.2 + rand() * 16;
+        dustPos[i * 3 + 1] = 0.2 + rand() * 22;
         dustPos[i * 3 + 2] = -rand() * SEG * SEGS;
       }
       const dustGeo = new THREE.BufferGeometry();
