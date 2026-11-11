@@ -516,10 +516,16 @@
       const measure = () => {
         const keep = tl ? tl.progress() : 0;
         if (tl) tl.progress(0);
-        const h = hero.getBoundingClientRect(), r = slot.getBoundingClientRect();
-        geo.s = r.width / plate.offsetWidth;
-        geo.x = r.left - h.left + r.width / 2 - h.width / 2;
-        geo.y = r.top - h.top + r.height / 2 - h.height / 2;
+        // Layout offsets ignore transforms, so the slot's entrance animation
+        // (a small rise) cannot skew where the window sits.
+        let left = 0, top = 0;
+        for (let el = slot; el && el !== hero; el = el.offsetParent) {
+          left += el.offsetLeft; top += el.offsetTop;
+        }
+        const w = slot.offsetWidth, hgt = slot.offsetHeight;
+        geo.s = w / plate.offsetWidth;
+        geo.x = left + w / 2 - hero.clientWidth / 2;
+        geo.y = top + hgt / 2 - hero.clientHeight / 2;
         if (tl) tl.progress(keep);
       };
       measure();
