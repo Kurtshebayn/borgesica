@@ -3,152 +3,654 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>document.documentElement.classList.add('js');</script>
   <title>borgésica — Traducción de libros y subtítulos al español</title>
   <meta name="description" content="Aplicación gratuita y de código abierto que traduce EPUB, PDF y SRT del inglés a un español neutro, coherente de la primera página a la última.">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Spectral:ital,wght@0,400;0,500;1,400&display=swap">
   <style>
+    /* Same identity as the desktop app: cold paper, blue-black ink, one
+       vermilion accent, square corners, 1px rules, hard offset shadow. */
     :root {
-      --bg: #0d1117;
-      --panel: #151b24;
-      --line: #2a3340;
-      --ink: #ece6d8;
-      --muted: #9aa3b0;
-      --red: #c0392b;
-      --red-hover: #d64a3b;
+      --bg: #f1f2ee;
+      --surface: #fafaf7;
+      --ink: #0f1b2d;
+      --muted: #5b6678;
+      --rule: rgb(15 27 45 / 16%);
+      --rule-strong: rgb(15 27 45 / 40%);
+      --accent: #d9381e;
+      --accent-dark: #b52d16;
+      --shadow: 8px 8px 0 rgb(15 27 45 / 10%);
+
+      --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      --font-display: "Spectral", Georgia, "Times New Roman", serif;
+      --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+      color-scheme: light;
     }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
+    *, *::before, *::after { box-sizing: border-box; }
     body {
       margin: 0;
       background: var(--bg);
       color: var(--ink);
-      font: 17px/1.65 Georgia, "Times New Roman", serif;
+      font: 17px/1.6 var(--font-ui);
+      -webkit-font-smoothing: antialiased;
     }
-    a { color: var(--ink); }
-    .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+    a { color: inherit; text-underline-offset: 3px; }
+    a:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    code { font: 0.92em var(--font-mono); background: rgb(15 27 45 / 7%); padding: 1px 6px; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 0 clamp(20px, 4vw, 48px); }
+    .skip { position: absolute; left: -999px; top: 8px; background: var(--ink); color: #fff; padding: 8px 14px; z-index: 5; }
+    .skip:focus { left: 8px; }
+    .label { font: 500 0.75rem/1.4 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 
-    .hero {
-      min-height: 62vh;
-      display: flex;
-      align-items: flex-end;
-      background:
-        linear-gradient(to top, var(--bg) 4%, rgba(13, 17, 23, 0.55) 55%, rgba(13, 17, 23, 0.2)),
-        url("banner.webp") center / cover no-repeat;
-    }
-    .hero .wrap { padding-bottom: 48px; }
+    /* ---- Top bar ---- */
+    .bar { position: absolute; top: 0; left: 0; right: 0; z-index: 4; border-bottom: 1px solid var(--rule); }
+    .bar .wrap { display: flex; align-items: center; justify-content: space-between; height: 72px; }
+    .brand { font: 500 1.5rem/1 var(--font-display); text-decoration: none; letter-spacing: -0.01em; }
+    .bar nav { display: flex; gap: 28px; font-size: 0.92rem; }
+    .bar nav a { text-decoration: none; color: var(--muted); }
+    .bar nav a:hover { color: var(--ink); text-decoration: underline; }
+
+    /* ---- Hero ---- */
+    .hero { position: relative; min-height: 100dvh; display: grid; align-items: center; padding: 96px 0 72px; overflow: hidden; }
+    .hero .wrap { width: 100%; display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: clamp(32px, 6vw, 88px); align-items: center; }
     h1 {
-      margin: 0 0 12px;
-      font-size: clamp(2.6rem, 8vw, 4.2rem);
-      font-weight: 400;
+      margin: 18px 0 20px;
+      font: 400 clamp(2.4rem, 5vw, 3.7rem)/1.06 var(--font-display);
       letter-spacing: -0.02em;
-      line-height: 1.05;
     }
-    .tagline { margin: 0 0 28px; font-size: 1.2rem; color: var(--muted); max-width: 34em; }
-
+    h1 em { font-style: italic; color: var(--accent); }
+    .lede { margin: 0 0 32px; max-width: 34em; font-size: 1.12rem; color: var(--muted); }
+    .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; }
     .btn {
       display: inline-block;
-      padding: 14px 28px;
-      background: var(--red);
+      padding: 15px 26px;
+      background: var(--accent);
       color: #fff;
+      font: 600 1rem/1 var(--font-ui);
       text-decoration: none;
-      font: 600 1rem/1 system-ui, -apple-system, "Segoe UI", sans-serif;
-      border-radius: 4px;
-      transition: background 0.15s;
+      border: 1px solid var(--accent-dark);
+      box-shadow: 5px 5px 0 var(--ink);
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s;
     }
-    .btn:hover { background: var(--red-hover); }
-    .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
-    .meta { margin-top: 14px; font: 0.88rem/1.4 system-ui, sans-serif; color: var(--muted); }
+    .btn:hover { background: var(--accent-dark); transform: translate(-1px, -1px); box-shadow: 6px 6px 0 var(--ink); }
+    .btn:active { transform: translate(4px, 4px); box-shadow: 1px 1px 0 var(--ink); }
+    .link-quiet { font-size: 0.95rem; }
+    .facts { margin-top: 28px; }
 
-    section { padding: 56px 0 8px; }
-    h2 { margin: 0 0 16px; font-size: 1.7rem; font-weight: 400; }
-    p { margin: 0 0 16px; }
-    ul { padding-left: 1.2em; margin: 0 0 16px; }
-    li { margin-bottom: 8px; }
-    li::marker { color: var(--red); }
+    figure { margin: 0; }
+    .frame {
+      border: 1px solid var(--ink);
+      background: var(--surface);
+      padding: 10px;
+      box-shadow: var(--shadow);
+    }
+    .frame img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; object-position: 46% 50%; }
+
+    /* The live 3D window. It is a viewport-sized box scaled down into the
+       right-hand slot (so the WebGL canvas stays sharp) and grown back up as
+       you scroll. The mat, border and shadow are in design px at full size, so
+       they read as the thin frame above once scaled; the 1.1 end scale pushes
+       them off-screen. The static .fallback figure keeps the slot's place. */
+    .plate3d {
+      display: none; position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+      padding: 32px; border: 3px solid var(--ink); background: var(--surface);
+      box-shadow: 24px 24px 0 rgb(15 27 45 / 10%);
+      z-index: 1; opacity: 0; will-change: transform; pointer-events: none;
+    }
+    .gl .plate3d { display: block; }
+    .plate3d canvas { display: block; width: 100%; height: 100%; }
+    .gl .fallback { visibility: hidden; }
+
+    /* Scroll cue and the paper-coloured veil the zoom dissolves into. */
+    .hint { display: none; position: absolute; left: 0; right: 0; bottom: 14px; flex-direction: column; align-items: center; gap: 10px; z-index: 2; }
+    .js .hint { display: flex; }
+    .hint::after { content: ""; width: 1px; height: 34px; background: var(--ink); transform-origin: top; animation: cue 1.8s ease-in-out infinite; }
+    @keyframes cue { 0% { transform: scaleY(0); opacity: 1; } 55% { transform: scaleY(1); opacity: 1; } 100% { transform: scaleY(1); opacity: 0; } }
+    .paper { position: absolute; inset: 0; background: var(--bg); opacity: 0; pointer-events: none; z-index: 3; }
+
+    /* ---- Entrance doors: only exist while JS is running the intro ---- */
+    /* No scrollbar while the doors are up: its disappearing would resize them. */
+    .js:not(.ready) { overflow: hidden; }
+    /* Reserve the scrollbar's space from the start so nothing shifts when the doors leave. */
+    html.js { scrollbar-gutter: stable; }
+    html.js:not(.done) { background: #08090d; }
+    .doors { display: none; }
+    .js .doors { display: block; position: fixed; inset: 0; z-index: 100; perspective: 1900px; overflow: hidden; }
+    .door { position: absolute; top: 0; bottom: 0; width: 50%; overflow: hidden; background: #0b1423; backface-visibility: hidden; will-change: transform; }
+    .door-l { left: 0; transform-origin: 0 50%; }
+    .door-r { right: 0; transform-origin: 100% 50%; }
+    /* The artwork is 16:9 and covers the screen; each door shows its own half of it. */
+    .door { background: #08090d; }
+    .door::before {
+      content: ""; position: absolute; top: 0; bottom: 0; width: 200%;
+      background: url("doors.webp") center / cover no-repeat;
+    }
+    .door-l::before { left: 0; }
+    .door-r::before { right: 0; }
+    .door-title {
+      position: absolute; top: 0; bottom: 0; width: 200%;
+      display: flex; align-items: center; justify-content: center;
+      font: 400 clamp(3rem, 9vw, 7.5rem)/1 var(--font-display);
+      letter-spacing: -0.02em; color: #ece6d8; z-index: 1;
+      text-shadow: 0 2px 24px rgb(0 0 0 / 70%);
+    }
+    .door-l .door-title { left: 0; }
+    .door-r .door-title { right: 0; }
+    .seam { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--accent); transform-origin: 50% 0; z-index: 2; }
+    /* The doors wait on the 3D scene to build, so their first beat is plain CSS. */
+    .js .door-title { animation: title-in 1s 0.1s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .js .seam { animation: seam-in 0.9s 0.1s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    @keyframes title-in { from { opacity: 0; transform: translateY(12px); } }
+    @keyframes seam-in { from { transform: scaleY(0); } }
+
+    /* ---- Sections ---- */
+    section.block { border-top: 1px solid var(--rule-strong); padding: clamp(40px, 6vw, 72px) 0; }
+    section.block .wrap { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.6fr); gap: clamp(24px, 6vw, 88px); }
+    h2 { margin: 12px 0 0; font: 400 clamp(1.7rem, 3vw, 2.2rem)/1.15 var(--font-display); letter-spacing: -0.01em; }
+    .intro { margin: 0 0 8px; color: var(--muted); max-width: 40em; }
+
+    ol.rows, ul.rows { list-style: none; margin: 0; padding: 0; }
+    .rows li { display: grid; grid-template-columns: 56px 1fr; gap: 8px; padding: 20px 0; border-top: 1px solid var(--rule); }
+    .rows li:last-child { border-bottom: 1px solid var(--rule); }
+    .rows .n { font: 500 0.8rem/1.9 var(--font-mono); color: var(--accent); }
+    .rows h3 { margin: 0 0 4px; font: 600 1.05rem/1.4 var(--font-ui); }
+    .rows p { margin: 0; color: var(--muted); }
 
     .note {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-left: 3px solid var(--red);
-      border-radius: 4px;
-      padding: 18px 22px;
-      margin: 24px 0;
-      font-size: 0.97rem;
+      margin: 28px 0 0;
+      padding: 20px 24px;
+      background: var(--surface);
+      border: 1px solid var(--rule-strong);
+      border-left: 3px solid var(--accent);
     }
-    .note strong { display: block; margin-bottom: 6px; }
-    .note p:last-child { margin-bottom: 0; }
+    .note strong { display: block; margin-bottom: 4px; }
+    .note p { margin: 0; color: var(--muted); font-size: 0.97rem; }
 
-    footer {
-      margin-top: 56px;
-      padding: 28px 0 48px;
-      border-top: 1px solid var(--line);
-      color: var(--muted);
-      font: 0.9rem/1.5 system-ui, sans-serif;
+    .limits { columns: 2; column-gap: 40px; margin: 0; padding: 0; list-style: none; }
+    .limits li { break-inside: avoid; padding: 0 0 14px 22px; position: relative; color: var(--muted); }
+    .limits li::before { content: ""; position: absolute; left: 0; top: 0.7em; width: 10px; height: 1px; background: var(--accent); }
+
+    footer { border-top: 1px solid var(--rule-strong); padding: 28px 0 56px; color: var(--muted); font-size: 0.9rem; }
+    footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; }
+
+    /* ---- Load-in: opacity and transform only ---- */
+    @media (prefers-reduced-motion: no-preference) {
+      .rise { opacity: 0; transform: translateY(14px); animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards; animation-delay: calc(var(--i, 0) * 90ms); }
+      @keyframes rise { to { opacity: 1; transform: none; } }
+      /* With JS the page waits behind the doors; the script adds .ready as they open. */
+      .js .rise { animation-play-state: paused; }
+      .js.ready .rise { animation-play-state: running; }
     }
-    footer a { color: var(--muted); }
+
+    /* ---- Mobile: everything collapses to one column ---- */
+    @media (max-width: 820px) {
+      .hero .wrap, section.block .wrap { grid-template-columns: 1fr; }
+      .hint { display: none !important; }
+      .hero { min-height: 0; padding: 112px 0 56px; }
+      .limits { columns: 1; }
+      .bar nav { gap: 18px; }
+    }
   </style>
 </head>
 <body>
-  <header class="hero">
+  <div class="doors" id="doors" aria-hidden="true">
+    <div class="door door-l"><div class="door-title">borgésica</div></div>
+    <div class="door door-r"><div class="door-title">borgésica</div></div>
+    <span class="seam"></span>
+  </div>
+
+  <a class="skip" href="#contenido">Saltar al contenido</a>
+
+  <header class="bar">
     <div class="wrap">
-      <h1>borgésica</h1>
-      <p class="tagline">Traducción de libros y subtítulos al español, coherente de la primera página a la última.</p>
-      <a class="btn" href="https://github.com/Kurtshebayn/borgesica/releases/latest/download/Borgesica-Setup.exe">Descargar para Windows</a>
-      <div class="meta">Gratis y de código abierto · Windows 10/11 · <a href="https://github.com/Kurtshebayn/borgesica/releases/latest">Todas las versiones</a></div>
+      <a class="brand" href="#">borgésica</a>
+      <nav aria-label="Principal">
+        <a href="#instalacion">Instalación</a>
+        <a href="https://github.com/Kurtshebayn/borgesica">Código</a>
+      </nav>
     </div>
   </header>
 
-  <main class="wrap">
-    <section>
-      <h2>Qué hace</h2>
-      <p>Convierte libros (EPUB, PDF) y subtítulos (SRT) del inglés a un español neutro, entendible en cualquier región de habla hispana. Tú eliges el modelo de lenguaje: desde una API de frontera hasta un modelo local, gratis y sin conexión.</p>
-      <ul>
-        <li><strong>Glosario revisable.</strong> Los nombres y términos recurrentes se traducen siempre igual. Lo revisas y lo bloqueas antes de traducir.</li>
-        <li><strong>Narrador por capítulo.</strong> Quién dice «yo» queda fijado por ti, no inventado fragmento a fragmento.</li>
-        <li><strong>Costo conocido de antemano.</strong> Estimación previa y tope de presupuesto.</li>
-        <li><strong>Reanudable.</strong> Si se corta a mitad de libro, retoma sin volver a traducir ni a pagar lo ya hecho.</li>
-        <li><strong>Formato intacto.</strong> Entra un EPUB y sale un EPUB válido, con capítulos e imágenes.</li>
-      </ul>
+  <main id="contenido">
+    <section class="hero">
+      <div class="wrap">
+        <div class="copy">
+          <p class="label rise" style="--i:0">Inglés → español neutro · EPUB, SRT</p>
+          <h1 class="rise" style="--i:1">Lee <em>en español</em> lo que solo existe en inglés.</h1>
+          <p class="lede rise" style="--i:2">Traducción de libros y subtítulos al español, coherente de la primera página a la última: los nombres no cambian entre capítulos y el registro no deriva.</p>
+          <div class="actions rise" style="--i:3">
+            <a class="btn" href="https://github.com/Kurtshebayn/borgesica/releases/latest/download/Borgesica-Setup.exe">Descargar para Windows</a>
+            <a class="link-quiet" href="https://github.com/Kurtshebayn/borgesica/releases/latest">Todas las versiones</a>
+          </div>
+          <p class="label facts rise" style="--i:4">Gratis · Código abierto (MIT) · Windows 10/11</p>
+        </div>
+        <figure class="fallback rise" style="--i:2">
+          <div class="frame">
+            <img src="banner.webp" width="2000" height="667" alt="Un hombre con sombrero mira una galería de estanterías infinitas, enmarcado por hexágonos.">
+          </div>
+        </figure>
+      </div>
+      <div class="plate3d" aria-hidden="true"><canvas id="gl"></canvas></div>
+      <div class="hint" aria-hidden="true"><span class="label rise" style="--i:6">Desplaza para entrar</span></div>
+      <div class="paper" aria-hidden="true"></div>
     </section>
 
-    <section>
-      <h2>Cómo se usa</h2>
-      <ol>
-        <li>Elige proveedor (Anthropic, DeepSeek, OpenAI, OpenRouter, Gemini u Ollama local) e introduce tu clave. Se pide en cada sesión y nunca se guarda en disco.</li>
-        <li>Elige el archivo y mira la estimación de costo.</li>
-        <li>Revisa y bloquea el glosario.</li>
-        <li>Traduce. El resultado se guarda junto al archivo original.</li>
-      </ol>
-      <div class="note">
-        <strong>Necesitas tu propia clave de API</strong>
-        <p>borgésica no incluye ningún servicio de traducción: pagas directamente al proveedor que elijas. Con Ollama puedes traducir en tu propio equipo sin clave y sin coste.</p>
+    <section class="block" aria-labelledby="h-que">
+      <div class="wrap">
+        <div>
+          <p class="label">Ficha 01</p>
+          <h2 id="h-que">Qué hace</h2>
+        </div>
+        <div>
+          <p class="intro">Tú eliges el modelo de lenguaje, desde una API de frontera hasta uno local, gratis y sin conexión. borgésica se ocupa de que el resultado sea consistente de punta a punta.</p>
+          <ul class="rows">
+            <li><span class="n">01</span><div><h3>Glosario revisable</h3><p>Nombres y términos recurrentes se traducen siempre igual. Lo revisas y lo bloqueas antes de traducir.</p></div></li>
+            <li><span class="n">02</span><div><h3>Narrador por capítulo</h3><p>Quién dice «yo» queda fijado por ti, no inventado fragmento a fragmento.</p></div></li>
+            <li><span class="n">03</span><div><h3>Costo conocido de antemano</h3><p>Estimación previa y tope de presupuesto, antes de gastar nada.</p></div></li>
+            <li><span class="n">04</span><div><h3>Reanudable</h3><p>Si se corta a mitad de libro, retoma sin volver a traducir ni a pagar lo ya hecho.</p></div></li>
+            <li><span class="n">05</span><div><h3>Formato intacto</h3><p>Entra un EPUB y sale un EPUB válido, con capítulos, formato e imágenes.</p></div></li>
+          </ul>
+        </div>
       </div>
     </section>
 
-    <section>
-      <h2>Instalación</h2>
-      <p>Descarga <code>Borgesica-Setup.exe</code> y ejecútalo. No requiere permisos de administrador.</p>
-      <div class="note">
-        <strong>Aviso de Windows SmartScreen</strong>
-        <p>El instalador aún no está firmado digitalmente, así que Windows puede mostrar «Windows protegió su PC». Pulsa <em>Más información</em> y luego <em>Ejecutar de todas formas</em>. El código completo está publicado y puedes revisarlo o compilarlo tú mismo.</p>
+    <section class="block" aria-labelledby="h-uso">
+      <div class="wrap">
+        <div>
+          <p class="label">Ficha 02</p>
+          <h2 id="h-uso">Cómo se usa</h2>
+        </div>
+        <div>
+          <ol class="rows">
+            <li><span class="n">01</span><div><h3>Archivo</h3><p>Elige el libro o los subtítulos y el modelo.</p></div></li>
+            <li><span class="n">02</span><div><h3>Estimación</h3><p>Ves el costo antes de traducir una sola palabra.</p></div></li>
+            <li><span class="n">03</span><div><h3>Glosario</h3><p>Revisas y bloqueas los términos que deben mantenerse.</p></div></li>
+            <li><span class="n">04</span><div><h3>Traducción</h3><p>Progreso en vivo. El resultado se guarda en tu carpeta <code>Borgesica</code>.</p></div></li>
+          </ol>
+          <div class="note">
+            <strong>Necesitas tu propia clave de API</strong>
+            <p>borgésica no incluye ningún servicio de traducción: pagas directamente al proveedor que elijas (Anthropic, DeepSeek, OpenAI, OpenRouter o Gemini). La clave se pide en cada sesión y nunca se guarda en disco. Con Ollama traduces en tu equipo, sin clave y sin coste.</p>
+          </div>
+        </div>
       </div>
     </section>
 
-    <section>
-      <h2>Límites actuales</h2>
-      <ul>
-        <li>Solo inglés → español neutro.</li>
-        <li>PDF: solo documentos digitales, sin OCR de escaneados.</li>
-        <li>No funciona con libros protegidos con DRM.</li>
-      </ul>
+    <section class="block" id="instalacion" aria-labelledby="h-inst">
+      <div class="wrap">
+        <div>
+          <p class="label">Ficha 03</p>
+          <h2 id="h-inst">Instalación</h2>
+        </div>
+        <div>
+          <p class="intro">Descarga <code>Borgesica-Setup.exe</code> y ejecútalo. No requiere permisos de administrador.</p>
+          <p><a class="btn" href="https://github.com/Kurtshebayn/borgesica/releases/latest/download/Borgesica-Setup.exe">Descargar para Windows</a></p>
+          <div class="note">
+            <strong>Aviso de Windows SmartScreen</strong>
+            <p>El instalador aún no está firmado digitalmente, así que Windows puede mostrar «Windows protegió su PC». Pulsa <em>Más información</em> y luego <em>Ejecutar de todas formas</em>. El código completo está publicado: puedes revisarlo o compilarlo tú mismo.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block" aria-labelledby="h-lim">
+      <div class="wrap">
+        <div>
+          <p class="label">Ficha 04</p>
+          <h2 id="h-lim">Límites actuales</h2>
+        </div>
+        <ul class="limits">
+          <li>Solo inglés → español neutro.</li>
+          <li>PDF: documentos digitales, sin OCR de escaneados.</li>
+          <li>No funciona con libros protegidos con DRM.</li>
+          <li>Por ahora, solo Windows.</li>
+        </ul>
+      </div>
     </section>
   </main>
 
   <footer>
     <div class="wrap">
-      Licencia MIT · <a href="https://github.com/Kurtshebayn/borgesica">Código fuente en GitHub</a> · <a href="https://github.com/Kurtshebayn/borgesica/issues">Reportar un problema</a>
+      <span>borgésica · Licencia MIT</span>
+      <span><a href="https://github.com/Kurtshebayn/borgesica">Código fuente</a> · <a href="https://github.com/Kurtshebayn/borgesica/issues">Reportar un problema</a></span>
     </div>
   </footer>
+
+  <!-- GSAP drives the doors and the scroll; Three.js renders the library. If
+       either CDN is blocked the page simply stays a normal static page. -->
+  <script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js" } }</script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+  <script type="module">
+    const root = document.documentElement;
+    const doors = document.getElementById('doors');
+
+    function mulberry32(a) {
+      return () => {
+        a |= 0; a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    const withTimeout = (promise, ms) =>
+      Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
+
+    /* ------------------------------------------------------------------
+       The library: an endless aisle of shelves, built from code. Books are
+       instanced boxes, split in 16-unit segments so the ones behind the
+       camera or past the far plane are culled. Distance fades into the page's
+       own paper colour, so the far end of the aisle glows like the engraving.
+       ------------------------------------------------------------------ */
+    function buildWorld(THREE, canvas) {
+      // Dark, warm and misty: near shelves sink into shadow, the far end glows.
+      const HAZE = new THREE.Color('#d9cdb7');
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+      const scene = new THREE.Scene();
+      scene.background = HAZE;
+      scene.fog = new THREE.Fog(HAZE, 4, 78);
+      const camera = new THREE.PerspectiveCamera(56, 1, 0.1, 100);
+      scene.add(new THREE.HemisphereLight(0xcdbfa6, 0x0b0d12, 0.62));
+      const lamp = new THREE.PointLight(0xffd29a, 95, 0, 2);
+      scene.add(lamp);
+
+      const rand = mulberry32(11);
+      const AISLE = 3, TIER_H = 1.1, TIERS = 30, SEG = 16, SEGS = 13, TRAVEL = 112;
+      const HEIGHT = TIERS * TIER_H;
+      const palette = ['#1c212b', '#252d3b', '#313e50', '#3d2f27', '#52402f', '#665544', '#85755f', '#a39379', '#c4b79e', '#13171e', '#2a3340']
+        .map((c) => new THREE.Color(c));
+      const RED = new THREE.Color('#b3281a');
+      const unit = new THREE.BoxGeometry(1, 1, 1);
+      const bookMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+      const woodMat = new THREE.MeshLambertMaterial({ color: 0x1a1d25 });
+      const floorMat = new THREE.MeshLambertMaterial({ color: 0x15181f });
+      // Warm paper lanterns hanging from the bridges: unlit, so they glow and fade in the haze.
+      const lampMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0 });
+      const lampGeo = new THREE.SphereGeometry(0.22, 10, 8);
+      const m = new THREE.Object3D();
+      const col = new THREE.Color();
+
+      for (let s = 0; s < SEGS; s++) {
+        const z0 = -s * SEG;
+        const group = new THREE.Group();
+
+        for (const side of [-1, 1]) {
+          // x, y, z, depth, height, thickness, palette index (-1 = vermilion), jitter, lean
+          const specs = [];
+          for (let tier = 0; tier < TIERS; tier++) {
+            const y0 = tier * TIER_H + 0.1;
+            let z = z0;
+            while (z > z0 - SEG) {
+              const t = 0.07 + rand() * 0.09;
+              if (rand() < 0.04) { z -= 0.18 + rand() * 0.25; continue; }
+              const h = TIER_H * (0.66 + rand() * 0.27);
+              const d = 0.42 + rand() * 0.16;
+              specs.push(
+                side * (AISLE + d / 2), y0 + h / 2, z - t / 2, d, h, t,
+                rand() < 0.012 ? -1 : (rand() * palette.length) | 0,
+                rand() - 0.5,
+                rand() < 0.04 ? (rand() - 0.5) * 0.3 : 0,
+              );
+              z -= t + 0.004;
+            }
+          }
+          const n = specs.length / 9;
+          const books = new THREE.InstancedMesh(unit, bookMat, n);
+          for (let i = 0; i < n; i++) {
+            const k = i * 9;
+            m.position.set(specs[k], specs[k + 1], specs[k + 2]);
+            m.rotation.set(specs[k + 8], 0, 0);
+            m.scale.set(specs[k + 3], specs[k + 4], specs[k + 5]);
+            m.updateMatrix();
+            books.setMatrixAt(i, m.matrix);
+            col.copy(specs[k + 6] < 0 ? RED : palette[specs[k + 6]]).offsetHSL(0, 0, specs[k + 7] * 0.05);
+            books.setColorAt(i, col);
+          }
+          books.computeBoundingSphere();
+          group.add(books);
+
+          // Shelf boards, one per tier.
+          const boards = new THREE.InstancedMesh(unit, woodMat, TIERS + 1);
+          m.rotation.set(0, 0, 0);
+          for (let tier = 0; tier <= TIERS; tier++) {
+            m.position.set(side * (AISLE + 0.3), tier * TIER_H + 0.03, z0 - SEG / 2);
+            m.scale.set(0.75, 0.07, SEG);
+            m.updateMatrix();
+            boards.setMatrixAt(tier, m.matrix);
+          }
+          boards.computeBoundingSphere();
+          group.add(boards);
+
+          // Back panel and a pillar every four units.
+          const back = new THREE.Mesh(unit, woodMat);
+          back.position.set(side * (AISLE + 0.66), HEIGHT / 2, z0 - SEG / 2);
+          back.scale.set(0.1, HEIGHT, SEG);
+          group.add(back);
+          for (let k = 0; k < SEG; k += 4) {
+            const pillar = new THREE.Mesh(unit, woodMat);
+            pillar.position.set(side * (AISLE - 0.05), HEIGHT / 2, z0 - k);
+            pillar.scale.set(0.34, HEIGHT + 2, 0.34);
+            group.add(pillar);
+          }
+        }
+
+        // Two footbridges across the aisle, at different heights.
+        for (let b = 0; b < 2; b++) {
+          const bz = z0 - 2 - rand() * (SEG - 4);
+          const by = 4 + ((rand() * 6) | 0) * 3.3;
+          const slab = new THREE.Mesh(unit, woodMat);
+          slab.position.set(0, by, bz);
+          slab.scale.set(AISLE * 2 + 0.3, 0.28, 1.1);
+          group.add(slab);
+          const rail = new THREE.Mesh(unit, woodMat);
+          rail.position.set(0, by + 0.95, bz + 0.5);
+          rail.scale.set(AISLE * 2 + 0.3, 0.1, 0.08);
+          group.add(rail);
+          for (const lx of [-1.6, 1.6]) {
+            const lantern = new THREE.Mesh(lampGeo, lampMat);
+            lantern.position.set(lx, by - 0.7, bz);
+            group.add(lantern);
+          }
+        }
+        scene.add(group);
+      }
+
+      const floor = new THREE.Mesh(unit, floorMat);
+      floor.position.set(0, -0.1, -(SEG * SEGS) / 2);
+      floor.scale.set(AISLE * 2 + 1.4, 0.2, SEG * SEGS + 20);
+      scene.add(floor);
+
+      // Drifting dust gives the air some depth.
+      const dustN = 1500, dustPos = new Float32Array(dustN * 3);
+      for (let i = 0; i < dustN; i++) {
+        dustPos[i * 3] = (rand() - 0.5) * (AISLE * 2 - 0.6);
+        dustPos[i * 3 + 1] = 0.2 + rand() * 22;
+        dustPos[i * 3 + 2] = -rand() * SEG * SEGS;
+      }
+      const dustGeo = new THREE.BufferGeometry();
+      dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+      scene.add(new THREE.Points(dustGeo, new THREE.PointsMaterial({
+        color: 0xfff3dc, size: 0.07, sizeAttenuation: true, transparent: true, opacity: 0.55, depthWrite: false,
+      })));
+
+      // Lower resolution while the doors animate, so the GPU is free for them.
+      const fullRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+      function setQuality(low) {
+        renderer.setPixelRatio(low ? 0.6 : fullRatio);
+        resize();
+      }
+
+      function resize() {
+        const w = canvas.clientWidth, h = canvas.clientHeight;
+        if (!w || !h) return;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+      new ResizeObserver(resize).observe(canvas);
+      resize();
+
+      // p: 0..1 along the aisle. (px, py): pointer, -1..1, for a little parallax.
+      function render(p, time, px, py) {
+        camera.position.set(px * 0.5, 1.7 + py * 0.2 + Math.sin(time * 0.7) * 0.04, -TRAVEL * p);
+        camera.rotation.set(0.1 - py * 0.05, -px * 0.1, Math.sin(time * 0.4) * 0.004);
+        camera.fov = 54 + 16 * p;
+        camera.updateProjectionMatrix();
+        lamp.position.set(camera.position.x, camera.position.y + 0.5, camera.position.z - 1.5);
+        renderer.render(scene, camera);
+      }
+      return { render, setQuality };
+    }
+
+    /* ------------------------------------------------------------------
+       Scroll: the page pins, the framed window grows to fill the screen and
+       the camera walks down the aisle; the end dissolves into the paper.
+       ------------------------------------------------------------------ */
+    function setupScroll(world) {
+      const hero = document.querySelector('.hero');
+      const plate = hero.querySelector('.plate3d');
+      const slot = hero.querySelector('.fallback .frame');
+      const copy = hero.querySelector('.copy');
+      const paper = hero.querySelector('.paper');
+      const hint = hero.querySelector('.hint');
+      const state = { p: 0 };
+      const geo = { s: 0.4, x: 0, y: 0 };
+      let tl = null;
+
+      // Where the small window sits: the (hidden) static figure keeps its place.
+      const measure = () => {
+        const keep = tl ? tl.progress() : 0;
+        if (tl) tl.progress(0);
+        // Layout offsets ignore transforms, so the slot's entrance animation
+        // (a small rise) cannot skew where the window sits.
+        let left = 0, top = 0;
+        for (let el = slot; el && el !== hero; el = el.offsetParent) {
+          left += el.offsetLeft; top += el.offsetTop;
+        }
+        const w = slot.offsetWidth, hgt = slot.offsetHeight;
+        geo.s = w / plate.offsetWidth;
+        geo.x = left + w / 2 - hero.clientWidth / 2;
+        geo.y = top + hgt / 2 - hero.clientHeight / 2;
+        if (tl) tl.progress(keep);
+      };
+      measure();
+      gsap.set(plate, { scale: geo.s, x: geo.x, y: geo.y });
+
+      tl = gsap.timeline({
+        defaults: { ease: 'none' },
+        scrollTrigger: {
+          trigger: hero, start: 'top top', end: '+=160%',
+          pin: true, scrub: 0.5, invalidateOnRefresh: true, onRefreshInit: measure,
+        },
+      });
+      tl.fromTo(plate,
+          { scale: () => geo.s, x: () => geo.x, y: () => geo.y },
+          { scale: 1.1, x: 0, y: 0, ease: 'power2.inOut', duration: 0.8 }, 0)
+        .to(copy, { opacity: 0, x: -80, duration: 0.3 }, 0)
+        .to(hint, { opacity: 0, duration: 0.1 }, 0)
+        .to(state, { p: 1, ease: 'power1.in', duration: 1 }, 0)
+        .to(paper, { opacity: 1, duration: 0.35, ease: 'power1.in' }, 0.65);
+
+      let active = true;
+      new IntersectionObserver(([entry]) => { active = entry.isIntersecting; }).observe(hero);
+      const ptr = { x: 0, y: 0, tx: 0, ty: 0 };
+      addEventListener('pointermove', (e) => {
+        ptr.tx = (e.clientX / innerWidth) * 2 - 1;
+        ptr.ty = (e.clientY / innerHeight) * 2 - 1;
+      }, { passive: true });
+      let frame = 0;
+      gsap.ticker.add((time) => {
+        if (!active) return;
+        // While the doors open the view barely changes: draw it at ~20 fps.
+        if (world.lite && (frame++ % 3)) return;
+        ptr.x += (ptr.tx - ptr.x) * 0.05;
+        ptr.y += (ptr.ty - ptr.y) * 0.05;
+        world.render(state.p, time, ptr.x, ptr.y);
+      });
+    }
+
+    async function main() {
+      gsap.registerPlugin(ScrollTrigger);
+      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const wide = matchMedia('(min-width: 821px)').matches;
+
+      const finishIntro = () => {
+        root.classList.add('ready', 'done');
+        root.style.overflow = '';
+        doors.style.display = 'none';
+
+      };
+
+      // 1. The library, on large screens only. Any failure falls back to the static image.
+      let world = null;
+      if (!reduce && wide) {
+        root.classList.add('gl');
+        try {
+          const THREE = await withTimeout(import('three'), 8000);
+          world = buildWorld(THREE, document.getElementById('gl'));
+          world.render(0, 0, 0, 0);
+        } catch (err) {
+          console.warn('3D unavailable, using the static image.', err);
+          root.classList.remove('gl');
+          world = null;
+        }
+      }
+      if (world) setupScroll(world);
+
+      // 2. The doors. They hold ~1.9s from page load, then open over 2.9s.
+      if (reduce) {
+        finishIntro();
+        ScrollTrigger.refresh();
+      } else {
+        root.style.overflow = 'hidden';
+        const wait = Math.max(0, 1.9 - performance.now() / 1000);
+        if (world) { world.lite = true; world.setQuality(true); }
+        const intro = gsap.timeline({
+          delay: wait,
+          onComplete: () => {
+            if (world) { world.lite = false; world.setQuality(false); world.render(0, 0, 0, 0); }
+            finishIntro();
+          },
+        });
+        intro
+          // Re-measure while the closed doors hide the page, never when they leave.
+          .add(() => ScrollTrigger.refresh(), 0)
+          .to('.seam', { opacity: 0, duration: 0.4 }, 0)
+          .add(() => root.classList.add('ready'), 0.4)
+          .to('.door-l', { rotationY: 100, duration: 2.9, ease: 'power3.inOut' }, 0)
+          .to('.door-r', { rotationY: -100, duration: 2.9, ease: 'power3.inOut' }, 0)
+          // In the last stretch the leaves slide off to the sides, so they leave the
+          // screen instead of vanishing while still visible.
+          .to('.door-l', { xPercent: -100, duration: 1.5, ease: 'power2.in' }, 1.4)
+          .to('.door-r', { xPercent: 100, duration: 1.5, ease: 'power2.in' }, 1.4);
+        if (world) intro.to('.plate3d', { opacity: 1, duration: 1.4, ease: 'power2.out' }, 0.5);
+        const skip = () => intro.progress(1);
+        doors.addEventListener('click', skip);
+        addEventListener('keydown', skip, { once: true });
+        addEventListener('wheel', skip, { once: true, passive: true });
+      }
+
+      // 3. Sections rise into view.
+      if (!reduce) {
+        const items = gsap.utils.toArray('section.block .wrap > *, footer .wrap > *');
+        gsap.set(items, { opacity: 0, y: 28 });
+        ScrollTrigger.batch(items, {
+          start: 'top 88%', once: true,
+          onEnter: (els) => gsap.to(els, { opacity: 1, y: 0, duration: 0.9, ease: 'power3.out', stagger: 0.12, overwrite: true }),
+        });
+      }
+    }
+
+    // Everything above is declared by now, so it is safe to start.
+    if (!window.gsap || !window.ScrollTrigger) {
+      root.classList.remove('js');
+    } else {
+      main();
+    }
+  </script>
 </body>
 </html>
