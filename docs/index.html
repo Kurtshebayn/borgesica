@@ -573,7 +573,7 @@
         root.classList.add('ready', 'done');
         root.style.overflow = '';
         doors.style.display = 'none';
-        requestAnimationFrame(() => ScrollTrigger.refresh());
+
       };
 
       // 1. The library, on large screens only. Any failure falls back to the static image.
@@ -595,6 +595,7 @@
       // 2. The doors. They hold ~1.9s from page load, then open over 2.9s.
       if (reduce) {
         finishIntro();
+        ScrollTrigger.refresh();
       } else {
         root.style.overflow = 'hidden';
         const wait = Math.max(0, 1.9 - performance.now() / 1000);
@@ -607,6 +608,8 @@
           },
         });
         intro
+          // Re-measure while the closed doors hide the page, never when they leave.
+          .add(() => ScrollTrigger.refresh(), 0)
           .to('.seam', { opacity: 0, duration: 0.4 }, 0)
           .add(() => root.classList.add('ready'), 0.4)
           .to('.door-l', { rotationY: 100, duration: 2.9, ease: 'power3.inOut' }, 0)
