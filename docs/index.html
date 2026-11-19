@@ -328,157 +328,63 @@
     const root = document.documentElement;
     const doors = document.getElementById('doors');
 
-    function mulberry32(a) {
-      return () => {
-        a |= 0; a = (a + 0x6d2b79f5) | 0;
-        let t = Math.imul(a ^ (a >>> 15), 1 | a);
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-      };
-    }
     const withTimeout = (promise, ms) =>
       Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
 
     /* ------------------------------------------------------------------
-       The library: an endless aisle of shelves, built from code. Books are
-       instanced boxes, split in 16-unit segments so the ones behind the
-       camera or past the far plane are culled. Distance fades into the page's
-       own paper colour, so the far end of the aisle glows like the engraving.
+       The library: five illustrated layers of the same aisle, nested like a
+       telescope. Every layer has a transparent window where the next one shows
+       through, so scrolling zooms the whole stack and the page seems to walk
+       into the engraving. A layer whose window has left the screen is skipped.
+       Windows are fractions of the image, nearest layer first; the last is whole.
        ------------------------------------------------------------------ */
-    function buildWorld(THREE, canvas) {
-      // Dark, warm and misty: near shelves sink into shadow, the far end glows.
-      const HAZE = new THREE.Color('#d9cdb7');
+    const LAYERS = [
+      { src: 'layers/5.webp', cx: 0.5003, cy: 0.4894, hw: 0.3846, hh: 0.4963 },
+      { src: 'layers/4.webp', cx: 0.5003, cy: 0.4963, hw: 0.3702, hh: 0.3762 },
+      { src: 'layers/3.webp', cx: 0.5, cy: 0.5, hw: 0.2380, hh: 0.2540 },
+      { src: 'layers/2.webp', cx: 0.5, cy: 0.4968, hw: 0.2129, hh: 0.2285 },
+      { src: 'layers/1.webp' },
+    ];
+    const IMG_ASPECT = 1672 / 941;
+    const END_SCALE = 1.3; // how large the far end of the aisle gets at the end of the scroll
+
+    async function buildWorld(THREE, canvas) {
       const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
       const scene = new THREE.Scene();
-      scene.background = HAZE;
-      scene.fog = new THREE.Fog(HAZE, 4, 78);
-      const camera = new THREE.PerspectiveCamera(56, 1, 0.1, 100);
-      scene.add(new THREE.HemisphereLight(0xcdbfa6, 0x0b0d12, 0.62));
-      const lamp = new THREE.PointLight(0xffd29a, 95, 0, 2);
-      scene.add(lamp);
+      scene.background = new THREE.Color('#08090d');
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -10, 10);
 
-      const rand = mulberry32(11);
-      const AISLE = 3, TIER_H = 1.1, TIERS = 30, SEG = 16, SEGS = 13, TRAVEL = 112;
-      const HEIGHT = TIERS * TIER_H;
-      const palette = ['#1c212b', '#252d3b', '#313e50', '#3d2f27', '#52402f', '#665544', '#85755f', '#a39379', '#c4b79e', '#13171e', '#2a3340']
-        .map((c) => new THREE.Color(c));
-      const RED = new THREE.Color('#b3281a');
-      const unit = new THREE.BoxGeometry(1, 1, 1);
-      const bookMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-      const woodMat = new THREE.MeshLambertMaterial({ color: 0x1a1d25 });
-      const floorMat = new THREE.MeshLambertMaterial({ color: 0x15181f });
-      // Warm paper lanterns hanging from the bridges: unlit, so they glow and fade in the haze.
-      const lampMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0 });
-      const lampGeo = new THREE.SphereGeometry(0.22, 10, 8);
-      const m = new THREE.Object3D();
-      const col = new THREE.Color();
-
-      for (let s = 0; s < SEGS; s++) {
-        const z0 = -s * SEG;
-        const group = new THREE.Group();
-
-        for (const side of [-1, 1]) {
-          // x, y, z, depth, height, thickness, palette index (-1 = vermilion), jitter, lean
-          const specs = [];
-          for (let tier = 0; tier < TIERS; tier++) {
-            const y0 = tier * TIER_H + 0.1;
-            let z = z0;
-            while (z > z0 - SEG) {
-              const t = 0.07 + rand() * 0.09;
-              if (rand() < 0.04) { z -= 0.18 + rand() * 0.25; continue; }
-              const h = TIER_H * (0.66 + rand() * 0.27);
-              const d = 0.42 + rand() * 0.16;
-              specs.push(
-                side * (AISLE + d / 2), y0 + h / 2, z - t / 2, d, h, t,
-                rand() < 0.012 ? -1 : (rand() * palette.length) | 0,
-                rand() - 0.5,
-                rand() < 0.04 ? (rand() - 0.5) * 0.3 : 0,
-              );
-              z -= t + 0.004;
-            }
-          }
-          const n = specs.length / 9;
-          const books = new THREE.InstancedMesh(unit, bookMat, n);
-          for (let i = 0; i < n; i++) {
-            const k = i * 9;
-            m.position.set(specs[k], specs[k + 1], specs[k + 2]);
-            m.rotation.set(specs[k + 8], 0, 0);
-            m.scale.set(specs[k + 3], specs[k + 4], specs[k + 5]);
-            m.updateMatrix();
-            books.setMatrixAt(i, m.matrix);
-            col.copy(specs[k + 6] < 0 ? RED : palette[specs[k + 6]]).offsetHSL(0, 0, specs[k + 7] * 0.05);
-            books.setColorAt(i, col);
-          }
-          books.computeBoundingSphere();
-          group.add(books);
-
-          // Shelf boards, one per tier.
-          const boards = new THREE.InstancedMesh(unit, woodMat, TIERS + 1);
-          m.rotation.set(0, 0, 0);
-          for (let tier = 0; tier <= TIERS; tier++) {
-            m.position.set(side * (AISLE + 0.3), tier * TIER_H + 0.03, z0 - SEG / 2);
-            m.scale.set(0.75, 0.07, SEG);
-            m.updateMatrix();
-            boards.setMatrixAt(tier, m.matrix);
-          }
-          boards.computeBoundingSphere();
-          group.add(boards);
-
-          // Back panel and a pillar every four units.
-          const back = new THREE.Mesh(unit, woodMat);
-          back.position.set(side * (AISLE + 0.66), HEIGHT / 2, z0 - SEG / 2);
-          back.scale.set(0.1, HEIGHT, SEG);
-          group.add(back);
-          for (let k = 0; k < SEG; k += 4) {
-            const pillar = new THREE.Mesh(unit, woodMat);
-            pillar.position.set(side * (AISLE - 0.05), HEIGHT / 2, z0 - k);
-            pillar.scale.set(0.34, HEIGHT + 2, 0.34);
-            group.add(pillar);
-          }
-        }
-
-        // Two footbridges across the aisle, at different heights.
-        for (let b = 0; b < 2; b++) {
-          const bz = z0 - 2 - rand() * (SEG - 4);
-          const by = 4 + ((rand() * 6) | 0) * 3.3;
-          const slab = new THREE.Mesh(unit, woodMat);
-          slab.position.set(0, by, bz);
-          slab.scale.set(AISLE * 2 + 0.3, 0.28, 1.1);
-          group.add(slab);
-          const rail = new THREE.Mesh(unit, woodMat);
-          rail.position.set(0, by + 0.95, bz + 0.5);
-          rail.scale.set(AISLE * 2 + 0.3, 0.1, 0.08);
-          group.add(rail);
-          for (const lx of [-1.6, 1.6]) {
-            const lantern = new THREE.Mesh(lampGeo, lampMat);
-            lantern.position.set(lx, by - 0.7, bz);
-            group.add(lantern);
-          }
-        }
-        scene.add(group);
-      }
-
-      const floor = new THREE.Mesh(unit, floorMat);
-      floor.position.set(0, -0.1, -(SEG * SEGS) / 2);
-      floor.scale.set(AISLE * 2 + 1.4, 0.2, SEG * SEGS + 20);
-      scene.add(floor);
-
-      // Drifting dust gives the air some depth.
-      const dustN = 1500, dustPos = new Float32Array(dustN * 3);
-      for (let i = 0; i < dustN; i++) {
-        dustPos[i * 3] = (rand() - 0.5) * (AISLE * 2 - 0.6);
-        dustPos[i * 3 + 1] = 0.2 + rand() * 22;
-        dustPos[i * 3 + 2] = -rand() * SEG * SEGS;
-      }
-      const dustGeo = new THREE.BufferGeometry();
-      dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
-      scene.add(new THREE.Points(dustGeo, new THREE.PointsMaterial({
-        color: 0xfff3dc, size: 0.07, sizeAttenuation: true, transparent: true, opacity: 0.55, depthWrite: false,
+      const loader = new THREE.TextureLoader();
+      const maxAniso = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+      const textures = await Promise.all(LAYERS.map((layer) => new Promise((resolve, reject) => {
+        loader.load(layer.src, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.anisotropy = maxAniso;
+          resolve(tex);
+        }, undefined, reject);
       })));
+
+      // Each layer must cover the window of the one in front of it.
+      const base = [1];
+      for (let k = 0; k < LAYERS.length - 1; k++) {
+        base.push(base[k] * Math.max(LAYERS[k].hw, LAYERS[k].hh) * 1.4);
+      }
+      const zoomEnd = END_SCALE / base[base.length - 1];
+      const quad = new THREE.PlaneGeometry(1, 1);
+      const meshes = LAYERS.map((layer, k) => {
+        const mesh = new THREE.Mesh(quad, new THREE.MeshBasicMaterial({
+          map: textures[k], transparent: k < LAYERS.length - 1,
+          depthTest: false, depthWrite: false, toneMapped: false,
+        }));
+        mesh.renderOrder = LAYERS.length - k; // nearest layer drawn last
+        scene.add(mesh);
+        return mesh;
+      });
 
       // Lower resolution while the doors animate, so the GPU is free for them.
       const fullRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+      let aspect = 1;
       function setQuality(low) {
         renderer.setPixelRatio(low ? 0.6 : fullRatio);
         resize();
@@ -488,7 +394,8 @@
         const w = canvas.clientWidth, h = canvas.clientHeight;
         if (!w || !h) return;
         renderer.setSize(w, h, false);
-        camera.aspect = w / h;
+        aspect = w / h;
+        camera.left = -aspect; camera.right = aspect;
         camera.updateProjectionMatrix();
       }
       new ResizeObserver(resize).observe(canvas);
@@ -496,11 +403,26 @@
 
       // p: 0..1 along the aisle. (px, py): pointer, -1..1, for a little parallax.
       function render(p, time, px, py) {
-        camera.position.set(px * 0.5, 1.7 + py * 0.2 + Math.sin(time * 0.7) * 0.04, -TRAVEL * p);
-        camera.rotation.set(0.1 - py * 0.05, -px * 0.1, Math.sin(time * 0.4) * 0.004);
-        camera.fov = 54 + 16 * p;
-        camera.updateProjectionMatrix();
-        lamp.position.set(camera.position.x, camera.position.y + 0.5, camera.position.z - 1.5);
+        const zoom = Math.exp(p * Math.log(zoomEnd)) * (1 + Math.sin(time * 0.6) * 0.003);
+        // Plane size at scale 1: the image covers the canvas whatever its shape.
+        const cover = Math.max(1, aspect / IMG_ASPECT);
+        const w0 = 2 * IMG_ASPECT * cover, h0 = 2 * cover;
+        let cx = 0, cy = 0; // centre of the current layer, at scale 1
+        for (let k = 0; k < LAYERS.length; k++) {
+          const s = base[k] * zoom;
+          const L = LAYERS[k];
+          // Skip a layer once its window is larger than the screen.
+          const gone = L.hw && (L.hw * w0 * s / 2 > aspect * 1.2) && (L.hh * h0 * s / 2 > 1.2);
+          const mesh = meshes[k];
+          mesh.visible = !gone;
+          mesh.scale.set(w0 * s, h0 * s, 1);
+          mesh.position.set((cx * zoom) + px * 0.03 * s, (cy * zoom) - py * 0.02 * s, 0);
+          if (L.hw) {
+            // The next layer is centred on this layer's window.
+            cx += (L.cx - 0.5) * w0 * base[k];
+            cy -= (L.cy - 0.5) * h0 * base[k];
+          }
+        }
         renderer.render(scene, camera);
       }
       return { render, setQuality };
@@ -591,7 +513,7 @@
         root.classList.add('gl');
         try {
           const THREE = await withTimeout(import('three'), 8000);
-          world = buildWorld(THREE, document.getElementById('gl'));
+          world = await withTimeout(buildWorld(THREE, document.getElementById('gl')), 8000);
           world.render(0, 0, 0, 0);
         } catch (err) {
           console.warn('3D unavailable, using the static image.', err);
