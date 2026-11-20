@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ChunkItem } from "./apiTypes";
 import {
+  candidateWarning,
   chunkKind,
   displayNumber,
+  explainFailure,
   nextOffset,
   offsetForChunk,
   pageSummary,
@@ -129,5 +131,40 @@ describe("parseInline", () => {
     expect(parseInline("si x < 5 y 6 > 2")).toEqual([
       { text: "si x < 5 y 6 > 2", bold: false, italic: false },
     ]);
+  });
+});
+
+
+describe("explainFailure", () => {
+  it("explains lost formatting marks and a merged paragraph in plain Spanish", () => {
+    const text = explainFailure([
+      "attempt 1: placeholder mismatch (placeholder 5: expected exactly 1 open + 0 close, got 0 open + 0 close)",
+      "fallback: segment count mismatch (expected 19, got 18)",
+    ]);
+    expect(text).toContain("marca de formato");
+    expect(text).toContain("devolvió 18 en vez de 19");
+    expect(text).toContain("conserva el texto original");
+  });
+
+  it("names a provider error", () => {
+    expect(explainFailure(["attempt 1: provider error (timeout)"])).toContain("proveedor");
+  });
+
+  it("says so when no reason was recorded", () => {
+    expect(explainFailure([])).toContain("No quedó registrado");
+    expect(explainFailure(undefined)).toContain("No quedó registrado");
+  });
+});
+
+describe("candidateWarning", () => {
+  it("warns when the candidate has a different paragraph count", () => {
+    const c = chunk({ status: "FAILED", candidate: "x", candidate_aligned: false });
+    expect(candidateWarning(c)).toContain("número de párrafos distinto");
+  });
+
+  it("does not warn for an aligned candidate, nor when there is none", () => {
+    expect(candidateWarning(chunk({ status: "FAILED", candidate: "x", candidate_aligned: true }))).toBeNull();
+    expect(candidateWarning(chunk({ status: "FAILED", candidate: null }))).toBeNull();
+    expect(candidateWarning(chunk())).toBeNull();
   });
 });

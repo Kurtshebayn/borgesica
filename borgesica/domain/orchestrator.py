@@ -90,6 +90,7 @@ from borgesica.domain.glossary import (
 from borgesica.domain.markup import (
     reinsert,
     restore_tags,
+    salvage_placeholders,
     strip,
     strip_all_tags,
     tokenize_tags,
@@ -198,6 +199,12 @@ _INDEX_MARKER_RE = re.compile(r"^\[\d+\]\s*")
 _WAIT_POLL_SECONDS = 0.5
 
 
+# Key under Chunk.meta for the best translation a FAILED chunk produced:
+# {"text": ..., "aligned": bool}. "aligned" is True when it has as many
+# "\n\n" segments as the source, i.e. it can be placed node by node.
+REJECTED_CANDIDATE_KEY = "rejected_candidate"
+
+
 def _finished_chunk(
     chunk: Chunk,
     outcome: tuple[
@@ -208,6 +215,8 @@ def _finished_chunk(
     *outcome*: DONE with its translation, or FAILED when no attempt passed."""
     final_unit, final_text, _, passed_validation, validation_errors, attempt_errors = outcome
     if final_unit is None:
+        # meta may carry the best rejected translation (set by
+        # _translate_with_retry) for the person to accept later.
         return chunk.model_copy(
             update={
                 "status": ChunkStatus.FAILED,
@@ -218,6 +227,7 @@ def _finished_chunk(
         )
     return chunk.model_copy(
         update={
+            "meta": {k: v for k, v in chunk.meta.items() if k != REJECTED_CANDIDATE_KEY},
             "status": ChunkStatus.DONE,
             "translated_text": final_text,
             "passed_validation": passed_validation,
@@ -944,6 +954,25 @@ class TranslationOrchestrator:
         # validation.
         validation_issues: list[str] = []
 
+        # The best REJECTED translation, kept so a chunk that ends FAILED can
+        # still show the person what the model produced (and let them accept
+        # it). One that has the source's segment count beats one that does not;
+        # among equals the latest wins. Stored on chunk.meta only on failure.
+        chunk.meta.pop(REJECTED_CANDIDATE_KEY, None)
+        best_rejected: dict | None = None
+
+        def _remember_rejected(text: str) -> None:
+            nonlocal best_rejected
+            if not text.strip():
+                return
+            aligned = validate_segments(chunk.source_text, text)
+            if best_rejected is None or aligned or not best_rejected["aligned"]:
+                best_rejected = {"text": text, "aligned": aligned}
+
+        def _keep_rejected() -> None:
+            if best_rejected is not None:
+                chunk.meta[REJECTED_CANDIDATE_KEY] = best_rejected
+
         # Segmented (SRT) contract: cue-batch chunks request the translations
         # ARRAY — cue boundaries as structured data, not blank-line convention
         # (models "correct" blank lines between unpunctuated speech-to-text
@@ -1097,6 +1126,7 @@ class TranslationOrchestrator:
                     f"(expected {src_segs}, got {got_segs})"
                 )
                 segment_mismatched = True
+                _remember_rejected(restore_tags(translated_text, tag_registry))
                 if segment_count is None:
                     # Prose: a free-text retry tends to split the same
                     # paragraph again. Switch the remaining attempts to the
@@ -1119,6 +1149,9 @@ class TranslationOrchestrator:
 
             # Placeholder mismatch — retry unless this was the last attempt.
             placeholder_failed = True
+            _remember_rejected(
+                salvage_placeholders(source_placeholder_text, translated_text, tag_registry)
+            )
             validation_issues.append(
                 f"attempt {attempt + 1}: placeholder mismatch "
                 f"({'; '.join(placeholder_result.issues)})"
@@ -1164,6 +1197,7 @@ class TranslationOrchestrator:
                 _MAX_TAG_RETRIES + 1,
             )
             issues = json.dumps(validation_issues)
+            _keep_rejected()
             return None, None, total_call_cost, False, issues, issues
 
         # --- FALLBACK: strip → translate plain → reinsert ---
@@ -1184,7 +1218,10 @@ class TranslationOrchestrator:
             fallback_text = reinsert(fallback_unit.translation, tags, plain_source)
             if not validate_tags(chunk.source_text, fallback_text):
                 validation_issues.append("fallback: tag count mismatch after strip/reinsert")
+                # Its tags are unreliable: offer it as plain text.
+                _remember_rejected(strip_all_tags(fallback_text))
             elif not validate_segments(chunk.source_text, fallback_text):
+                _remember_rejected(fallback_text)
                 # Same positional-mapping hazard as a primary reply.
                 src_segs = len(chunk.source_text.split("\n\n"))
                 got_segs = len(fallback_text.split("\n\n"))
@@ -1213,6 +1250,7 @@ class TranslationOrchestrator:
 
         # Both primary and fallback failed.
         issues = json.dumps(validation_issues)
+        _keep_rejected()
         return None, None, total_call_cost, False, issues, issues
 
     def _translate_reflective(

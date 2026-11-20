@@ -7,6 +7,7 @@ best_effort_count/best_effort_indices fields (serve-api spec).
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Literal
@@ -22,6 +23,7 @@ from borgesica.domain.models import (
     JobStatus,
 )
 from borgesica.domain.narrators import Chapter, NarratorAssignment
+from borgesica.domain.orchestrator import REJECTED_CANDIDATE_KEY
 
 
 class CreateJobRequest(BaseModel):
@@ -237,6 +239,16 @@ class ChunkItem(BaseModel):
     best_effort: bool
     chapter_key: str | None
     chapter_title: str | None
+    # Why a FAILED chunk failed: the validator messages collected across its
+    # attempts. Empty for any other chunk (or a failure recorded before the
+    # messages were persisted).
+    failure_reasons: list[str] = []
+    # The best translation a FAILED chunk produced, which the person may keep
+    # (null when it produced none). ``candidate_aligned`` is False when it has
+    # a different number of paragraphs than the source, so its text can land
+    # on the wrong node after the divergence.
+    candidate: str | None = None
+    candidate_aligned: bool | None = None
 
 
 class ChunksResponse(BaseModel):
@@ -251,7 +263,10 @@ class ChunksResponse(BaseModel):
 
 
 def chunk_to_item(chunk: Chunk, chapter: Chapter | None) -> ChunkItem:
+    candidate = chunk.meta.get(REJECTED_CANDIDATE_KEY) if chunk.status == ChunkStatus.FAILED else None
     return ChunkItem(
+        candidate=candidate.get("text") if candidate else None,
+        candidate_aligned=candidate.get("aligned") if candidate else None,
         index=chunk.index,
         status=chunk.status,
         source=chunk.source_text,
@@ -259,7 +274,18 @@ def chunk_to_item(chunk: Chunk, chapter: Chapter | None) -> ChunkItem:
         best_effort=is_best_effort(chunk),
         chapter_key=chapter.key if chapter else None,
         chapter_title=chapter.title if chapter else None,
+        failure_reasons=_failure_reasons(chunk),
     )
+
+
+def _failure_reasons(chunk: Chunk) -> list[str]:
+    if chunk.status != ChunkStatus.FAILED or not chunk.validation_errors:
+        return []
+    try:
+        reasons = json.loads(chunk.validation_errors)
+    except ValueError:
+        return []
+    return [r for r in reasons if isinstance(r, str)] if isinstance(reasons, list) else []
 
 
 def is_best_effort(chunk: Chunk) -> bool:

@@ -3923,3 +3923,56 @@ def test_budget_projection_measures_the_narrator_block():
         narrator=NarratorFact(name="Vis", gender="masculine"),
     )
     assert with_fact > plain
+
+
+def test_failed_chunk_keeps_its_best_rejected_translation():
+    """A chunk that ends FAILED still carries what the model produced, so the
+    person can choose to keep it: here every attempt merges the paragraphs, so
+    the candidate is flagged as not aligned."""
+    store = InMemoryCheckpointStore()
+    provider = _MergesInTextModeProvider(aligned=False)
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="Paragraph one.\n\nParagraph two.")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.FAILED
+    assert saved.meta["rejected_candidate"]["aligned"] is False
+    assert saved.meta["rejected_candidate"]["text"].strip()
+
+
+def test_aligned_candidate_beats_a_later_misaligned_one():
+    """Primary attempts drop the placeholders but keep both paragraphs; the
+    fallback merges them. The aligned primary text (tag-less) is the one kept."""
+    store = InMemoryCheckpointStore()
+
+    class DropsTagsThenMerges(FakeTranslationProvider):
+        def translate(self, system, user, model, segment_count=None):  # type: ignore[no-untyped-def]
+            self.call_log.append((system, user, model))
+            text = (
+                "El zorro rápido.\n\nPárrafo dos."
+                if len(self.call_log) <= 3
+                else "El zorro rápido. Párrafo dos."
+            )
+            return TranslationResult(
+                unit=TranslationUnit(translation=text, summary_update="S."),
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
+
+    provider = DropsTagsThenMerges()
+    orch, _, _ = make_orchestrator(provider=provider, store=store)
+    config = make_config(continue_on_error=True)
+    job = make_job(config, total=1)
+    chunks = [Chunk(index=0, source_text="The <i>quick</i> fox.\n\nParagraph two.")]
+
+    run_job(orch, job, chunks, config=config, store=store)
+
+    saved = store.load_chunks(job.id)[0]
+    assert saved.status == ChunkStatus.FAILED
+    assert saved.meta["rejected_candidate"] == {
+        "text": "El zorro rápido.\n\nPárrafo dos.",
+        "aligned": True,
+    }

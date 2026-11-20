@@ -632,3 +632,26 @@ def test_self_closing_span_nested_in_span_does_not_steal_the_outer_close() -> No
     assert placeholder_text == "⟦1⟧before ⟦2⟧after⟦/1⟧ tail"
     assert validate_placeholders(placeholder_text, placeholder_text, registry).valid
     assert restore_tags(placeholder_text, registry) == source
+
+
+def test_salvage_drops_a_lost_standalone_tag_and_keeps_the_rest():
+    from borgesica.domain.markup import salvage_placeholders, tokenize_tags
+
+    source = 'Intro <span epub:type="pagebreak" id="p1"/>then <i>quick</i> fox.'
+    ph, registry = tokenize_tags(source)
+    italic = next(i for i, (_, close) in registry.items() if close)
+    translated = f"Intro luego ⟦{italic}⟧rápido⟦/{italic}⟧ zorro."  # page-break marker lost
+
+    assert salvage_placeholders(ph, translated, registry) == "Intro luego <i>rápido</i> zorro."
+
+
+def test_salvage_falls_back_to_plain_text_when_pairs_are_broken():
+    from borgesica.domain.markup import salvage_placeholders, tokenize_tags
+
+    ph, registry = tokenize_tags("A <i>b</i> and <b>c</b>.")
+    ids = sorted(registry)
+    broken = f"A ⟦{ids[0]}⟧b ⟦{ids[1]}⟧c⟦/{ids[0]}⟧ ⟦/{ids[1]}⟧."  # crossing pairs
+
+    out = salvage_placeholders(ph, broken, registry)
+
+    assert "⟦" not in out and "<" not in out

@@ -345,6 +345,43 @@ def restore_tags(text: str, registry: dict[int, tuple[str, str]]) -> str:
     return text
 
 
+def salvage_placeholders(
+    source_placeholder_text: str,
+    text: str,
+    registry: dict[int, tuple[str, str]],
+) -> str:
+    """Turn a REJECTED translation into text that is safe to put in the book.
+
+    Used only to keep a candidate the person may choose to accept. A tag the
+    model dropped, duplicated, crossed or invented is left out (its inner text
+    stays); every well-formed tag is restored with its original attributes. If
+    what remains still does not nest properly, all markers are removed so the
+    result is plain text and can never leave unbalanced markup. Never raises.
+    """
+    open_counts: dict[int, int] = {}
+    close_counts: dict[int, int] = {}
+    for tag_id, is_close in _placeholder_events(text):
+        counts = close_counts if is_close else open_counts
+        counts[tag_id] = counts.get(tag_id, 0) + 1
+    good: dict[int, tuple[str, str]] = {}
+    for tag_id, pair in registry.items():
+        opens = open_counts.get(tag_id, 0)
+        closes = close_counts.get(tag_id, 0)
+        closes_ok = closes <= 1 if not pair[1] else closes == 1
+        if opens == 1 and closes_ok:
+            good[tag_id] = pair
+
+    def _drop_unusable(s: str) -> str:
+        return _PLACEHOLDER_ANY_RE.sub(
+            lambda m: m.group(0) if int(m.group(2)) in good else "", s
+        )
+
+    cleaned = _drop_unusable(text)
+    if validate_placeholders(_drop_unusable(source_placeholder_text), cleaned, good).valid:
+        return restore_tags(cleaned, good)
+    return _PLACEHOLDER_ANY_RE.sub("", text)
+
+
 class PlaceholderValidation(NamedTuple):
     """Result of validate_placeholders.
 

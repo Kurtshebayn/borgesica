@@ -110,6 +110,9 @@ def test_item_carries_source_translation_and_chapter():
         "best_effort": False,
         "chapter_key": "ch1.xhtml",
         "chapter_title": "I",
+        "failure_reasons": [],
+        "candidate": None,
+        "candidate_aligned": None,
     }
     assert (second["chapter_key"], second["chapter_title"]) == ("ch2.xhtml", "II")
 
@@ -190,3 +193,19 @@ def test_requires_the_session_token_when_one_is_set():
 
     assert client.get("/jobs/x/chunks").status_code == 401
     assert client.get("/jobs/x/chunks", headers={"X-Borgesica-Token": "s3cret"}).status_code == 404
+
+
+def test_failed_chunk_carries_its_failure_reasons():
+    failed = _chunk(1, ChunkStatus.FAILED, passed=False)
+    failed.validation_errors = '["attempt 1: segment count mismatch (expected 19, got 18)"]'
+    client = _setup([_chunk(0), failed])
+    chunks = client.get("/jobs/job-c/chunks").json()["chunks"]
+    assert chunks[0]["failure_reasons"] == []
+    assert chunks[1]["failure_reasons"] == [
+        "attempt 1: segment count mismatch (expected 19, got 18)"
+    ]
+
+
+def test_failed_chunk_with_no_recorded_reason_has_an_empty_list():
+    client = _setup([_chunk(0, ChunkStatus.FAILED, passed=False)])
+    assert client.get("/jobs/job-c/chunks").json()["chunks"][0]["failure_reasons"] == []

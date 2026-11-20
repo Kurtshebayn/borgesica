@@ -751,6 +751,24 @@ button.chapter[data-active="true"] {
   color: var(--accent);
 }
 
+.compare-reason {
+  margin: 0 0 var(--s-2);
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.compare-candidate {
+  margin-top: var(--s-3, 0.75rem);
+  padding-top: var(--s-2);
+  border-top: 1px dashed currentColor;
+}
+
+.failure-list {
+  margin: var(--s-2) 0;
+  padding-left: var(--s-4, 1.25rem);
+  font-size: 13px;
+}
+
 .compare-empty {
   padding: var(--s-5);
   color: var(--text-muted);

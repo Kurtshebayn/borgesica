@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { getChunks, getNarrators, getStatus } from "./apiClient";
+import { acceptFailedChunk, getChunks, getNarrators, getStatus } from "./apiClient";
 import type { ChunksResponse, JobResponse, NarratorChapter } from "./apiTypes";
 import {
   COMPARE_PAGE_SIZE,
   KIND_LABELS,
+  candidateWarning,
+  explainFailure,
   chunkKind,
   displayNumber,
   nextOffset,
@@ -31,6 +33,22 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
   const [offset, setOffset] = useState(0);
   const [onlyProblems, setOnlyProblems] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [accepting, setAccepting] = useState<number | null>(null);
+  // Bumped after keeping a candidate so the page and the counts are re-read.
+  const [reload, setReload] = useState(0);
+
+  async function keepCandidate(index: number) {
+    setAccepting(index);
+    setError(null);
+    try {
+      await acceptFailedChunk(baseUrl, token, jobId, index);
+      setReload((n) => n + 1);
+    } catch (err) {
+      setError(`No se pudo usar esa versión: ${String(err)}`);
+    } finally {
+      setAccepting(null);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -44,7 +62,7 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
     return () => {
       cancelled = true;
     };
-  }, [baseUrl, token, jobId]);
+  }, [baseUrl, token, jobId, reload]);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +73,7 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
     return () => {
       cancelled = true;
     };
-  }, [baseUrl, token, jobId, offset, onlyProblems]);
+  }, [baseUrl, token, jobId, offset, onlyProblems, reload]);
 
   const chunks = page?.chunks ?? [];
   const summary = page ? pageSummary(page.total, page.offset, chunks.length) : null;
@@ -140,9 +158,32 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
                 </p>
                 <div className="compare-target">
                   {label && <span className="compare-tag">{label}</span>}
+                  {kind === "failed" && (
+                    <p className="compare-reason">{explainFailure(c.failure_reasons)}</p>
+                  )}
                   <p>
                     <InlineText text={translationText(c)} />
                   </p>
+                  {kind === "failed" && c.candidate && (
+                    <div className="compare-candidate">
+                      <span className="compare-tag">VERSIÓN DEL MODELO · NO SE USÓ</span>
+                      <p>
+                        <InlineText text={c.candidate} />
+                      </p>
+                      {candidateWarning(c) && (
+                        <p role="alert" className="compare-reason">
+                          ⚠ {candidateWarning(c)}
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        disabled={accepting !== null}
+                        onClick={() => void keepCandidate(c.index)}
+                      >
+                        {accepting === c.index ? "Guardando…" : "Usar esta versión"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             );
