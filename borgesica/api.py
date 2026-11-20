@@ -68,7 +68,7 @@ from borgesica.domain.narrators import (
     chapter_key,
     list_chapters,
 )
-from borgesica.domain.orchestrator import TranslationOrchestrator
+from borgesica.domain.orchestrator import REJECTED_CANDIDATE_KEY, TranslationOrchestrator
 from borgesica.domain.ports import (
     CheckpointStore,
     CorpusStore,
@@ -667,6 +667,65 @@ class TranslatorEngine:
             for c in sorted(chunks, key=lambda c: c.index)
             if c.status == ChunkStatus.FAILED
         }
+
+    # ------------------------------------------------------------------
+    # accept_failed_chunk
+    # ------------------------------------------------------------------
+
+    def accept_failed_chunk(self, job_id: str, index: int) -> Job:
+        """Keep the translation a FAILED chunk produced, and rewrite the output.
+
+        The chunk becomes DONE with its best rejected candidate (see
+        ``REJECTED_CANDIDATE_KEY``), flagged ``passed_validation=False`` so it
+        still counts as best effort. A candidate whose paragraph count differs
+        from the source is accepted only for EPUBs: their writer maps
+        paragraphs to nodes defensively, whereas a subtitle file would lose
+        its cue timing.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+            JobStateError: if the job is RUNNING.
+            ValueError: if the chunk does not exist, is not FAILED, has no
+                candidate, or its candidate may not be accepted for this format.
+        """
+        job = self._load_job_or_raise(job_id)
+        if job.status == JobStatus.RUNNING:
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        chunks = self._checkpoint.load_chunks(job_id)
+        chunk = next((c for c in chunks if c.index == index), None)
+        if chunk is None:
+            raise ValueError(f"job {job_id} has no chunk {index}")
+        if chunk.status != ChunkStatus.FAILED:
+            raise ValueError(f"chunk {index} did not fail")
+        candidate = chunk.meta.get(REJECTED_CANDIDATE_KEY)
+        if not candidate or not candidate.get("text"):
+            raise ValueError(f"chunk {index} has no translation to keep")
+        if not candidate.get("aligned") and job.config.source_type != SourceType.EPUB:
+            raise ValueError(
+                f"chunk {index}: a translation with a different number of segments "
+                "can only be kept in an EPUB"
+            )
+        if not job.out_path:
+            raise ValueError(f"job {job_id} has no output file to update")
+        kept = chunk.model_copy(
+            update={
+                "status": ChunkStatus.DONE,
+                "translated_text": candidate["text"],
+                "passed_validation": False,
+                "meta": {k: v for k, v in chunk.meta.items() if k != REJECTED_CANDIDATE_KEY},
+            }
+        )
+        # Write the output BEFORE persisting the change: if the writer fails,
+        # the chunk stays FAILED and the stored job matches the file on disk.
+        writer = self._writers[job.config.source_type]
+        writer.write(
+            [kept if c.index == index else c for c in chunks],
+            job.source_path,
+            job.out_path,
+            target_lang=job.config.target_lang,
+        )
+        self._checkpoint.save_chunk(job_id, kept)
+        return self._load_job_or_raise(job_id)
 
     # ------------------------------------------------------------------
     # best_effort_chunk_indices

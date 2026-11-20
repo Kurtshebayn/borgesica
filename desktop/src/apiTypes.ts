@@ -120,6 +120,14 @@ export interface ChunkItem {
   /** Null for chunks without a chapter (subtitles). */
   chapter_key: string | null;
   chapter_title: string | null;
+  /** Why a FAILED chunk failed (the engine's validator messages); empty
+   * otherwise. Optional so an older engine's payload still type-checks. */
+  failure_reasons?: string[];
+  /** The best translation a FAILED chunk produced, which the person may keep. */
+  candidate?: string | null;
+  /** False when the candidate has a different number of paragraphs than the
+   * source, so its text can land on the wrong node after the divergence. */
+  candidate_aligned?: boolean | null;
 }
 
 /** GET /jobs/{id}/chunks: one page in reading order. `total` counts the chunks
@@ -177,6 +185,9 @@ export interface JobResponse {
    * a "DONE" run actually produced untranslated output. */
   failed_count: number;
   failed_indices: number[];
+  /** Each failed chunk's engine messages, keyed by its 0-based index (JSON
+   * keys are strings). */
+  failed_errors?: Record<string, string[]>;
   /** True once the explicit pre-translation glossary pass has run for the
    * job, so an empty glossary that was never extracted can be told apart
    * from one that was. */

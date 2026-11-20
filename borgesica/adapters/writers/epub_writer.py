@@ -185,6 +185,18 @@ def _copy_element_no_ns(
     namespace declarations, not real content attributes, and are already
     implied by the document's root namespace.
     """
+    if not isinstance(src.tag, str):
+        # An HTML comment or processing instruction (publishers leave
+        # template notes such as "<!--PROD: ...-->" in copyright pages): it has
+        # no tag name to recreate, so it is dropped — but the text that
+        # follows it belongs to the paragraph and is kept.
+        if src.tail:
+            if len(parent):
+                parent[-1].tail = (parent[-1].tail or "") + src.tail
+            else:
+                parent.text = (parent.text or "") + src.tail
+        return
+
     local = _local_tag(src)
     # Re-create the element without namespace
     new_el = etree.SubElement(parent, local)

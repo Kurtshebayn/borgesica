@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from borgesica.api import TranslatorEngine
 from borgesica.domain.models import (
+    ChunkStatus,
     GlossaryEntry,
     GlossaryExtractionOutcome,
     JobStatus,
@@ -154,6 +155,27 @@ def test_resume_without_out_path_writes_to_the_library(tmp_path: Path) -> None:
     assert resp.status_code == 202
     client.app.state.runner._handles[job_id].thread.join(timeout=5)
     assert (tmp_path / "library" / "test_es.srt").exists()
+
+
+def test_retrying_failed_chunks_rewrites_the_same_output_file(tmp_path: Path) -> None:
+    engine, checkpoint = _make_engine()
+    client = _app_and_client(engine)
+    job_id = _create_job(client, tmp_path)
+    first = tmp_path / "first.srt"
+    client.post(f"/jobs/{job_id}/run", json={"out_path": str(first)})
+    client.app.state.runner._handles[job_id].thread.join(timeout=5)
+    chunk = checkpoint.load_chunks(job_id)[0]
+    checkpoint.save_chunk(
+        job_id, chunk.model_copy(update={"status": ChunkStatus.FAILED, "translated_text": None})
+    )
+
+    resp = client.post(f"/jobs/{job_id}/resume", json={})
+
+    assert resp.status_code == 202
+    client.app.state.runner._handles[job_id].thread.join(timeout=5)
+    assert first.exists()
+    assert not (tmp_path / "library" / "test_es.srt").exists()
+    assert client.get(f"/jobs/{job_id}").json()["failed_count"] == 0
 
 
 @pytest.mark.parametrize(

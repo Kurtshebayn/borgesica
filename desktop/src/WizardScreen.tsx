@@ -42,6 +42,7 @@ import {
   type Provider,
   type WizardState,
 } from "./wizard";
+import { explainFailure } from "./compare";
 import { glossaryChangesToSave } from "./glossaryReview";
 import { hasNarratorChanges } from "./narrators";
 import { pickSourceFile } from "./filePicker";
@@ -416,6 +417,20 @@ export default function WizardScreen({
     }
   }
 
+  /** Retrying a finished job's failed chunks is the engine's resume: it skips
+   * every DONE chunk and rewrites the same output file. */
+  async function handleRetryFailed() {
+    if (!state.jobId) return;
+    const jobId = state.jobId;
+    try {
+      const job = await resumeJob(baseUrl, token, jobId);
+      dispatch({ type: "RESUME_JOB", job });
+      startWatching(jobId);
+    } catch (err) {
+      dispatch({ type: "RUN_START_FAILED", message: String(err) });
+    }
+  }
+
   async function handleConfirmResume() {
     if (!pendingResume) return;
     const jobId = pendingResume.id;
@@ -764,6 +779,27 @@ export default function WizardScreen({
               untranslated source text. This alert makes that the headline
               instead of a silent success. */}
           {failureSummary && <p role="alert">⚠ {failureSummary}</p>}
+          {state.job && state.job.failed_indices.length > 0 && (
+            <ul className="failure-list">
+              {state.job.failed_indices.map((index) => (
+                <li key={index}>
+                  <strong>Fragmento {index + 1}:</strong>{" "}
+                  {explainFailure(state.job?.failed_errors?.[String(index)])}
+                </li>
+              ))}
+            </ul>
+          )}
+          {state.job && state.job.status === "DONE" && state.job.failed_count > 0 && (
+            <div className="actions">
+              <button className="primary" onClick={() => void handleRetryFailed()}>
+                Reintentar fragmentos fallidos
+              </button>
+              <span className="hint">
+                Solo se vuelven a traducir esos fragmentos (se llama a {provider}, unos
+                centavos) y se actualiza el mismo archivo.
+              </span>
+            </div>
+          )}
           {state.runError && <p role="alert">{state.runError}</p>}
           {bestEffortSummary && <p>{bestEffortSummary}</p>}
           {outputLocation && <p>{outputLocation}</p>}

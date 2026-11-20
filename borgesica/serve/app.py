@@ -53,6 +53,7 @@ from borgesica.serve.schemas import (
     OllamaModelsResponse,
     RunRequest,
     UpdateJobRequest,
+    ChunkItem,
     chunk_to_item,
     default_out_path,
     is_best_effort,
@@ -360,6 +361,24 @@ def create_app(
             chunks=[chunk_to_item(c, ch) for c, ch in rows[offset : offset + limit]],
         )
 
+    @app.post("/jobs/{job_id}/chunks/{index}/accept", response_model=ChunkItem)
+    def accept_failed_chunk(job_id: str, index: int) -> ChunkItem:
+        """Keep the translation a FAILED chunk produced instead of its source,
+        and rewrite the output file. 404 unknown job or chunk, 409 while a run
+        holds the job, 422 when the chunk has nothing to keep (or its
+        candidate may not be kept in this format). Free: no provider call."""
+        job = engine.status(job_id)  # JobNotFoundError -> 404
+        if runner.is_active(job_id):
+            raise JobStateError(job_id=job_id, current_status=str(job.status))
+        try:
+            engine.accept_failed_chunk(job_id, index)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        for chunk, chapter in engine.list_chunks(job_id):
+            if chunk.index == index:
+                return chunk_to_item(chunk, chapter)
+        raise HTTPException(status_code=404, detail=f"no chunk {index}")
+
     @app.get("/jobs/{job_id}/glossary/review", response_model=GlossaryReview)
     def get_glossary_review(job_id: str) -> GlossaryReview:
         """Every glossary entry with its gender evidence and risk flags, for
@@ -385,9 +404,19 @@ def create_app(
 
     @app.post("/jobs/{job_id}/resume", response_model=JobResponse, status_code=202)
     def start_resume(job_id: str, payload: RunRequest) -> JobResponse:
-        """Same background-thread contract as run, via resume_job."""
+        """Same background-thread contract as run, via resume_job. A finished
+        job being resumed is a retry of its FAILED chunks: it rewrites the
+        same output file instead of leaving a second numbered copy."""
         job = engine.status(job_id)
-        out_path = _out_path_for(job, payload)
+        if (
+            job.status == JobStatus.DONE
+            and job.out_path
+            and not payload.out_path
+            and engine.failed_chunk_indices(job_id)
+        ):
+            out_path = job.out_path
+        else:
+            out_path = _out_path_for(job, payload)
         runner.start(job_id, out_path, resume=True)
         return job_to_response(
             job.model_copy(update={"status": JobStatus.RUNNING}),

@@ -10,6 +10,7 @@
  * threaded through explicitly rather than hidden in module state.
  */
 import type {
+  ChunkItem,
   ChunksResponse,
   CreateJobRequest,
   DeleteJobResponse,
@@ -213,6 +214,21 @@ export function resumeJob(baseUrl: string, token: string, jobId: string): Promis
     headers: authHeaders(token, true),
     body: "{}",
   }).then(asJson<JobResponse>);
+}
+
+/** Keeps the translation a FAILED chunk produced instead of its source and
+ * rewrites the output file. Free (no provider call); 409 while a run holds the
+ * job, 422 when the chunk has nothing to keep. */
+export function acceptFailedChunk(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+  index: number,
+): Promise<ChunkItem> {
+  return fetch(`${baseUrl}/jobs/${jobId}/chunks/${index}/accept`, {
+    method: "POST",
+    headers: authHeaders(token, false),
+  }).then(asJson<ChunkItem>);
 }
 
 /** Starts the explicit, PAID pre-translation glossary pass (202; progress

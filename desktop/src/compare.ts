@@ -34,6 +34,53 @@ export function translationText(chunk: ChunkItem): string {
   return chunk.translation ?? "";
 }
 
+/**
+ * Turns the engine's validator messages for a failed chunk into one plain
+ * Spanish explanation. The messages are English and technical ("placeholder
+ * mismatch", "segment count mismatch"); a person needs to know what went
+ * wrong and what it means for the book, not the validator's wording.
+ */
+export function explainFailure(reasons: string[] | undefined): string {
+  const list = reasons ?? [];
+  if (list.length === 0) {
+    return "No quedó registrado el motivo (la traducción es anterior a que se guardaran).";
+  }
+  const lost = list.some((r) => r.includes("placeholder mismatch"));
+  const merged = list.find((r) => r.includes("segment count mismatch"));
+  const provider = list.find((r) => r.includes("provider error"));
+  const script = list.some((r) => r.includes("script, not"));
+  const parts: string[] = [];
+  if (lost) {
+    parts.push(
+      "el modelo omitió o alteró una marca de formato del texto (cursiva, código, salto de línea) en todos los intentos",
+    );
+  }
+  if (merged) {
+    const m = merged.match(/expected (\d+), got (\d+)/);
+    parts.push(
+      m
+        ? `el modelo unió o separó párrafos: devolvió ${m[2]} en vez de ${m[1]}`
+        : "el modelo unió o separó párrafos",
+    );
+  }
+  if (provider) parts.push("el proveedor devolvió un error al traducirlo");
+  if (script) parts.push("el modelo respondió en otro idioma");
+  if (parts.length === 0) parts.push(list[list.length - 1]);
+  const text = parts.join("; ");
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}. El libro conserva el texto original en ese fragmento.`;
+}
+
+/** What a person must know before keeping a failed chunk's candidate; null
+ * when there is nothing to keep or it is safe (same paragraph count). */
+export function candidateWarning(chunk: ChunkItem): string | null {
+  if (chunk.status !== "FAILED" || !chunk.candidate) return null;
+  if (chunk.candidate_aligned !== false) return null;
+  return (
+    "Esta versión tiene un número de párrafos distinto al original: a partir de " +
+    "donde se unieron o separaron, el texto puede quedar en el lugar de otro párrafo de este fragmento."
+  );
+}
+
 /** The chunk number a person sees (the engine counts from 0). */
 export function displayNumber(chunk: ChunkItem): number {
   return chunk.index + 1;
