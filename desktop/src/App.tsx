@@ -26,7 +26,7 @@ const NO_KEY = "sin-clave";
  * by side. */
 type View =
   | { name: "library" }
-  | { name: "translate"; resumeJobId?: string; draft?: boolean }
+  | { name: "translate"; resumeJobId?: string; draft?: boolean; retryFailed?: boolean }
   | { name: "compare"; jobId: string; title: string };
 
 /**
@@ -222,6 +222,7 @@ export default function App() {
                   token={state.token}
                   provider={provider}
                   resumeJobId={view.resumeJobId}
+                  retryFailed={view.retryFailed}
                   resumeDraft={view.draft}
                   onChangeProvider={(jobId) => {
                     setSwitchingDraft(jobId);
@@ -239,6 +240,7 @@ export default function App() {
               jobId={view.jobId}
               title={view.title}
               onBack={() => setView({ name: "library" })}
+              onRetryFailed={() => setView({ name: "translate", resumeJobId: view.jobId, retryFailed: true })}
             />
           )}
         </>

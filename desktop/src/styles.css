@@ -757,6 +757,33 @@ button.chapter[data-active="true"] {
   color: var(--accent);
 }
 
+.compare-row[data-kind="failed"] .compare-target p.compare-reason {
+  font: 12px var(--font-mono);
+  font-style: normal;
+  color: var(--accent);
+}
+
+/* The engine's explanation of a failure: a notice under the row, visibly not
+ * part of either column's text. */
+.compare-notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+  font: 13px/1.5 var(--font-sans, system-ui, sans-serif);
+  color: var(--ink);
+}
+
+.compare-notice strong {
+  font: 11px var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
 .compare-candidate {
   margin-top: var(--s-3, 0.75rem);
   padding-top: var(--s-2);

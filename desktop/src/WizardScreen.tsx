@@ -99,6 +99,7 @@ export default function WizardScreen({
   onRestartSidecar,
   resumeJobId,
   resumeDraft,
+  retryFailed,
   onChangeProvider,
 }: {
   /** Asks the app to swap the provider (restarting the engine) and come back
@@ -108,6 +109,8 @@ export default function WizardScreen({
   resumeJobId?: string;
   /** The job never ran: pick it up at its estimate instead of resuming a run. */
   resumeDraft?: boolean;
+  /** Opened from the compare view's retry button: re-run the failed chunks at once. */
+  retryFailed?: boolean;
   baseUrl: string;
   token: string;
   /** The provider the sidecar was launched with — seeds a provider-appropriate
@@ -377,6 +380,12 @@ export default function WizardScreen({
       );
       if (estimate) dispatch({ type: "ESTIMATE_RECEIVED", estimate });
       if (status.status === "DONE") {
+        if (retryFailed && status.failed_count > 0) {
+          const job = await resumeJob(baseUrl, token, jobId);
+          dispatch({ type: "RESUME_JOB", job });
+          startWatching(jobId);
+          return;
+        }
         dispatch({ type: "RESUME_JOB", job: status });
         return;
       }

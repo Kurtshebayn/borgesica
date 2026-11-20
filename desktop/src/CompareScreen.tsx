@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { acceptFailedChunk, getChunks, getNarrators, getStatus } from "./apiClient";
 import type { ChunksResponse, JobResponse, NarratorChapter } from "./apiTypes";
 import {
@@ -23,10 +23,12 @@ interface Props {
   /** Shown above the pages; the job id when the caller has no title. */
   title?: string;
   onBack: () => void;
+  /** Re-translate the failed chunks (opens the run screen and starts it). */
+  onRetryFailed?: () => void;
 }
 
 /** Original beside translation, chunk by chunk, paged from the engine. */
-export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: Props) {
+export default function CompareScreen({ baseUrl, token, jobId, title, onBack, onRetryFailed }: Props) {
   const [job, setJob] = useState<JobResponse | null>(null);
   const [chapters, setChapters] = useState<NarratorChapter[]>([]);
   const [page, setPage] = useState<ChunksResponse | null>(null);
@@ -98,6 +100,16 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
             {problems > 0 && <span className="flag"> · {problems} con problemas</span>}
           </p>
           <h2>{title ?? jobId}</h2>
+          {job && job.failed_count > 0 && onRetryFailed && (
+            <p>
+              <button type="button" className="primary" onClick={onRetryFailed}>
+                Reintentar fragmentos fallidos
+              </button>{" "}
+              <span className="hint">
+                Solo se vuelven a traducir los {job.failed_count} fallidos (unos centavos).
+              </span>
+            </p>
+          )}
         </div>
       </div>
 
@@ -151,16 +163,14 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
             const kind = chunkKind(c);
             const label = KIND_LABELS[kind];
             return (
-              <div className="compare-cols compare-row" data-kind={kind} key={c.index}>
+              <Fragment key={c.index}>
+              <div className="compare-cols compare-row" data-kind={kind}>
                 <span className="compare-num">{String(displayNumber(c)).padStart(2, "0")}</span>
                 <p className="compare-source">
                   <InlineText text={c.source} />
                 </p>
                 <div className="compare-target">
                   {label && <span className="compare-tag">{label}</span>}
-                  {kind === "failed" && (
-                    <p className="compare-reason">{explainFailure(c.failure_reasons)}</p>
-                  )}
                   <p>
                     <InlineText text={translationText(c)} />
                   </p>
@@ -186,6 +196,13 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack }: 
                   )}
                 </div>
               </div>
+              {kind === "failed" && (
+                <div className="compare-notice" role="note">
+                  <strong>Por qué falló el fragmento {displayNumber(c)}</strong>
+                  <span>{explainFailure(c.failure_reasons)}</span>
+                </div>
+              )}
+              </Fragment>
             );
           })}
           <div className="compare-foot">
