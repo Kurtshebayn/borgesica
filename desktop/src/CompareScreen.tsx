@@ -94,21 +94,23 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack, on
         <button type="button" className="link" onClick={onBack}>
           ← Biblioteca
         </button>
-        <div>
+        <div className="compare-head-main">
+          <div>
           <p className="kicker">
             {job ? `${job.completed_chunks}/${job.total_chunks} fragmentos · $${job.cost_usd.toFixed(3)}` : "Cargando…"}
             {problems > 0 && <span className="flag"> · {problems} con problemas</span>}
           </p>
           <h2>{title ?? jobId}</h2>
+          </div>
           {job && job.failed_count > 0 && onRetryFailed && (
-            <p>
-              <button type="button" className="primary" onClick={onRetryFailed}>
+            <div className="compare-retry">
+              <button type="button" className="danger" onClick={onRetryFailed}>
                 Reintentar fragmentos fallidos
-              </button>{" "}
+              </button>
               <span className="hint">
                 Solo se vuelven a traducir los {job.failed_count} fallidos (unos centavos).
               </span>
-            </p>
+            </div>
           )}
         </div>
       </div>
@@ -164,6 +166,12 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack, on
             const label = KIND_LABELS[kind];
             return (
               <Fragment key={c.index}>
+              {kind === "failed" && (
+                <div className="compare-notice" role="note">
+                  <strong>Por qué falló el fragmento {displayNumber(c)}</strong>
+                  <span>{explainFailure(c.failure_reasons)}</span>
+                </div>
+              )}
               <div className="compare-cols compare-row" data-kind={kind}>
                 <span className="compare-num">{String(displayNumber(c)).padStart(2, "0")}</span>
                 <p className="compare-source">
@@ -196,12 +204,6 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack, on
                   )}
                 </div>
               </div>
-              {kind === "failed" && (
-                <div className="compare-notice" role="note">
-                  <strong>Por qué falló el fragmento {displayNumber(c)}</strong>
-                  <span>{explainFailure(c.failure_reasons)}</span>
-                </div>
-              )}
               </Fragment>
             );
           })}
