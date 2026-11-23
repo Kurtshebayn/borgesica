@@ -63,6 +63,10 @@ def test_jobs_come_newest_first_with_the_documented_fields():
     engine, store = _engine()
     # Saved oldest-first and out of order: creation time decides, not insertion.
     store.save_job(_job("old", 30, "C:/libros/viejo.epub", total_chunks=4, completed_chunks=4, cost_usd=0.5))
+    for i in range(4):  # the count of translated chunks comes from the chunks
+        store.save_chunk(
+            "old", Chunk(index=i, source_text="x", translated_text="y", status=ChunkStatus.DONE)
+        )
     store.save_job(_job("new", 0, "sub.srt", source_type=SourceType.SRT, status=JobStatus.RUNNING))
     store.save_job(_job("mid", 10, "otro.epub"))
 

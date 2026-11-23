@@ -23,7 +23,7 @@ from borgesica.domain.models import (
     JobStatus,
 )
 from borgesica.domain.narrators import Chapter, NarratorAssignment
-from borgesica.domain.orchestrator import REJECTED_CANDIDATE_KEY
+from borgesica.domain.orchestrator import ACCEPTED_BY_USER_KEY, REJECTED_CANDIDATE_KEY
 
 
 class CreateJobRequest(BaseModel):
@@ -107,7 +107,10 @@ class JobListResponse(BaseModel):
 
 
 def job_to_list_item(
-    job: Job, best_effort_indices: list[int], failed_indices: list[int]
+    job: Job,
+    best_effort_indices: list[int],
+    failed_indices: list[int],
+    completed_chunks: int | None = None,
 ) -> JobListItem:
     return JobListItem(
         id=job.id,
@@ -117,7 +120,7 @@ def job_to_list_item(
         target_lang=job.config.target_lang,
         model=job.config.model,
         total_chunks=job.total_chunks,
-        completed_chunks=job.completed_chunks,
+        completed_chunks=job.completed_chunks if completed_chunks is None else completed_chunks,
         cost_usd=job.cost_usd,
         failed_count=len(failed_indices),
         best_effort_count=len(best_effort_indices),
@@ -155,6 +158,7 @@ def job_to_response(
     failed_indices: list[int] | None = None,
     failed_errors: dict[int, list[str]] | None = None,
     out_path: str | None = None,
+    completed_chunks: int | None = None,
 ) -> JobResponse:
     """Pure mapping from Job + best-effort/failed indices to JobResponse."""
     failed_indices = failed_indices or []
@@ -164,7 +168,7 @@ def job_to_response(
         status=job.status,
         model=job.config.model,
         total_chunks=job.total_chunks,
-        completed_chunks=job.completed_chunks,
+        completed_chunks=job.completed_chunks if completed_chunks is None else completed_chunks,
         cost_usd=job.cost_usd,
         best_effort_count=len(best_effort_indices),
         best_effort_indices=best_effort_indices,
@@ -290,7 +294,11 @@ def _failure_reasons(chunk: Chunk) -> list[str]:
 
 def is_best_effort(chunk: Chunk) -> bool:
     """Same rule as TranslatorEngine.best_effort_chunk_indices."""
-    return chunk.status == ChunkStatus.DONE and not chunk.passed_validation
+    return (
+        chunk.status == ChunkStatus.DONE
+        and not chunk.passed_validation
+        and not chunk.meta.get(ACCEPTED_BY_USER_KEY)
+    )
 
 
 class DeleteJobResponse(BaseModel):

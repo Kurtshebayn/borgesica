@@ -222,6 +222,7 @@ def create_app(
             failed_indices,
             failed_errors,
             out_path=runner.out_path_for(job_id) or job.out_path,
+            completed_chunks=engine.completed_chunk_count(job_id),
         )
 
     @app.get("/jobs", response_model=JobListResponse)
@@ -234,6 +235,7 @@ def create_app(
                     job,
                     engine.best_effort_chunk_indices(job.id),
                     engine.failed_chunk_indices(job.id),
+                    engine.completed_chunk_count(job.id),
                 )
                 for job in engine.list_jobs()
             ]

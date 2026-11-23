@@ -205,6 +205,10 @@ _WAIT_POLL_SECONDS = 0.5
 # "\n\n" segments as the source, i.e. it can be placed node by node.
 REJECTED_CANDIDATE_KEY = "rejected_candidate"
 
+# Set on a chunk the person chose to keep after validation rejected it: the
+# text is theirs now, so it no longer counts as a problem to review.
+ACCEPTED_BY_USER_KEY = "accepted_by_user"
+
 
 def _finished_chunk(
     chunk: Chunk,
