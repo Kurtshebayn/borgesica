@@ -1248,3 +1248,50 @@ def test_run_and_extraction_share_one_usage_cost_formula():
     assert orchestrator.usage_cost is usage_cost
     assert api.usage_cost is usage_cost
     assert not hasattr(orchestrator.TranslationOrchestrator, "_usage_cost")
+
+
+# --- time-of-day pricing (DeepSeek off-peak is 50% of peak) -----------------
+
+
+def _deepseek_provider():
+    from borgesica.adapters.providers.openai_compatible_provider import (
+        OpenAICompatibleProvider,
+    )
+
+    return OpenAICompatibleProvider.deepseek(api_key="k", _client=object())
+
+
+def test_deepseek_peak_hours_are_billed_at_listed_price():
+    from datetime import UTC, datetime
+
+    # Thursday 2026-11-19 08:00 UTC is inside 06:00-10:00 peak.
+    p = _deepseek_provider()
+    assert p.spend_multiplier("deepseek-v4-flash", datetime(2026, 11, 19, 8, tzinfo=UTC)) == 1.0
+
+
+def test_deepseek_off_peak_hours_are_half_price():
+    from datetime import UTC, datetime
+
+    p = _deepseek_provider()
+    # Thursday 19:19 UTC (the real run), and a Saturday morning.
+    assert p.spend_multiplier("deepseek-v4-flash", datetime(2026, 11, 19, 19, 19, tzinfo=UTC)) == 0.5
+    assert p.spend_multiplier("deepseek-v4-flash", datetime(2026, 11, 21, 8, tzinfo=UTC)) == 0.5
+
+
+def test_spend_prices_scales_all_three_rates_and_defaults_to_one():
+    from datetime import UTC, datetime
+
+    from borgesica.domain.cost import spend_prices
+
+    off_peak = datetime(2026, 11, 19, 19, tzinfo=UTC)
+    in_p, out_p, cache_p = spend_prices(_deepseek_provider(), "deepseek-v4-flash", off_peak)
+    assert (in_p, out_p, cache_p) == (0.15, 0.6, 0.003)
+
+    class Plain:
+        def price(self, model):
+            return (1.0, 2.0)
+
+        def cache_price(self, model):
+            return 0.5
+
+    assert spend_prices(Plain(), "m", off_peak) == (1.0, 2.0, 0.5)

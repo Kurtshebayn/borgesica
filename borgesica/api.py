@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from borgesica.domain.chunking import SrtChunker, chunk_prose
 from borgesica.domain.context import ContextManager
-from borgesica.domain.cost import CostEstimator, usage_cost
+from borgesica.domain.cost import CostEstimator, spend_prices, usage_cost
 from borgesica.domain.errors import (
     BudgetExceeded,
     ExtractionStopped,
@@ -385,9 +385,6 @@ class TranslatorEngine:
         batches = plan_extraction_batches(
             texts, lambda text: self._provider.count_tokens(text, model)
         )
-        in_price, out_price = self._provider.price(model)
-        cache_price = self._provider.cache_price(model)
-
         # The pass owns two fields of the job, ``cost_usd`` and
         # ``glossary_extracted``, and nothing else. Every save re-loads the
         # job and changes only those: saving the copy loaded at the start
@@ -409,7 +406,9 @@ class TranslatorEngine:
         def accrue(usage: Usage) -> tuple[Job, float]:
             # The orchestrator's own usage pricing, so a dollar spent here is
             # the same dollar its budget guard counts during translation.
-            cost = usage_cost(usage, in_price, out_price, cache_price)
+            cost = usage_cost(
+                usage, *spend_prices(self._provider, model, datetime.now(UTC))
+            )
             current = self._load_job_or_raise(job_id)
             updated = current.model_copy(
                 update={

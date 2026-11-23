@@ -74,6 +74,7 @@ from borgesica.domain.cost import (
     _waste_factor,
     chunk_output_tokens,
     CostEstimator,
+    spend_prices,
     usage_cost,
 )
 from borgesica.domain.errors import (
@@ -548,8 +549,10 @@ class TranslationOrchestrator:
                     )
 
                     # Fetch price once per chunk (same model throughout).
-                    in_price, out_price = self._provider.price(config.model)
-                    cache_price = self._provider.cache_price(config.model)
+                    # Real spend, so time-of-day pricing applies here.
+                    in_price, out_price, cache_price = spend_prices(
+                        self._provider, config.model, datetime.now(UTC)
+                    )
 
                     # PRIMARY: send source_text WITH tags (do NOT strip up front).
                     # The system prompt instructs the model to carry every tag
@@ -672,6 +675,7 @@ class TranslationOrchestrator:
                     update={
                         "status": JobStatus.PAUSED,
                         "cost_usd": running_cost,
+                        "completed_chunks": completed,
                         "updated_at": datetime.now(UTC),
                     }
                 )
@@ -683,6 +687,7 @@ class TranslationOrchestrator:
                 update={
                     "status": stop,
                     "cost_usd": running_cost,
+                    "completed_chunks": completed,
                     "updated_at": datetime.now(UTC),
                 }
             )
@@ -696,6 +701,7 @@ class TranslationOrchestrator:
             update={
                 "status": JobStatus.DONE,
                 "cost_usd": running_cost,
+                "completed_chunks": completed,
                 "updated_at": datetime.now(UTC),
             }
         )
