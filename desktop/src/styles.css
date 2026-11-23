@@ -769,6 +769,18 @@ button.chapter[data-active="true"] {
   color: var(--text-muted);
 }
 
+.compare-candidate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-2);
+}
+
+.compare-candidate-head .compare-tag {
+  margin-bottom: 0;
+}
+
 .compare-tag {
   display: block;
   margin-bottom: var(--s-2);
@@ -1227,4 +1239,9 @@ button.danger {
 button.danger:hover:not(:disabled) {
   background: #b82d16;
   border-color: #b82d16;
+}
+
+.compare-candidate-head button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }

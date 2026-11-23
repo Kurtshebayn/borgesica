@@ -184,22 +184,24 @@ export default function CompareScreen({ baseUrl, token, jobId, title, onBack, on
                   </p>
                   {kind === "failed" && c.candidate && (
                     <div className="compare-candidate">
-                      <span className="compare-tag">VERSIÓN DEL MODELO · NO SE USÓ</span>
-                      <p>
-                        <InlineText text={c.candidate} />
-                      </p>
+                      <div className="compare-candidate-head">
+                        <span className="compare-tag">VERSIÓN DEL MODELO · NO SE USÓ</span>
+                        <button
+                          type="button"
+                          disabled={accepting !== null}
+                          onClick={() => void keepCandidate(c.index)}
+                        >
+                          {accepting === c.index ? "Guardando…" : "Usar esta versión"}
+                        </button>
+                      </div>
                       {candidateWarning(c) && (
                         <p role="alert" className="compare-reason">
                           ⚠ {candidateWarning(c)}
                         </p>
                       )}
-                      <button
-                        type="button"
-                        disabled={accepting !== null}
-                        onClick={() => void keepCandidate(c.index)}
-                      >
-                        {accepting === c.index ? "Guardando…" : "Usar esta versión"}
-                      </button>
+                      <p>
+                        <InlineText text={c.candidate} />
+                      </p>
                     </div>
                   )}
                 </div>
