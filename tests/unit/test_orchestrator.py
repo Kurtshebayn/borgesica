@@ -153,6 +153,9 @@ def test_run_job_basic_3_chunks_done():
 
     assert provider.call_count == 3
     assert result.status == JobStatus.DONE
+    # The library card reads completed/total from the stored job.
+    assert result.completed_chunks == 3
+    assert store.load_job(job.id).completed_chunks == 3
 
 
 # ===========================================================================

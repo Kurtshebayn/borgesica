@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import random
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import openai
@@ -754,6 +755,24 @@ class OpenAICompatibleProvider:
         Falls back to _FALLBACK_PRICE for unknown models.
         """
         return self._price_table.get(model, _FALLBACK_PRICE)
+
+    def spend_multiplier(self, model: str, at: datetime) -> float:  # noqa: ARG002
+        """Factor applied to the listed price of a call made at ``at``.
+
+        Only DeepSeek bills by time of day: its off-peak rates are 50% of the
+        peak ones everywhere outside 01:00-04:00 and 06:00-10:00 UTC on
+        Monday-Friday (api-docs.deepseek.com/quick_start/pricing, read
+        2026-11-20). Chinese public holidays are off-peak too, but are not
+        modelled here, so a holiday call is priced at peak: an overcount,
+        never an undercount. Estimates and the budget projection ignore this
+        and stay at the listed peak price.
+        """
+        if "api.deepseek.com" not in self._base_url:
+            return 1.0
+        moment = at.astimezone(UTC)
+        if moment.weekday() < 5 and (1 <= moment.hour < 4 or 6 <= moment.hour < 10):
+            return 1.0
+        return 0.5
 
     def cache_price(self, model: str) -> float:
         """Return USD per Mtok for input tokens served from the prompt cache.

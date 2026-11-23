@@ -22,6 +22,7 @@ user and the HTTP schema carries it.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from borgesica.domain.glossary import extraction_prompts, plan_extraction_batches
@@ -147,6 +148,22 @@ def output_model(source_type: SourceType) -> _OutputModel:
     segmented `translations` array, and only SRT was measured separately.
     """
     return _SRT_OUTPUT_MODEL if source_type == SourceType.SRT else _PROSE_OUTPUT_MODEL
+
+
+def spend_prices(
+    provider: object, model: str, at: datetime
+) -> tuple[float, float, float]:
+    """(input, output, cache) USD per Mtok to bill a call made at ``at``.
+
+    The listed prices times the provider's ``spend_multiplier`` (providers
+    without time-of-day pricing do not define it: factor 1). For real spend
+    only; estimates keep the listed price so they never undershoot.
+    """
+    in_price, out_price = provider.price(model)  # type: ignore[attr-defined]
+    cache_price = provider.cache_price(model)  # type: ignore[attr-defined]
+    multiplier = getattr(provider, "spend_multiplier", None)
+    factor = multiplier(model, at) if callable(multiplier) else 1.0
+    return in_price * factor, out_price * factor, cache_price * factor
 
 
 def usage_cost(
