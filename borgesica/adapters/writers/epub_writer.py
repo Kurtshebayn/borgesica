@@ -210,8 +210,16 @@ def _copy_element_no_ns(
             local_attr = attr.split(":", 1)[1]
         else:
             local_attr = attr
-        if not local_attr.startswith("xmlns"):
+        if local_attr.startswith("xmlns"):
+            continue
+        try:
             new_el.set(local_attr, val)
+        except ValueError:
+            # A tolerant HTML parse can yield "attributes" that are not valid
+            # XML names (an empty name, or text such as "containers:" from a
+            # tag the model left half-written). Dropping one keeps the text
+            # and the other attributes instead of aborting the whole book.
+            logger.warning("EpubWriter: dropped invalid attribute name %r", attr)
 
     new_el.text = src.text
     new_el.tail = src.tail
