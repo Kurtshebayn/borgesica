@@ -624,6 +624,32 @@ label.check .flag {
   margin-bottom: var(--s-5);
 }
 
+.compare-head-main {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-5);
+}
+
+.compare-retry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s-2);
+  max-width: 280px;
+  text-align: right;
+}
+
+button.danger {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+button.danger:hover:not(:disabled) {
+  background: #b92d16;
+}
+
 .compare-head h2 {
   margin: 0;
   font-size: 2.4rem;
@@ -741,6 +767,18 @@ button.chapter[data-active="true"] {
 .compare-row[data-kind="failed"] .compare-target p {
   font-style: italic;
   color: var(--text-muted);
+}
+
+.compare-candidate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-2);
+}
+
+.compare-candidate-head .compare-tag {
+  margin-bottom: 0;
 }
 
 .compare-tag {
@@ -1201,4 +1239,9 @@ button.danger {
 button.danger:hover:not(:disabled) {
   background: #b82d16;
   border-color: #b82d16;
+}
+
+.compare-candidate-head button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
