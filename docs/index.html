@@ -90,28 +90,22 @@
     }
     .frame img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; object-position: 46% 50%; }
 
-    /* The live 3D window. It is a viewport-sized box scaled down into the
-       right-hand slot (so the WebGL canvas stays sharp) and grown back up as
-       you scroll. The mat, border and shadow are in design px at full size, so
-       they read as the thin frame above once scaled; the 1.1 end scale pushes
-       them off-screen. The static .fallback figure keeps the slot's place. */
-    .plate3d {
-      display: none; position: absolute; left: 0; top: 0; width: 100%; height: 100%;
-      padding: 32px; border: 3px solid var(--ink); background: var(--surface);
-      box-shadow: 24px 24px 0 rgb(15 27 45 / 10%);
-      z-index: 1; opacity: 0; will-change: transform; pointer-events: none;
-    }
+    /* The live library. It covers the static image inside the same frame and
+       only drifts a little, so the page feels alive without anything to scroll
+       through. If WebGL is unavailable the image underneath is what shows. */
+    .frame { position: relative; }
+    .plate3d { display: none; position: absolute; inset: 10px; opacity: 0; pointer-events: none; }
     .gl .plate3d { display: block; }
-    section.block.over { position: relative; z-index: 4; background: var(--bg); }
     .plate3d canvas { display: block; width: 100%; height: 100%; }
-    .gl .fallback { visibility: hidden; }
 
-    /* Scroll cue and the paper-coloured veil the zoom dissolves into. */
-    .hint { display: none; position: absolute; left: 0; right: 0; bottom: 14px; flex-direction: column; align-items: center; gap: 10px; z-index: 2; }
-    .js .hint { display: flex; }
-    .hint::after { content: ""; width: 1px; height: 34px; background: var(--ink); transform-origin: top; animation: cue 1.8s ease-in-out infinite; }
-    @keyframes cue { 0% { transform: scaleY(0); opacity: 1; } 55% { transform: scaleY(1); opacity: 1; } 100% { transform: scaleY(1); opacity: 0; } }
-    .paper { position: absolute; inset: 0; background: var(--bg); opacity: 0; pointer-events: none; z-index: 3; }
+    /* ---- Statement: a large line whose words come into focus as you scroll ---- */
+    .statement { padding: clamp(72px, 12vw, 160px) 0; border-top: 1px solid var(--rule-strong); }
+    .statement p {
+      margin: 0 auto; max-width: 24em;
+      font: 400 clamp(1.8rem, 4vw, 3.2rem)/1.2 var(--font-display); letter-spacing: -0.015em;
+    }
+    .statement em { font-style: italic; color: var(--accent); }
+    .statement .w { display: inline-block; will-change: opacity, filter; }
 
     /* ---- Entrance doors: only exist while JS is running the intro ---- */
     /* No scrollbar while the doors are up: its disappearing would resize them. */
@@ -190,7 +184,6 @@
     /* ---- Mobile: everything collapses to one column ---- */
     @media (max-width: 820px) {
       .hero .wrap, section.block .wrap { grid-template-columns: 1fr; }
-      .hint { display: none !important; }
       .hero { min-height: 0; padding: 112px 0 56px; }
       .limits { columns: 1; }
       .bar nav { gap: 18px; }
@@ -232,12 +225,16 @@
         <figure class="fallback rise" style="--i:2">
           <div class="frame">
             <img src="banner.webp" width="2000" height="667" alt="Un hombre con sombrero mira una galería de estanterías infinitas, enmarcado por hexágonos.">
+            <div class="plate3d" aria-hidden="true"><canvas id="gl"></canvas></div>
           </div>
         </figure>
       </div>
-      <div class="plate3d" aria-hidden="true"><canvas id="gl"></canvas></div>
-      <div class="hint" aria-hidden="true"><span class="label rise" style="--i:6">Desplaza para entrar</span></div>
-      <div class="paper" aria-hidden="true"></div>
+    </section>
+
+    <section class="statement" aria-label="Qué las distingue">
+      <div class="wrap">
+        <p data-reveal>Un libro no se traduce frase por frase, sino de punta a punta: los nombres no cambian entre capítulos, quien dice «yo» no se inventa y sabes <em>cuánto costará</em> antes de empezar.</p>
+      </div>
     </section>
 
     <section class="block" aria-labelledby="h-que">
@@ -348,7 +345,7 @@
     ];
     const IMG_ASPECT = 1672 / 941;
     const FEATHER = 0.3; // soft edge of each window, as a fraction of its height
-    const END_SCALE = 1.3; // how large the far end of the aisle gets at the end of the scroll
+    const END_SCALE = 1.3; // how large the far end of the aisle gets at p = 1 (the page only uses the first few percent)
 
     async function buildWorld(THREE, canvas) {
       const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -433,61 +430,11 @@
     }
 
     /* ------------------------------------------------------------------
-       Scroll: the page pins, the framed window grows to fill the screen and
-       the camera walks down the aisle; the end dissolves into the paper.
+       The library only drifts: a slow push in and out plus a little parallax
+       that follows the pointer. Nothing is tied to the scroll.
        ------------------------------------------------------------------ */
-    function setupScroll(world) {
+    function animateWorld(world) {
       const hero = document.querySelector('.hero');
-      const plate = hero.querySelector('.plate3d');
-      const slot = hero.querySelector('.fallback .frame');
-      const copy = hero.querySelector('.copy');
-      const paper = hero.querySelector('.paper');
-      const hint = hero.querySelector('.hint');
-      const state = { p: 0 };
-      const geo = { s: 0.4, x: 0, y: 0 };
-      let tl = null;
-
-      // Where the small window sits: the (hidden) static figure keeps its place.
-      // The next section is pulled up over the pinned hero, so it slides in
-      // the moment the animation ends instead of after a blank screen.
-      const next = hero.nextElementSibling;
-      next.classList.add('over');
-      const measure = () => {
-        next.style.marginTop = -hero.offsetHeight + 'px';
-        const keep = tl ? tl.progress() : 0;
-        if (tl) tl.progress(0);
-        // Layout offsets ignore transforms, so the slot's entrance animation
-        // (a small rise) cannot skew where the window sits.
-        let left = 0, top = 0;
-        for (let el = slot; el && el !== hero; el = el.offsetParent) {
-          left += el.offsetLeft; top += el.offsetTop;
-        }
-        const w = slot.offsetWidth, hgt = slot.offsetHeight;
-        geo.s = w / plate.offsetWidth;
-        geo.x = left + w / 2 - hero.clientWidth / 2;
-        geo.y = top + hgt / 2 - hero.clientHeight / 2;
-        if (tl) tl.progress(keep);
-      };
-      measure();
-      gsap.set(plate, { scale: geo.s, x: geo.x, y: geo.y });
-
-      tl = gsap.timeline({
-        defaults: { ease: 'none' },
-        scrollTrigger: {
-          // 160% of animation; the next section starts sliding over it at 120%.
-          trigger: hero, start: 'top top', end: '+=220%',
-          pin: true, scrub: 0.5, invalidateOnRefresh: true, onRefreshInit: measure,
-        },
-      });
-      tl.fromTo(plate,
-          { scale: () => geo.s, x: () => geo.x, y: () => geo.y },
-          { scale: 1.1, x: 0, y: 0, ease: 'power2.inOut', duration: 0.8 }, 0)
-        .to(copy, { opacity: 0, x: -80, duration: 0.3 }, 0)
-        .to(hint, { opacity: 0, duration: 0.1 }, 0)
-        .to(state, { p: 1, ease: 'power1.in', duration: 1 }, 0)
-        .to(paper, { opacity: 1, duration: 0.35, ease: 'power1.in' }, 0.65)
-        .to({}, { duration: 0.375 }, 1);
-
       let active = true;
       new IntersectionObserver(([entry]) => { active = entry.isIntersecting; }).observe(hero);
       const ptr = { x: 0, y: 0, tx: 0, ty: 0 };
@@ -502,7 +449,42 @@
         if (world.lite && (frame++ % 3)) return;
         ptr.x += (ptr.tx - ptr.x) * 0.05;
         ptr.y += (ptr.ty - ptr.y) * 0.05;
-        world.render(state.p, time, ptr.x, ptr.y);
+        world.render(0.04 + 0.035 * Math.sin(time * 0.25), time, ptr.x * 2, ptr.y * 2);
+      });
+    }
+
+    /* ------------------------------------------------------------------
+       Statement: each word starts faint and blurred and comes into focus as
+       the line scrolls through the middle of the screen.
+       ------------------------------------------------------------------ */
+    function setupReveal() {
+      document.querySelectorAll('[data-reveal]').forEach((el) => {
+        const words = [];
+        const split = (node) => {
+          [...node.childNodes].forEach((child) => {
+            if (child.nodeType === 3) {
+              const frag = document.createDocumentFragment();
+              child.textContent.split(/(\s+)/).forEach((part) => {
+                if (!part) return;
+                if (/^\s+$/.test(part)) { frag.append(' '); return; }
+                const span = document.createElement('span');
+                span.className = 'w';
+                span.textContent = part;
+                words.push(span);
+                frag.append(span);
+              });
+              child.replaceWith(frag);
+            } else if (child.nodeType === 1) {
+              split(child);
+            }
+          });
+        };
+        split(el);
+        gsap.set(words, { opacity: 0.12, filter: 'blur(7px)' });
+        gsap.to(words, {
+          opacity: 1, filter: 'blur(0px)', ease: 'none', stagger: 0.12,
+          scrollTrigger: { trigger: el, start: 'top 82%', end: 'bottom 48%', scrub: 0.4 },
+        });
       });
     }
 
@@ -532,7 +514,8 @@
           world = null;
         }
       }
-      if (world) setupScroll(world);
+      if (world) animateWorld(world);
+      if (!reduce) setupReveal();
 
       // 2. The doors. They hold ~1.9s from page load, then open over 2.9s.
       if (reduce) {
