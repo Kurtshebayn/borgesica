@@ -68,7 +68,11 @@ from borgesica.domain.narrators import (
     chapter_key,
     list_chapters,
 )
-from borgesica.domain.orchestrator import REJECTED_CANDIDATE_KEY, TranslationOrchestrator
+from borgesica.domain.orchestrator import (
+    ACCEPTED_BY_USER_KEY,
+    REJECTED_CANDIDATE_KEY,
+    TranslationOrchestrator,
+)
 from borgesica.domain.ports import (
     CheckpointStore,
     CorpusStore,
@@ -675,8 +679,9 @@ class TranslatorEngine:
         """Keep the translation a FAILED chunk produced, and rewrite the output.
 
         The chunk becomes DONE with its best rejected candidate (see
-        ``REJECTED_CANDIDATE_KEY``), flagged ``passed_validation=False`` so it
-        still counts as best effort. A candidate whose paragraph count differs
+        ``REJECTED_CANDIDATE_KEY``), flagged ``passed_validation=False`` (it did not
+        pass validation) but marked as kept by the person, so it is not listed
+        as a problem to review. A candidate whose paragraph count differs
         from the source is accepted only for EPUBs: their writer maps
         paragraphs to nodes defensively, whereas a subtitle file would lose
         its cue timing.
@@ -711,7 +716,10 @@ class TranslatorEngine:
                 "status": ChunkStatus.DONE,
                 "translated_text": candidate["text"],
                 "passed_validation": False,
-                "meta": {k: v for k, v in chunk.meta.items() if k != REJECTED_CANDIDATE_KEY},
+                "meta": {
+                    **{k: v for k, v in chunk.meta.items() if k != REJECTED_CANDIDATE_KEY},
+                    ACCEPTED_BY_USER_KEY: True,
+                },
             }
         )
         # Write the output BEFORE persisting the change: if the writer fails,
@@ -733,8 +741,9 @@ class TranslatorEngine:
     def best_effort_chunk_indices(self, job_id: str) -> list[int]:
         """Return the sorted list of DONE chunk indices with passed_validation=False.
 
-        Pure pass-through over per-chunk state already persisted by the
-        checkpoint store (design decision #9). Used by the CLI end-of-run
+        Chunks the person chose to keep after a rejection are left out: they
+        reviewed those. Pure pass-through over per-chunk state already
+        persisted by the checkpoint store (design decision #9). Used by the CLI end-of-run
         summary and (v1) the serve API's job status payload.
 
         Args:
@@ -751,8 +760,23 @@ class TranslatorEngine:
         return sorted(
             c.index
             for c in chunks
-            if c.status == ChunkStatus.DONE and not c.passed_validation
+            if c.status == ChunkStatus.DONE
+            and not c.passed_validation
+            and not c.meta.get(ACCEPTED_BY_USER_KEY)
         )
+
+    def completed_chunk_count(self, job_id: str) -> int:
+        """Return how many chunks are DONE, counted from the chunks themselves.
+
+        ``Job.completed_chunks`` is only as good as the run that wrote it:
+        jobs finished before it was stored read 0. The chunks are the truth.
+
+        Raises:
+            JobNotFoundError: if job_id is not found.
+        """
+        self._load_job_or_raise(job_id)
+        chunks = self._checkpoint.load_chunks(job_id)
+        return sum(1 for c in chunks if c.status == ChunkStatus.DONE)
 
     # ------------------------------------------------------------------
     # list_chunks

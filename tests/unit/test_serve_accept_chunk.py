@@ -60,13 +60,13 @@ def test_chunks_payload_exposes_the_candidate_and_its_alignment():
     assert failed["candidate_aligned"] is False
 
 
-def test_accepting_marks_the_chunk_best_effort_and_rewrites_the_output():
+def test_accepting_keeps_the_candidate_and_rewrites_the_output():
     client, store, writer = _setup({"text": "B C", "aligned": False})
 
     resp = client.post("/jobs/job-a/chunks/1/accept")
 
     assert resp.status_code == 200
-    assert resp.json()["status"] == "DONE" and resp.json()["best_effort"] is True
+    assert resp.json()["status"] == "DONE"
     saved = store.load_chunks("job-a")[1]
     assert saved.translated_text == "B C" and saved.passed_validation is False
     assert "rejected_candidate" not in saved.meta
@@ -103,3 +103,44 @@ def test_a_failing_writer_leaves_the_chunk_failed():
     assert client.post("/jobs/job-a/chunks/1/accept").status_code == 422
     saved = store.load_chunks("job-a")[1]
     assert saved.status == ChunkStatus.FAILED and saved.translated_text is None
+
+
+def test_a_chunk_the_person_kept_is_no_longer_a_problem():
+    client, store, _ = _setup({"text": "B C", "aligned": False})
+    assert client.post("/jobs/job-a/chunks/1/accept").status_code == 200
+
+    # It still records that validation rejected it...
+    assert store.load_chunks("job-a")[1].passed_validation is False
+    # ...but the person reviewed it: not best effort, not a problem to list.
+    assert client.get("/jobs/job-a/chunks").json()["chunks"][1]["best_effort"] is False
+    job = client.get("/jobs/job-a").json()
+    assert job["best_effort_count"] == 0 and job["best_effort_indices"] == []
+    assert client.get("/jobs/job-a/chunks?only_problems=true").json()["total"] == 0
+    listed = client.get("/jobs").json()["jobs"][0]
+    assert listed["best_effort_count"] == 0 and listed["failed_count"] == 0
+
+
+def test_an_unreviewed_best_effort_chunk_still_counts_as_a_problem():
+    client, store, _ = _setup({"text": "B C", "aligned": False})
+    store.save_chunk(
+        "job-a",
+        Chunk(
+            index=1,
+            source_text="b",
+            translated_text="B",
+            status=ChunkStatus.DONE,
+            passed_validation=False,
+        ),
+    )
+    assert client.get("/jobs/job-a").json()["best_effort_count"] == 1
+
+
+def test_completed_count_comes_from_the_chunks_not_the_stored_number():
+    # The job was stored with completed_chunks=0 (finished before it was kept).
+    client, _, _ = _setup({"text": "B C", "aligned": False})
+    assert client.get("/jobs/job-a").json()["completed_chunks"] == 1
+    assert client.get("/jobs").json()["jobs"][0]["completed_chunks"] == 1
+
+    assert client.post("/jobs/job-a/chunks/1/accept").status_code == 200
+    assert client.get("/jobs/job-a").json()["completed_chunks"] == 2
+    assert client.get("/jobs").json()["jobs"][0]["completed_chunks"] == 2
